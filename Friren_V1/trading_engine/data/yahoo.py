@@ -1,5 +1,7 @@
 import yfinance as yf
 import pandas as pd
+import numpy as np
+
 msft = yf.Ticker("MSFT")
 
 # functions to build
@@ -206,3 +208,118 @@ class StockDataTools:
               print(f"  - {issue}")
 
       return is_valid, issues
+
+  def add_volatility_features(self, df, windows=[5, 10, 20]):
+    """
+    Ok im tired, it is like 1:56 am, claude did this bc he is the goat
+    Add volatility-based features for regime detection
+
+    Args:
+        df: DataFrame with OHLC data
+        windows: List of periods for rolling calculations
+
+    Returns:
+        DataFrame: Enhanced with volatility features
+    """
+    df_vol = df.copy()
+
+    # 1. Calculate daily returns first
+    df_vol['daily_return'] = df_vol['Close'].pct_change()
+
+    # 2. Rolling volatility (standard deviation of returns)
+    for window in windows:
+        df_vol[f'volatility_{window}d'] = df_vol['daily_return'].rolling(window).std()
+
+    # 3. Intraday volatility (High-Low range)
+    df_vol['intraday_range'] = (df_vol['High'] - df_vol['Low']) / df_vol['Close']
+
+    # 4. True Range (more sophisticated volatility measure)
+    df_vol['true_range'] = self._calculate_true_range(df_vol)
+
+    return df_vol
+
+  def _calculate_true_range(self, df):
+      """Calculate True Range for ATR"""
+      high_low = df['High'] - df['Low']
+      high_close_prev = abs(df['High'] - df['Close'].shift(1))
+      low_close_prev = abs(df['Low'] - df['Close'].shift(1))
+
+      return pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1)
+  def add_regime_trend_indicators(self, df):
+        """
+        Add trend indicators for regime detection
+        """
+        df = df.copy()
+
+        # Use your existing moving average method
+        df = self.add_moving_averages(df, ma_list=[20, 50, 200], ma_types=['SMA'])
+
+        # Add regime-specific trend metrics
+        df['Price_vs_SMA20'] = (df['Close'] - df['SMA_20']) / df['SMA_20']
+        df['Price_vs_SMA50'] = (df['Close'] - df['SMA_50']) / df['SMA_50']
+        df['SMA20_vs_SMA50'] = (df['SMA_20'] - df['SMA_50']) / df['SMA_50']
+
+        # Long-term trend (if we have 200-day SMA)
+        if 'SMA_200' in df.columns and not df['SMA_200'].isna().all():
+            df['Price_vs_SMA200'] = (df['Close'] - df['SMA_200']) / df['SMA_200']
+
+        return df
+
+  def add_regime_volatility_indicators(self, df, window=20):
+      """
+      Add volatility indicators for regime detection
+      """
+      df = df.copy()
+
+      # Returns
+      df['Returns'] = df['Close'].pct_change()
+
+      # Rolling volatility (annualized)
+      df[f'Volatility_{window}'] = df['Returns'].rolling(window).std() * np.sqrt(252)
+
+      # ATR (Average True Range)
+      high_low = df['High'] - df['Low']
+      high_close_prev = np.abs(df['High'] - df['Close'].shift(1))
+      low_close_prev = np.abs(df['Low'] - df['Close'].shift(1))
+      true_range = np.maximum(high_low, np.maximum(high_close_prev, low_close_prev))
+      df[f'ATR_{window}'] = true_range.rolling(window).mean()
+
+      return df
+
+  def add_regime_momentum_indicators(self, df, lookback=10):
+      """
+      Add momentum indicators for market structure analysis
+      """
+      df = df.copy()
+
+      # Market structure
+      df['Higher_Highs'] = (df['High'] > df['High'].shift(1)).rolling(lookback).sum()
+      df['Lower_Lows'] = (df['Low'] < df['Low'].shift(1)).rolling(lookback).sum()
+
+      # Price momentum
+      df['Price_Change_5d'] = df['Close'].pct_change(5)
+      df['Price_Change_20d'] = df['Close'].pct_change(20)
+
+      # Momentum score (-1 to +1, where +1 is strong uptrend)
+      df['Momentum_Score'] = (df['Higher_Highs'] - df['Lower_Lows']) / lookback
+
+      return df
+
+  def add_all_regime_indicators(self, df):
+      """
+      Add all indicators needed for regime detection
+      This is the main method you'll use
+      """
+      print("Adding regime detection indicators...")
+
+      # Add basic indicators (your existing methods)
+      df = self.add_rsi(df, period=14)
+      df = self.add_bollinger_bands(df, period=20, num_std=2)
+
+      # Add regime-specific indicators
+      df = self.add_regime_trend_indicators(df)
+      df = self.add_regime_volatility_indicators(df)
+      df = self.add_regime_momentum_indicators(df)
+
+      print(f"Added regime indicators to {len(df)} rows")
+      return df
