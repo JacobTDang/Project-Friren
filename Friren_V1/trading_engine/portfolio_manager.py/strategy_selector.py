@@ -1,12 +1,19 @@
 """
-Strategy Selection and Orchestration
+Pure Strategy Selector - Extracted from PortfolioStrategySelector
 
-This module belongs in the portfolio manager layer, not in strategies.
-It orchestrates strategy selection, market regime analysis, and signal aggregation.
+This module contains ONLY strategy selection logic:
+- Strategy fitness evaluation
+- Strategy ranking and filtering
+- Strategy diversification
+- Strategy metadata matching
+
+All market analysis, risk assessment, and portfolio construction
+has been moved to separate components.
 """
+
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 
 # Import from strategies package (pure strategies only)
@@ -15,51 +22,49 @@ from .strategies import (
     discover_all_strategies, get_strategies_by_category,
     STRATEGY_CATEGORIES
 )
-from trading_engine.data.data_utils import StockDataTools
 
 @dataclass
 class StrategyRecommendation:
-    """Recommendation from strategy selector"""
+    """Strategy selection result"""
     strategy_name: str
     signal: StrategySignal
     strategy_metadata: StrategyMetadata
     market_fit_score: float  # 0-100 how well strategy fits current market
-    risk_score: float  # 0-100 risk assessment
-    recommendation_strength: float  # 0-100 overall recommendation strength
+    selection_confidence: float  # 0-100 confidence in this strategy selection
 
-class PortfolioStrategySelector:
+class StrategySelector:
     """
-    MOVED TO PORTFOLIO MANAGER LAYER
-
-    Strategy selector that orchestrates multiple trading strategies.
-    This belongs in portfolio management, not in the strategies package.
+    PURE Strategy Selection Component
 
     Responsibilities:
-    - Market regime analysis
-    - Strategy selection and ranking
-    - Signal aggregation and filtering
-    - Risk assessment and position sizing recommendations
+    - Evaluate strategy fitness for current market conditions
+    - Rank strategies by suitability
+    - Apply diversification rules
+    - Filter strategies by confidence thresholds
+
+    Does NOT:
+    - Analyze market regimes (MarketAnalyzer does this)
+    - Assess portfolio risk (RiskAnalyzer does this)
+    - Calculate position sizes (PositionSizer does this)
+    - Manage sentiment (SentimentAnalyzer does this)
     """
 
     def __init__(self, config: Optional[Dict] = None):
         self.config = config or self._default_config()
-        self.data_tools = StockDataTools()
 
         # Load all available strategies
         self.strategies = discover_all_strategies()
         self.strategy_performance = self._initialize_performance_tracking()
 
-        print(f"Portfolio Strategy Selector initialized with {len(self.strategies)} strategies")
+        print(f"Strategy Selector initialized with {len(self.strategies)} strategies")
 
     def _default_config(self) -> Dict:
-        """Default configuration for strategy selector"""
+        """Default configuration for strategy selection"""
         return {
-            'max_strategies_per_signal': 3,
+            'max_strategies_per_selection': 3,
             'min_confidence_threshold': 60.0,
             'diversification_penalty': 0.1,  # Penalty for similar strategies
-            'sentiment_weight': 0.15,  # How much sentiment affects selection
-            'market_regime_weight': 0.25,  # How much regime affects selection
-            'risk_adjustment_factor': 0.2,  # Risk penalty factor
+            'performance_weight': 0.15,  # How much historical performance affects selection
         }
 
     def _initialize_performance_tracking(self) -> Dict:
@@ -76,93 +81,57 @@ class PortfolioStrategySelector:
             }
         return performance
 
-    def analyze_market_and_recommend(self, symbol: str, df: pd.DataFrame,
-                                   sentiment: float = 0.0) -> Dict:
+    def select_strategies(self, df: pd.DataFrame, market_regime: Dict,
+                         sentiment: float = 0.0, max_strategies: int = None,
+                         confidence_threshold: float = None) -> List[StrategyRecommendation]:
         """
-        MAIN ORCHESTRATION METHOD
+        MAIN STRATEGY SELECTION METHOD
 
-        Comprehensive market analysis and strategy recommendations
+        Args:
+            df: OHLCV DataFrame with technical indicators
+            market_regime: Market regime analysis from MarketAnalyzer
+            sentiment: Sentiment score from SentimentAnalyzer
+            max_strategies: Maximum strategies to return
+            confidence_threshold: Minimum confidence required
+
+        Returns:
+            List of StrategyRecommendation objects ranked by suitability
         """
-        # 1. Market Regime Analysis
-        market_regime = self._analyze_market_regime(df, sentiment)
-
-        # 2. Strategy Selection
-        recommendations = self.get_best_strategies(
-            df, sentiment,
-            max_strategies=self.config['max_strategies_per_signal'],
-            confidence_threshold=self.config['min_confidence_threshold']
-        )
-
-        # 3. Risk Assessment
-        risk_assessment = self._assess_portfolio_risk(market_regime, recommendations)
-
-        # 4. Position Sizing Recommendations
-        position_sizing = self._recommend_position_sizing(recommendations, risk_assessment)
-
-        # 5. Execution Recommendations
-        execution_plan = self._create_execution_plan(recommendations, market_regime)
-
-        return {
-            'symbol': symbol,
-            'timestamp': pd.Timestamp.now(),
-            'market_regime': market_regime,
-            'strategy_recommendations': [self._format_recommendation(rec) for rec in recommendations],
-            'risk_assessment': risk_assessment,
-            'position_sizing': position_sizing,
-            'execution_plan': execution_plan,
-            'summary': {
-                'action_consensus': self._get_consensus_action(recommendations),
-                'confidence_range': self._get_confidence_range(recommendations),
-                'risk_level': risk_assessment.get('overall_risk_level', 'MEDIUM'),
-                'recommended_allocation': position_sizing.get('total_allocation', 0.0)
-            }
-        }
-
-    def get_best_strategies(self, df: pd.DataFrame, sentiment: float = 0.0,
-                          max_strategies: int = 3, confidence_threshold: float = 60.0) -> List[StrategyRecommendation]:
-        """
-        Select best strategies for current market conditions
-        """
-        # Ensure we have required indicators
-        df_enhanced = self._ensure_indicators(df)
-
-        # Analyze market regime first
-        market_regime = self._analyze_market_regime(df_enhanced, sentiment)
+        max_strategies = max_strategies or self.config['max_strategies_per_selection']
+        confidence_threshold = confidence_threshold or self.config['min_confidence_threshold']
 
         recommendations = []
 
-        # Test each strategy
+        # Test each strategy for market fit
         for strategy_name, strategy in self.strategies.items():
             try:
                 # Skip pairs strategies for single symbol analysis
                 if strategy.metadata.requires_pairs:
                     continue
 
-                # Generate signal
-                signal = strategy.generate_signal(df_enhanced, sentiment, confidence_threshold)
+                # Generate signal from strategy
+                signal = strategy.generate_signal(df, sentiment, confidence_threshold)
 
+                # Only consider actionable signals
                 if signal.action == 'HOLD':
                     continue
 
-                # Calculate market fit
-                market_fit_score = self._calculate_market_fit(strategy, market_regime)
+                # Calculate market fit score
+                market_fit_score = self._calculate_market_fit(strategy, market_regime, sentiment)
 
-                # Calculate risk score
-                risk_score = self._calculate_strategy_risk(strategy, signal, market_regime)
-
-                # Calculate recommendation strength
-                rec_strength = self._calculate_recommendation_strength(
-                    signal, market_fit_score, risk_score, strategy_name
+                # Calculate selection confidence (different from signal confidence)
+                selection_confidence = self._calculate_selection_confidence(
+                    strategy, signal, market_fit_score, strategy_name
                 )
 
-                if rec_strength >= confidence_threshold:
+                # Only include if meets threshold
+                if selection_confidence >= confidence_threshold:
                     recommendations.append(StrategyRecommendation(
                         strategy_name=strategy_name,
                         signal=signal,
                         strategy_metadata=strategy.metadata,
                         market_fit_score=market_fit_score,
-                        risk_score=risk_score,
-                        recommendation_strength=rec_strength
+                        selection_confidence=selection_confidence
                     ))
 
                     # Update performance tracking
@@ -172,391 +141,255 @@ class PortfolioStrategySelector:
                 print(f"Error testing strategy {strategy_name}: {e}")
                 continue
 
-        # Sort and diversify
-        recommendations.sort(key=lambda x: x.recommendation_strength, reverse=True)
-        diversified_recs = self._apply_diversification(recommendations, max_strategies)
+        # Rank and diversify recommendations
+        ranked_recommendations = self._rank_strategies(recommendations)
+        diversified_recommendations = self._apply_diversification(ranked_recommendations, max_strategies)
 
-        return diversified_recs
+        return diversified_recommendations
 
-    def _analyze_market_regime(self, df: pd.DataFrame, sentiment: float) -> Dict:
-        """Analyze current market regime - MOVED FROM STRATEGIES"""
+    def _calculate_market_fit(self, strategy: BaseStrategy, market_regime: Dict,
+                            sentiment: float) -> float:
+        """
+        Calculate how well strategy fits current market conditions
 
-        if len(df) < 50:
-            return {'regime': 'INSUFFICIENT_DATA', 'confidence': 0.0}
-
-        regime_indicators = {}
-
-        # Trend Analysis
-        if all(col in df.columns for col in ['SMA_20', 'SMA_50']):
-            current_price = df['Close'].iloc[-1]
-            sma_20 = df['SMA_20'].iloc[-1]
-            sma_50 = df['SMA_50'].iloc[-1]
-
-            if current_price > sma_20 > sma_50:
-                trend = 'UPTREND'
-                trend_strength = (current_price - sma_50) / sma_50
-            elif current_price < sma_20 < sma_50:
-                trend = 'DOWNTREND'
-                trend_strength = (sma_50 - current_price) / sma_50
-            else:
-                trend = 'SIDEWAYS'
-                trend_strength = abs(sma_20 - sma_50) / sma_50
-        else:
-            trend = 'UNKNOWN'
-            trend_strength = 0.0
-
-        regime_indicators['trend'] = trend
-        regime_indicators['trend_strength'] = trend_strength
-
-        # Volatility Analysis
-        returns = df['Close'].pct_change()
-        current_vol = returns.rolling(20).std().iloc[-1] * np.sqrt(252)
-        historical_vol = returns.rolling(60).std().mean() * np.sqrt(252)
-
-        if current_vol > historical_vol * 1.3:
-            vol_regime = 'HIGH_VOLATILITY'
-        elif current_vol < historical_vol * 0.7:
-            vol_regime = 'LOW_VOLATILITY'
-        else:
-            vol_regime = 'NORMAL_VOLATILITY'
-
-        regime_indicators['volatility_regime'] = vol_regime
-        regime_indicators['current_volatility'] = current_vol
-
-        # RSI Analysis
-        if 'RSI' in df.columns:
-            current_rsi = df['RSI'].iloc[-1]
-            if current_rsi > 70:
-                rsi_condition = 'OVERBOUGHT'
-            elif current_rsi < 30:
-                rsi_condition = 'OVERSOLD'
-            else:
-                rsi_condition = 'NEUTRAL'
-        else:
-            rsi_condition = 'UNKNOWN'
-            current_rsi = 50
-
-        regime_indicators['rsi_condition'] = rsi_condition
-        regime_indicators['current_rsi'] = current_rsi
-
-        # Overall Regime Classification
-        if trend == 'UPTREND' and vol_regime != 'HIGH_VOLATILITY':
-            overall_regime = 'BULLISH_TRENDING'
-        elif trend == 'DOWNTREND' and vol_regime != 'HIGH_VOLATILITY':
-            overall_regime = 'BEARISH_TRENDING'
-        elif vol_regime == 'HIGH_VOLATILITY':
-            overall_regime = 'HIGH_VOLATILITY_UNSTABLE'
-        elif trend == 'SIDEWAYS' and vol_regime == 'LOW_VOLATILITY':
-            overall_regime = 'RANGE_BOUND_STABLE'
-        else:
-            overall_regime = 'MIXED_SIGNALS'
-
-        regime_indicators['regime'] = overall_regime
-        regime_indicators['sentiment'] = sentiment
-        regime_indicators['regime_confidence'] = min(100, abs(trend_strength) * 100 + 50)
-
-        return regime_indicators
-
-    def _calculate_market_fit(self, strategy: BaseStrategy, market_regime: Dict) -> float:
-        """Calculate how well strategy fits current market - MOVED FROM STRATEGIES"""
-
+        This is the core strategy selection logic - determines which strategies
+        are most suitable for current market environment
+        """
         base_fit = 50.0
         regime = market_regime.get('regime', 'UNKNOWN')
         category = strategy.metadata.category
 
-        # Strategy-regime matching
+        # Core strategy-regime matching matrix
         fit_bonuses = {
+            # Momentum strategies
             ('MOMENTUM', 'BULLISH_TRENDING'): 30,
             ('MOMENTUM', 'BEARISH_TRENDING'): 30,
-            ('MEAN_REVERSION', 'RANGE_BOUND_STABLE'): 30,
-            ('MEAN_REVERSION', 'HIGH_VOLATILITY_UNSTABLE'): 20,
-            ('VOLATILITY', 'HIGH_VOLATILITY_UNSTABLE'): 35,
+            ('MOMENTUM', 'MIXED_SIGNALS'): -10,
+
+            # Mean reversion strategies
+            ('MEAN_REVERSION', 'RANGE_BOUND_STABLE'): 35,
+            ('MEAN_REVERSION', 'HIGH_VOLATILITY_UNSTABLE'): 25,
+            ('MEAN_REVERSION', 'BULLISH_TRENDING'): -15,
+            ('MEAN_REVERSION', 'BEARISH_TRENDING'): -15,
+
+            # Volatility strategies
+            ('VOLATILITY', 'HIGH_VOLATILITY_UNSTABLE'): 40,
+            ('VOLATILITY', 'RANGE_BOUND_STABLE'): -20,
+
+            # Factor strategies
             ('FACTOR', 'BULLISH_TRENDING'): 20,
             ('FACTOR', 'RANGE_BOUND_STABLE'): 15,
+            ('FACTOR', 'HIGH_VOLATILITY_UNSTABLE'): 10,
+
+            # Pairs strategies
+            ('PAIRS', 'RANGE_BOUND_STABLE'): 25,
+            ('PAIRS', 'HIGH_VOLATILITY_UNSTABLE'): 15,
         }
 
         base_fit += fit_bonuses.get((category, regime), 0)
 
         # RSI condition adjustments
         rsi_condition = market_regime.get('rsi_condition', 'NEUTRAL')
-        if category == 'MEAN_REVERSION' and rsi_condition in ['OVERBOUGHT', 'OVERSOLD']:
-            base_fit += 15
+        if category == 'MEAN_REVERSION':
+            if rsi_condition == 'OVERBOUGHT':
+                base_fit += 20  # Mean reversion loves overbought conditions
+            elif rsi_condition == 'OVERSOLD':
+                base_fit += 20  # Mean reversion loves oversold conditions
+            elif rsi_condition == 'NEUTRAL':
+                base_fit -= 10  # Mean reversion less effective in neutral RSI
 
-        # Sentiment alignment
-        sentiment = market_regime.get('sentiment', 0.0)
-        if category == 'MOMENTUM' and abs(sentiment) > 0.3:
-            base_fit += 10
-        elif category == 'MEAN_REVERSION' and abs(sentiment) > 0.5:
+        # Volatility regime adjustments
+        vol_regime = market_regime.get('volatility_regime', 'NORMAL_VOLATILITY')
+        if category == 'VOLATILITY' and vol_regime == 'HIGH_VOLATILITY':
             base_fit += 15
+        elif category == 'MOMENTUM' and vol_regime == 'LOW_VOLATILITY':
+            base_fit += 10  # Momentum works well in stable low vol
+
+        # Trend strength adjustments
+        trend_strength = market_regime.get('trend_strength', 0.0)
+        if category == 'MOMENTUM' and trend_strength > 0.05:
+            base_fit += min(20, trend_strength * 400)  # Strong trends favor momentum
+        elif category == 'MEAN_REVERSION' and trend_strength < 0.02:
+            base_fit += 15  # Weak trends favor mean reversion
+
+        # Sentiment alignment bonuses
+        if abs(sentiment) > 0.3:  # Strong sentiment
+            if category == 'MOMENTUM':
+                base_fit += 15  # Momentum benefits from strong sentiment
+            elif category == 'MEAN_REVERSION':
+                base_fit += 20  # Mean reversion benefits from extreme sentiment
+        elif abs(sentiment) < 0.1:  # Neutral sentiment
+            if category == 'FACTOR':
+                base_fit += 10  # Factor strategies work well in neutral sentiment
 
         return max(0, min(100, base_fit))
 
-    def _ensure_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Ensure DataFrame has all required indicators"""
-        return self.data_tools.add_all_indicators(df)
+    def _calculate_selection_confidence(self, strategy: BaseStrategy, signal: StrategySignal,
+                                      market_fit: float, strategy_name: str) -> float:
+        """
+        Calculate confidence in selecting this strategy
 
-    def _calculate_strategy_risk(self, strategy: BaseStrategy, signal: StrategySignal,
-                               market_regime: Dict) -> float:
-        """Calculate risk score for strategy"""
-        base_risk = 30.0
+        Different from signal confidence - this is about strategy selection confidence
+        """
+        # Base confidence from signal quality
+        base_confidence = signal.confidence * 0.7  # Scale down signal confidence
 
-        # High volatility increases risk
-        vol_regime = market_regime.get('volatility_regime', 'NORMAL_VOLATILITY')
-        if vol_regime == 'HIGH_VOLATILITY':
-            base_risk += 25
-        elif vol_regime == 'LOW_VOLATILITY':
-            base_risk -= 10
+        # Market fit adjustment (major factor in selection)
+        fit_adjustment = (market_fit - 50) * 0.4  # Market fit heavily influences selection
 
-        # Strategy-specific risks
-        category_risks = {
-            'VOLATILITY': 15,
-            'PAIRS': 10,
-            'FACTOR': 5,
-            'MOMENTUM': 8,
-            'MEAN_REVERSION': 5
-        }
+        # Historical performance bonus/penalty
+        performance_adjustment = self._get_performance_adjustment(strategy_name)
 
-        base_risk += category_risks.get(strategy.metadata.category, 0)
+        # Strategy stability bonus (some strategies are more reliable)
+        stability_bonus = self._get_strategy_stability_bonus(strategy)
 
-        # Confidence-based risk adjustment
-        confidence_risk = (100 - signal.confidence) * 0.2
-        base_risk += confidence_risk
+        total_confidence = base_confidence + fit_adjustment + performance_adjustment + stability_bonus
 
-        return max(0, min(100, base_risk))
+        return max(0, min(100, total_confidence))
 
-    def _calculate_recommendation_strength(self, signal: StrategySignal,
-                                         market_fit: float, risk_score: float,
-                                         strategy_name: str) -> float:
-        """Calculate overall recommendation strength"""
-
-        # Base from signal confidence
-        base_strength = signal.confidence
-
-        # Market fit adjustment
-        fit_adj = (market_fit - 50) * self.config['market_regime_weight']
-
-        # Risk penalty
-        risk_penalty = (risk_score - 30) * self.config['risk_adjustment_factor']
-
-        # Historical performance
-        performance_bonus = self._get_performance_bonus(strategy_name)
-
-        total_strength = base_strength + fit_adj - risk_penalty + performance_bonus
-
-        return max(0, min(100, total_strength))
+    def _rank_strategies(self, recommendations: List[StrategyRecommendation]) -> List[StrategyRecommendation]:
+        """Rank strategies by selection confidence"""
+        return sorted(recommendations, key=lambda x: x.selection_confidence, reverse=True)
 
     def _apply_diversification(self, recommendations: List[StrategyRecommendation],
                              max_strategies: int) -> List[StrategyRecommendation]:
-        """Apply diversification to avoid too many similar strategies"""
+        """
+        Apply diversification rules to avoid too many similar strategies
 
+        Ensures we don't select multiple strategies from the same category
+        unless they significantly outperform alternatives
+        """
         if len(recommendations) <= max_strategies:
             return recommendations
 
         diversified = []
         used_categories = set()
+        category_usage = {}
 
-        # First pass: one per category
+        # Track how many strategies we've used per category
+        for category in STRATEGY_CATEGORIES.keys():
+            category_usage[category] = 0
+
+        # First pass: one strategy per category (highest confidence)
         for rec in recommendations:
             category = rec.strategy_metadata.category
+
             if category not in used_categories:
                 diversified.append(rec)
                 used_categories.add(category)
+                category_usage[category] += 1
+
                 if len(diversified) >= max_strategies:
                     break
 
-        # Second pass: fill remaining with highest strength
+        # Second pass: fill remaining slots with best remaining strategies
+        # but apply diversification penalty for repeat categories
         if len(diversified) < max_strategies:
             remaining = [r for r in recommendations if r not in diversified]
-            diversified.extend(remaining[:max_strategies - len(diversified)])
+
+            for rec in remaining:
+                if len(diversified) >= max_strategies:
+                    break
+
+                category = rec.strategy_metadata.category
+
+                # Apply diversification penalty
+                penalty = category_usage[category] * self.config['diversification_penalty'] * 10
+                adjusted_confidence = rec.selection_confidence - penalty
+
+                # Only add if still meets threshold after penalty
+                if adjusted_confidence >= self.config['min_confidence_threshold']:
+                    # Update the confidence to reflect diversification penalty
+                    rec.selection_confidence = adjusted_confidence
+                    diversified.append(rec)
+                    category_usage[category] += 1
 
         return diversified
 
-    def _assess_portfolio_risk(self, market_regime: Dict,
-                             recommendations: List[StrategyRecommendation]) -> Dict:
-        """Assess overall portfolio risk"""
+    def _get_performance_adjustment(self, strategy_name: str) -> float:
+        """Get performance-based adjustment for strategy selection"""
+        if strategy_name not in self.strategy_performance:
+            return 0.0
 
-        if not recommendations:
-            return {
-                'overall_risk_level': 'HIGH',
-                'risk_score': 80,
-                'risk_factors': ['No clear trading signals']
-            }
+        perf = self.strategy_performance[strategy_name]
 
-        # Calculate weighted risk
-        total_weight = sum(r.recommendation_strength for r in recommendations)
-        weighted_risk = sum(r.risk_score * r.recommendation_strength for r in recommendations) / total_weight
+        # Win rate adjustment
+        win_rate_adj = (perf['win_rate'] - 0.5) * 20  # ±10 points for win rate
 
-        # Market regime risk
-        regime_risk = {
-            'HIGH_VOLATILITY_UNSTABLE': 25,
-            'BEARISH_TRENDING': 15,
-            'MIXED_SIGNALS': 20
-        }.get(market_regime.get('regime', ''), 0)
-
-        overall_risk = weighted_risk + regime_risk
-
-        # Risk level classification
-        if overall_risk < 40:
-            risk_level = 'LOW'
-        elif overall_risk < 65:
-            risk_level = 'MEDIUM'
+        # Confidence history adjustment
+        if perf['confidence_history']:
+            avg_confidence = np.mean(perf['confidence_history'])
+            confidence_adj = (avg_confidence - 60) * 0.1  # Small adjustment for confidence
         else:
-            risk_level = 'HIGH'
+            confidence_adj = 0
 
-        return {
-            'overall_risk_level': risk_level,
-            'risk_score': min(100, overall_risk),
-            'strategy_risk': weighted_risk,
-            'market_risk': regime_risk,
-            'risk_factors': self._identify_risk_factors(market_regime, recommendations)
+        total_adjustment = (win_rate_adj + confidence_adj) * self.config['performance_weight']
+        return max(-15, min(15, total_adjustment))  # Cap at ±15 points
+
+    def _get_strategy_stability_bonus(self, strategy: BaseStrategy) -> float:
+        """Get stability bonus based on strategy characteristics"""
+        category = strategy.metadata.category
+
+        # Some strategy types are inherently more stable
+        stability_bonuses = {
+            'MOMENTUM': 5,      # Generally reliable in trending markets
+            'MEAN_REVERSION': 8,  # Very reliable in ranging markets
+            'FACTOR': 6,        # Stable long-term
+            'VOLATILITY': 3,    # More experimental
+            'PAIRS': 4,         # Dependent on correlations
         }
 
-    def _recommend_position_sizing(self, recommendations: List[StrategyRecommendation],
-                                 risk_assessment: Dict) -> Dict:
-        """Recommend position sizing based on signals and risk"""
-
-        if not recommendations:
-            return {'total_allocation': 0.0, 'individual_allocations': {}}
-
-        # Base allocation percentage
-        risk_level = risk_assessment.get('overall_risk_level', 'MEDIUM')
-        base_allocations = {
-            'LOW': 0.15,     # 15% max in low risk
-            'MEDIUM': 0.10,  # 10% max in medium risk
-            'HIGH': 0.05     # 5% max in high risk
-        }
-
-        max_allocation = base_allocations.get(risk_level, 0.10)
-
-        # Distribute allocation based on recommendation strength
-        total_strength = sum(r.recommendation_strength for r in recommendations)
-
-        allocations = {}
-        total_allocation = 0.0
-
-        for rec in recommendations:
-            weight = rec.recommendation_strength / total_strength
-            allocation = max_allocation * weight
-            allocations[rec.strategy_name] = allocation
-            total_allocation += allocation
-
-        return {
-            'total_allocation': total_allocation,
-            'individual_allocations': allocations,
-            'max_single_allocation': max(allocations.values()) if allocations else 0.0,
-            'risk_adjusted': True
-        }
-
-    def _create_execution_plan(self, recommendations: List[StrategyRecommendation],
-                             market_regime: Dict) -> Dict:
-        """Create execution plan for recommended trades"""
-
-        if not recommendations:
-            return {'action': 'WAIT', 'urgency': 'NONE'}
-
-        # Determine consensus action
-        actions = [r.signal.action for r in recommendations]
-        action_counts = {action: actions.count(action) for action in set(actions)}
-        consensus_action = max(action_counts, key=action_counts.get)
-
-        # Determine urgency based on market conditions
-        vol_regime = market_regime.get('volatility_regime', 'NORMAL_VOLATILITY')
-        avg_confidence = np.mean([r.recommendation_strength for r in recommendations])
-
-        if vol_regime == 'HIGH_VOLATILITY' and avg_confidence > 80:
-            urgency = 'HIGH'
-        elif avg_confidence > 75:
-            urgency = 'MEDIUM'
-        else:
-            urgency = 'LOW'
-
-        return {
-            'action': consensus_action,
-            'urgency': urgency,
-            'execution_style': 'GRADUAL' if urgency == 'LOW' else 'IMMEDIATE',
-            'market_timing': 'Consider market hours and volatility',
-            'strategies_count': len(recommendations)
-        }
-
-    # Helper methods for formatting and utilities
-    def _format_recommendation(self, rec: StrategyRecommendation) -> Dict:
-        """Format recommendation for output"""
-        return {
-            'strategy': rec.strategy_name,
-            'action': rec.signal.action,
-            'confidence': rec.signal.confidence,
-            'reasoning': rec.signal.reasoning,
-            'market_fit': rec.market_fit_score,
-            'risk_score': rec.risk_score,
-            'recommendation_strength': rec.recommendation_strength,
-            'category': rec.strategy_metadata.category,
-            'metadata': rec.signal.metadata
-        }
-
-    def _get_consensus_action(self, recommendations: List[StrategyRecommendation]) -> str:
-        """Get consensus action from recommendations"""
-        if not recommendations:
-            return 'HOLD'
-
-        actions = [r.signal.action for r in recommendations]
-        action_counts = {action: actions.count(action) for action in set(actions)}
-        return max(action_counts, key=action_counts.get)
-
-    def _get_confidence_range(self, recommendations: List[StrategyRecommendation]) -> str:
-        """Get confidence range from recommendations"""
-        if not recommendations:
-            return "0-0%"
-
-        confidences = [r.recommendation_strength for r in recommendations]
-        return f"{min(confidences):.0f}-{max(confidences):.0f}%"
+        return stability_bonuses.get(category, 0)
 
     def _update_performance_tracking(self, strategy_name: str, signal: StrategySignal):
-        """Update strategy performance tracking"""
+        """Update strategy performance tracking for future selections"""
         if strategy_name in self.strategy_performance:
             perf = self.strategy_performance[strategy_name]
             perf['total_signals'] += 1
             perf['confidence_history'].append(signal.confidence)
             perf['last_used'] = pd.Timestamp.now()
 
-            # Keep rolling window
+            # Keep rolling window of last 50 signals
             if len(perf['confidence_history']) > 50:
                 perf['confidence_history'] = perf['confidence_history'][-50:]
 
-    def _get_performance_bonus(self, strategy_name: str) -> float:
-        """Get performance bonus for strategy"""
-        if strategy_name not in self.strategy_performance:
-            return 0.0
+    def get_strategy_fitness_report(self, market_regime: Dict, sentiment: float) -> Dict:
+        """
+        Generate a report of all strategies and their market fitness
+        Useful for debugging and analysis
+        """
+        fitness_report = {}
 
-        perf = self.strategy_performance[strategy_name]
-        if perf['confidence_history']:
-            avg_confidence = np.mean(perf['confidence_history'])
-            return (avg_confidence - 60) * 0.05  # Small bonus/penalty
-        return 0.0
+        for strategy_name, strategy in self.strategies.items():
+            if strategy.metadata.requires_pairs:
+                continue
 
-    def _identify_risk_factors(self, market_regime: Dict,
-                             recommendations: List[StrategyRecommendation]) -> List[str]:
-        """Identify specific risk factors"""
-        factors = []
+            market_fit = self._calculate_market_fit(strategy, market_regime, sentiment)
+            performance_adj = self._get_performance_adjustment(strategy_name)
+            stability_bonus = self._get_strategy_stability_bonus(strategy)
 
-        regime = market_regime.get('regime', '')
-        if 'HIGH_VOLATILITY' in regime:
-            factors.append("High market volatility increases execution risk")
+            fitness_report[strategy_name] = {
+                'category': strategy.metadata.category,
+                'market_fit_score': market_fit,
+                'performance_adjustment': performance_adj,
+                'stability_bonus': stability_bonus,
+                'total_fitness': market_fit + performance_adj + stability_bonus,
+                'metadata': {
+                    'typical_holding_days': strategy.metadata.typical_holding_days,
+                    'works_best_in': strategy.metadata.works_best_in,
+                    'min_confidence': strategy.metadata.min_confidence
+                }
+            }
 
-        sentiment = market_regime.get('sentiment', 0.0)
-        if abs(sentiment) > 0.6:
-            factors.append("Extreme sentiment may lead to sudden reversals")
+        return fitness_report
 
-        if len(recommendations) == 0:
-            factors.append("No clear trading signals - market indecision")
+    def get_available_strategies(self) -> List[str]:
+        """Get list of all available strategy names"""
+        return list(self.strategies.keys())
 
-        # Check for conflicting signals
-        actions = [r.signal.action for r in recommendations]
-        if 'BUY' in actions and 'SELL' in actions:
-            factors.append("Conflicting signals from different strategies")
-
-        return factors
-
-# Convenience function for easy import
-def create_portfolio_strategy_selector(config: Optional[Dict] = None) -> PortfolioStrategySelector:
-    """Create a portfolio strategy selector instance"""
-    return PortfolioStrategySelector(config)
+    def get_strategies_by_category(self, category: str) -> List[str]:
+        """Get strategies filtered by category"""
+        return [
+            name for name, strategy in self.strategies.items()
+            if strategy.metadata.category == category.upper()
+        ]
