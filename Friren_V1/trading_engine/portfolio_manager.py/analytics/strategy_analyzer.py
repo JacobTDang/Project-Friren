@@ -1,69 +1,59 @@
 """
-trading_engine/portfolio_manager/processes/strategy_analyzer.py
-
-Strategy Analyzer Process - Wraps existing MultiprocessManager and strategies
-in the new multiprocess infrastructure.
-
-Runs all 7 strategies in parallel every 2-3 minutes and sends high-confidence
-signals to the priority queue.
+Pure strategy analysis logic - separated from process infrastructure.
+Handles strategy execution, signal generation, and performance tracking.
 """
 
 import time
-import threading
 from typing import Dict, List, Any, Optional
-from datetime import datetime, timedelta
+from datetime import datetime
 import logging
 
-from multiprocess_infrastructure.base_process import BaseProcess, ProcessState
-from multiprocess_infrastructure.queue_manager import QueueMessage, MessageType, MessagePriority
-
 # Import existing components
-from multiprocess_manager import MultiprocessManager
-from strategies import discover_all_strategies, AVAILABLE_STRATEGIES
-from data.yahoo import StockDataFetcher
+from ..multiprocess_manager import MultiprocessManager
+from ..strategies import discover_all_strategies, AVAILABLE_STRATEGIES
+from ...data.yahoo import StockDataFetcher
 
 
-class StrategyAnalyzer(BaseProcess):
+class StrategyAnalyzer:
     """
-    Strategy Analysis Process
+    Pure Strategy Analysis Component
 
     Responsibilities:
-    - Run all 7 strategies in parallel using existing MultiprocessManager
+    - Run all strategies in parallel using existing MultiprocessManager
+    - Generate standardized trading signals
+    - Track strategy performance metrics
     - Filter signals by confidence threshold
-    - Send high-confidence signals to market decision engine
-    - Update shared state with latest strategy signals
-    - Monitor strategy performance and health
+
+    Does NOT handle:
+    - Process lifecycle management
+    - Queue operations
+    - Shared state updates
+    - Timing/scheduling
     """
 
-    def __init__(self, process_id: str = "strategy_analyzer",
-                 analysis_interval: int = 150,  # 2.5 minutes
-                 confidence_threshold: float = 70.0):
-        super().__init__(process_id)
-
-        self.analysis_interval = analysis_interval
+    def __init__(self, confidence_threshold: float = 70.0, symbols: Optional[List[str]] = None):
         self.confidence_threshold = confidence_threshold
+        self.symbols = symbols or ['AAPL', 'GOOGL', 'MSFT', 'AMZN', 'TSLA', 'NVDA', 'META', 'NFLX']
+        self.logger = logging.getLogger("strategy_analyzer")
 
-        # Components (initialized in _initialize)
+        # Components (initialized in initialize)
         self.multiprocess_manager = None
         self.strategies = None
         self.data_fetcher = None
 
-        # State tracking
-        self.symbols = ['AAPL', 'GOOGL', 'MSFT', 'AMZN', 'TSLA', 'NVDA', 'META', 'NFLX']
-        self.last_analysis_time = None
+        # Performance tracking
         self.analysis_count = 0
         self.signal_stats = {
             'total_signals': 0,
             'high_confidence_signals': 0,
-            'signals_sent': 0,
             'strategy_performance': {}
         }
 
-        self.logger.info(f"StrategyAnalyzer configured - interval: {analysis_interval}s, threshold: {confidence_threshold}%")
+        self.logger.info(f"StrategyAnalyzer created - threshold: {confidence_threshold}%, symbols: {len(self.symbols)}")
 
-    def _initialize(self):
+    def initialize(self):
         """Initialize strategy analyzer components"""
-        self.logger.info("Initializing StrategyAnalyzer...")
+        self.logger.info("Initializing StrategyAnalyzer components...")
 
         try:
             # Initialize existing multiprocess manager
@@ -87,65 +77,94 @@ class StrategyAnalyzer(BaseProcess):
                     'last_signal_time': None
                 }
 
-            self.state = ProcessState.RUNNING
             self.logger.info("StrategyAnalyzer initialization complete")
 
         except Exception as e:
             self.logger.error(f"Failed to initialize StrategyAnalyzer: {e}")
-            self.state = ProcessState.ERROR
             raise
 
-    def _process_cycle(self):
-        """Main processing cycle - run strategy analysis"""
+    def analyze_all_strategies(self, market_regime: str = 'UNKNOWN') -> Dict[str, Any]:
+        """
+        Main analysis method - run all strategies and return results
+
+        Args:
+            market_regime: Current market regime for context
+
+        Returns:
+            Dict containing analysis results and generated signals
+        """
+        self.logger.info(f"Starting strategy analysis cycle #{self.analysis_count + 1}")
+        start_time = time.time()
+
         try:
-            # Check if it's time for analysis
-            if not self._should_run_analysis():
-                time.sleep(10)  # Short sleep if not time yet
-                return
-
-            self.logger.info(f"Starting strategy analysis cycle #{self.analysis_count + 1}")
-            start_time = time.time()
-
             # Fetch market data for all symbols
             market_data = self._fetch_market_data()
 
             if not market_data:
-                self.logger.warning("No market data available, skipping analysis")
-                time.sleep(30)
-                return
+                self.logger.warning("No market data available")
+                return {'success': False, 'error': 'No market data'}
 
             # Run strategy analysis using existing multiprocess manager
             analysis_results = self._run_strategy_analysis(market_data)
 
-            # Process results and generate signals
-            signals_generated = self._process_analysis_results(analysis_results)
+            # Process results and generate standardized signals
+            processed_signals = self._process_analysis_results(analysis_results, market_regime)
 
             # Update statistics
             self.analysis_count += 1
-            self.last_analysis_time = datetime.now()
-
-            # Log cycle completion
             cycle_time = time.time() - start_time
-            self.logger.info(f"Analysis cycle complete - {cycle_time:.2f}s, {signals_generated} signals generated")
 
-            # Update shared state with timing info
-            self._update_process_status(cycle_time, signals_generated)
+            # Return comprehensive results
+            return {
+                'success': True,
+                'analysis_cycle': self.analysis_count,
+                'cycle_time_seconds': cycle_time,
+                'symbols_analyzed': len(market_data),
+                'signals': processed_signals,
+                'high_confidence_signals': [s for s in processed_signals if s['confidence'] >= self.confidence_threshold],
+                'statistics': self._get_current_stats(),
+                'market_regime': market_regime,
+                'timestamp': datetime.now()
+            }
 
         except Exception as e:
-            self.logger.error(f"Error in strategy analysis cycle: {e}")
-            self.error_count += 1
-            time.sleep(30)  # Wait before retry
+            self.logger.error(f"Error in strategy analysis: {e}")
+            return {'success': False, 'error': str(e)}
 
-    def _should_run_analysis(self) -> bool:
-        """Check if it's time to run analysis"""
-        if self.last_analysis_time is None:
-            return True
+    def get_strategy_signals(self, symbol: str, market_data: Dict[str, Any], market_regime: str = 'UNKNOWN') -> List[Dict[str, Any]]:
+        """
+        Get signals for a specific symbol from all strategies
 
-        time_since_last = (datetime.now() - self.last_analysis_time).total_seconds()
-        return time_since_last >= self.analysis_interval
+        Args:
+            symbol: Stock symbol
+            market_data: Market data dictionary
+            market_regime: Current market regime
+
+        Returns:
+            List of signals from all applicable strategies
+        """
+        signals = []
+
+        if symbol not in market_data:
+            return signals
+
+        # Run analysis for single symbol
+        single_symbol_data = {symbol: market_data[symbol]}
+        analysis_results = self._run_strategy_analysis(single_symbol_data)
+
+        # Process results for this symbol
+        strategy_results = analysis_results.get('results', {}).get('strategy', {})
+
+        if symbol in strategy_results:
+            result_data = strategy_results[symbol]
+            signal = self._generate_signal_from_result(symbol, result_data, market_regime)
+            if signal:
+                signals.append(signal)
+
+        return signals
 
     def _fetch_market_data(self) -> Dict[str, Any]:
-        """Fetch market data for all symbols"""
+        """Fetch market data for all tracked symbols"""
         try:
             market_data_dict = {}
 
@@ -187,9 +206,9 @@ class StrategyAnalyzer(BaseProcess):
             self.logger.error(f"Error in multiprocess analysis: {e}")
             return {'results': {'strategy': {}}}
 
-    def _process_analysis_results(self, analysis_results: Dict[str, Any]) -> int:
-        """Process analysis results and generate trading signals"""
-        signals_generated = 0
+    def _process_analysis_results(self, analysis_results: Dict[str, Any], market_regime: str) -> List[Dict[str, Any]]:
+        """Process raw analysis results into standardized signals"""
+        signals = []
 
         try:
             strategy_results = analysis_results.get('results', {}).get('strategy', {})
@@ -201,37 +220,28 @@ class StrategyAnalyzer(BaseProcess):
                 # Extract strategy signal information
                 strategy_name = result_data.get('strategy', 'unknown')
                 confidence = result_data.get('confidence', 0)
-                rsi = result_data.get('rsi', 50)
 
                 # Update strategy performance tracking
                 self._update_strategy_stats(strategy_name, confidence)
 
-                # Generate signal based on strategy result
-                signal = self._generate_signal_from_result(symbol, result_data)
+                # Generate standardized signal
+                signal = self._generate_signal_from_result(symbol, result_data, market_regime)
 
                 if signal:
-                    # Update shared state with signal
-                    self._update_shared_state_signal(symbol, strategy_name, signal)
-
-                    # Send high-confidence signals to decision engine
-                    if confidence >= self.confidence_threshold:
-                        success = self._send_signal_to_queue(symbol, signal)
-                        if success:
-                            signals_generated += 1
-                            self.signal_stats['signals_sent'] += 1
-
+                    signals.append(signal)
                     self.signal_stats['total_signals'] += 1
+
                     if confidence >= self.confidence_threshold:
                         self.signal_stats['high_confidence_signals'] += 1
 
-            return signals_generated
+            return signals
 
         except Exception as e:
             self.logger.error(f"Error processing analysis results: {e}")
-            return 0
+            return []
 
-    def _generate_signal_from_result(self, symbol: str, result_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Generate standardized signal from strategy result"""
+    def _generate_signal_from_result(self, symbol: str, result_data: Dict[str, Any], market_regime: str) -> Optional[Dict[str, Any]]:
+        """Generate standardized trading signal from strategy result"""
         try:
             strategy_name = result_data.get('strategy', 'unknown')
             confidence = result_data.get('confidence', 0)
@@ -262,10 +272,9 @@ class StrategyAnalyzer(BaseProcess):
                 action = 'HOLD'
                 reasoning = f"Strategy {strategy_name} suggests hold"
 
-            # Get current market regime for context
-            market_regime = self.shared_state.get_market_regime() if self.shared_state else 'UNKNOWN'
-
+            # Create standardized signal
             signal = {
+                'symbol': symbol,
                 'action': action,
                 'confidence': confidence,
                 'reasoning': reasoning,
@@ -273,9 +282,10 @@ class StrategyAnalyzer(BaseProcess):
                 'rsi': rsi,
                 'market_regime': market_regime,
                 'timestamp': datetime.now(),
+                'analysis_cycle': self.analysis_count,
+                'is_high_confidence': confidence >= self.confidence_threshold,
                 'metadata': {
-                    'analysis_cycle': self.analysis_count,
-                    'symbol': symbol
+                    'raw_result': result_data
                 }
             }
 
@@ -284,44 +294,6 @@ class StrategyAnalyzer(BaseProcess):
         except Exception as e:
             self.logger.error(f"Error generating signal for {symbol}: {e}")
             return None
-
-    def _update_shared_state_signal(self, symbol: str, strategy_name: str, signal: Dict[str, Any]):
-        """Update shared state with latest signal"""
-        try:
-            if self.shared_state:
-                self.shared_state.update_strategy_signal(strategy_name, symbol, signal)
-                self.logger.debug(f"Updated shared state signal for {symbol} from {strategy_name}")
-        except Exception as e:
-            self.logger.warning(f"Failed to update shared state: {e}")
-
-    def _send_signal_to_queue(self, symbol: str, signal: Dict[str, Any]) -> bool:
-        """Send high-confidence signal to priority queue"""
-        try:
-            if not self.priority_queue:
-                self.logger.warning("No priority queue available")
-                return False
-
-            # Create queue message
-            message = QueueMessage(
-                message_type=MessageType.STRATEGY_SIGNAL,
-                priority=MessagePriority.HIGH if signal['confidence'] >= 80 else MessagePriority.NORMAL,
-                sender_id=self.process_id,
-                recipient_id="market_decision_engine",
-                payload={
-                    'symbol': symbol,
-                    'signal': signal,
-                    'analysis_cycle': self.analysis_count
-                }
-            )
-
-            # Send to queue
-            self.priority_queue.put(message, block=False)
-            self.logger.info(f"Sent {signal['action']} signal for {symbol} (confidence: {signal['confidence']:.1f}%)")
-            return True
-
-        except Exception as e:
-            self.logger.error(f"Failed to send signal to queue: {e}")
-            return False
 
     def _update_strategy_stats(self, strategy_name: str, confidence: float):
         """Update strategy performance statistics"""
@@ -339,30 +311,36 @@ class StrategyAnalyzer(BaseProcess):
 
             stats['last_signal_time'] = datetime.now()
 
-    def _update_process_status(self, cycle_time: float, signals_generated: int):
-        """Update process status in shared state"""
-        try:
-            if self.shared_state:
-                status_data = {
-                    'last_analysis_time': self.last_analysis_time.isoformat(),
-                    'analysis_count': self.analysis_count,
-                    'cycle_time_seconds': cycle_time,
-                    'signals_generated': signals_generated,
-                    'total_signals': self.signal_stats['total_signals'],
-                    'high_confidence_signals': self.signal_stats['high_confidence_signals'],
-                    'signals_sent': self.signal_stats['signals_sent'],
-                    'symbols_analyzed': len(self.symbols),
-                    'strategy_count': len(self.strategies) if self.strategies else 0,
-                    'health_status': 'healthy' if self.error_count < 3 else 'degraded'
-                }
+    def _get_current_stats(self) -> Dict[str, Any]:
+        """Get current performance statistics"""
+        return {
+            'analysis_count': self.analysis_count,
+            'total_signals': self.signal_stats['total_signals'],
+            'high_confidence_signals': self.signal_stats['high_confidence_signals'],
+            'high_confidence_rate': (
+                self.signal_stats['high_confidence_signals'] / self.signal_stats['total_signals']
+                if self.signal_stats['total_signals'] > 0 else 0
+            ),
+            'strategy_performance': self.signal_stats['strategy_performance'].copy(),
+            'symbols_count': len(self.symbols),
+            'strategies_count': len(self.strategies) if self.strategies else 0
+        }
 
-                self.shared_state.update_system_status(self.process_id, status_data)
+    def filter_signals_by_confidence(self, signals: List[Dict[str, Any]], min_confidence: Optional[float] = None) -> List[Dict[str, Any]]:
+        """Filter signals by confidence threshold"""
+        threshold = min_confidence or self.confidence_threshold
+        return [signal for signal in signals if signal['confidence'] >= threshold]
 
-        except Exception as e:
-            self.logger.warning(f"Failed to update process status: {e}")
+    def get_signals_by_action(self, signals: List[Dict[str, Any]], action: str) -> List[Dict[str, Any]]:
+        """Filter signals by action type (BUY, SELL, HOLD)"""
+        return [signal for signal in signals if signal['action'] == action.upper()]
 
-    def _cleanup(self):
-        """Cleanup strategy analyzer resources"""
+    def get_signals_by_strategy(self, signals: List[Dict[str, Any]], strategy_name: str) -> List[Dict[str, Any]]:
+        """Filter signals by strategy name"""
+        return [signal for signal in signals if signal['strategy'] == strategy_name]
+
+    def cleanup(self):
+        """Cleanup analyzer resources"""
         self.logger.info("Cleaning up StrategyAnalyzer...")
 
         try:
@@ -382,19 +360,3 @@ class StrategyAnalyzer(BaseProcess):
 
         except Exception as e:
             self.logger.error(f"Error during StrategyAnalyzer cleanup: {e}")
-
-    def get_process_info(self) -> Dict[str, Any]:
-        """Return process-specific information for monitoring"""
-        return {
-            'process_type': 'strategy_analyzer',
-            'analysis_interval_seconds': self.analysis_interval,
-            'confidence_threshold': self.confidence_threshold,
-            'symbols_tracked': self.symbols,
-            'last_analysis_time': self.last_analysis_time.isoformat() if self.last_analysis_time else None,
-            'analysis_count': self.analysis_count,
-            'signal_statistics': self.signal_stats,
-            'strategy_count': len(self.strategies) if self.strategies else 0,
-            'worker_count': self.multiprocess_manager.num_workers if self.multiprocess_manager else 0,
-            'error_count': self.error_count,
-            'state': self.state.value
-        }
