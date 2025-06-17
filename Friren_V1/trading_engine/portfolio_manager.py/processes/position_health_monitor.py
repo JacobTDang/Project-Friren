@@ -1,122 +1,101 @@
 """
 portfolio_manager/processes/position_health_monitor.py
 
-Position Health Monitor Process - Process infrastructure wrapper that uses
-the pure analytics/position_health_analyzer.py for business logic.
-
-Handles timing, queues, shared state, and multiprocess coordination.
+Refactored Position Health Monitor - Uses generic multiprocess manager
+and optimized position health analyzer for clean separation.
 """
 
 import time
-import multiprocessing as mp
-import queue
 from typing import Dict, List, Any, Optional
-from datetime import datetime, timedelta
+from datetime import datetime
 import logging
 
 from multiprocess_infrastructure.base_process import BaseProcess, ProcessState
 from multiprocess_infrastructure.queue_manager import QueueMessage, MessageType, MessagePriority
 
-# Import the pure analytics component
+# Import clean components
+from ..tools.multiprocess_manager import MultiprocessManager, TaskResult
 from ..analytics.position_health_analyzer import (
-    PositionHealthAnalyzer, ActiveStrategy, StrategyStatus, PositionHealthResult
+    OptimizedPositionHealthAnalyzer, ActiveStrategy, StrategyStatus, PositionHealthResult
 )
 from ...data.yahoo import StockDataFetcher
 
 
-def position_health_worker(task_queue: mp.Queue, result_queue: mp.Queue):
-    """Worker process for parallel position health monitoring"""
+def position_health_worker(task: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Worker function for position health analysis
 
-    # Initialize analyzer in worker
-    analyzer = PositionHealthAnalyzer()
+    Args:
+        task: Dictionary containing analysis task data
 
-    while True:
-        try:
-            task = task_queue.get(timeout=2)
-            if task is None:
-                break
+    Returns:
+        Dictionary with analysis results
+    """
+    try:
+        # Initialize analyzer in worker (clean separation)
+        analyzer = OptimizedPositionHealthAnalyzer()
 
-            try:
-                symbol = task['symbol']
-                active_strategy = task['active_strategy']
-                market_data = task['market_data']
-                task_type = task['task_type']
+        # Extract task data
+        symbol = task['symbol']
+        strategy = task['strategy']
+        market_data = task['market_data']
+        analysis_type = task.get('analysis_type', 'comprehensive')
 
-                # Route to appropriate analysis method
-                if task_type == 'exit':
-                    result = analyzer.analyze_exit_conditions(active_strategy, market_data)
-                elif task_type == 'scaling':
-                    portfolio_state = task.get('portfolio_state', {})
-                    result = analyzer.analyze_scaling_conditions(active_strategy, market_data, portfolio_state)
-                elif task_type == 'risk':
-                    risk_limits = task.get('risk_limits', {})
-                    result = analyzer.analyze_risk_conditions(active_strategy, market_data, risk_limits)
-                elif task_type == 'metrics':
-                    result = analyzer.update_strategy_metrics(active_strategy, market_data)
-                else:
-                    result = PositionHealthResult(
-                        symbol=symbol,
-                        strategy_type=active_strategy.strategy_type,
-                        analysis_type=task_type,
-                        success=False,
-                        metadata={'error': f'Unknown task type: {task_type}'}
-                    )
+        # Run comprehensive analysis using optimized analyzer
+        if analysis_type == 'comprehensive':
+            analysis_results = analyzer.analyze_position_comprehensive(strategy, market_data)
+        else:
+            # Could add specific analysis types if needed
+            analysis_results = analyzer.analyze_position_comprehensive(strategy, market_data)
 
-                result_queue.put(result)
+        return {
+            'symbol': symbol,
+            'strategy_type': strategy.strategy_type,
+            'analysis_results': analysis_results,
+            'success': True
+        }
 
-            except Exception as e:
-                logging.error(f"Worker error processing {symbol}: {e}")
-                error_result = PositionHealthResult(
-                    symbol=symbol,
-                    strategy_type='unknown',
-                    analysis_type=task.get('task_type', 'unknown'),
-                    success=False,
-                    metadata={'error': str(e)}
-                )
-                result_queue.put(error_result)
-
-        except queue.Empty:
-            continue
-        except Exception as e:
-            logging.error(f"Worker error: {e}")
-            continue
+    except Exception as e:
+        return {
+            'symbol': task.get('symbol', 'unknown'),
+            'strategy_type': task.get('strategy', {}).get('strategy_type', 'unknown'),
+            'analysis_results': {},
+            'success': False,
+            'error': str(e)
+        }
 
 
 class PositionHealthMonitor(BaseProcess):
     """
-    Position Health Monitor Process
+    Refactored Position Health Monitor Process
 
-    Process Infrastructure Responsibilities:
-    - Process lifecycle management (start/stop/restart)
-    - Timing and scheduling (every 5-10 seconds)
+    Clean Architecture:
+    - Layer 1: Process infrastructure (BaseProcess, queues, shared state)
+    - Layer 2: Task parallelization (MultiprocessManager)
+    - Analytics: Business logic (OptimizedPositionHealthAnalyzer)
+
+    Responsibilities:
+    - Process lifecycle management
+    - Timing and scheduling (every 10 seconds)
     - Queue message sending for health alerts
-    - Shared state updates with position health
-    - Multiprocess coordination for parallel monitoring
-
-    Business Logic Responsibilities (delegated to analytics):
-    - Position health analysis and alert generation
-    - Exit condition checking
-    - Position scaling recommendations
-    - Risk monitoring and scoring
+    - Shared state updates
+    - Orchestrates parallel health analysis
     """
 
     def __init__(self, process_id: str = "position_health_monitor",
-                 check_interval: int = 10,  # 10 seconds
+                 check_interval: int = 10,
                  risk_threshold: float = 0.05):
         super().__init__(process_id)
 
         self.check_interval = check_interval
         self.risk_threshold = risk_threshold
 
-        # Analytics component (initialized in _initialize)
+        # Layer 2: Task parallelization (initialized in _initialize)
+        self.multiprocess_manager = None
+
+        # Analytics components (initialized in _initialize)
         self.health_analyzer = None
         self.data_fetcher = None
-
-        # Multiprocess components
-        self.task_queue = None
-        self.result_queue = None
-        self.workers = []
-        self.num_workers = 2  # Suitable for t3.micro
 
         # Process state tracking
         self.active_strategies = {}  # {symbol: ActiveStrategy}
@@ -127,21 +106,24 @@ class PositionHealthMonitor(BaseProcess):
         self.logger.info(f"PositionHealthMonitor configured - interval: {check_interval}s")
 
     def _initialize(self):
-        """Initialize process-specific components"""
+        """Initialize process components"""
         self.logger.info("Initializing PositionHealthMonitor...")
 
         try:
-            # Initialize analytics component
-            self.health_analyzer = PositionHealthAnalyzer()
-            self.logger.info("PositionHealthAnalyzer initialized")
+            # Layer 2: Initialize generic multiprocess manager
+            self.multiprocess_manager = MultiprocessManager(
+                max_workers=2,  # Suitable for t3.micro
+                max_tasks=50
+            )
+            self.logger.info("Generic MultiprocessManager initialized")
 
-            # Initialize data fetcher
+            # Analytics: Initialize optimized position health analyzer
+            self.health_analyzer = OptimizedPositionHealthAnalyzer()
+            self.logger.info("OptimizedPositionHealthAnalyzer initialized")
+
+            # Data fetcher
             self.data_fetcher = StockDataFetcher()
             self.logger.info("StockDataFetcher initialized")
-
-            # Initialize multiprocess queues
-            self.task_queue = mp.Queue()
-            self.result_queue = mp.Queue()
 
             # Load active strategies from shared state
             self._load_active_strategies()
@@ -159,11 +141,10 @@ class PositionHealthMonitor(BaseProcess):
         try:
             # Check if it's time for health monitoring
             if not self._should_run_health_check():
-                time.sleep(2)  # Short sleep if not time yet
+                time.sleep(2)
                 return
 
             if not self.active_strategies:
-                # No active strategies to monitor
                 time.sleep(self.check_interval)
                 return
 
@@ -178,14 +159,8 @@ class PositionHealthMonitor(BaseProcess):
                 time.sleep(30)
                 return
 
-            # Start workers for parallel processing
-            self._start_workers()
-
-            # Run health analysis using multiprocess coordination
+            # Run parallel health analysis using generic manager
             health_results = self._run_parallel_health_analysis(market_data_dict)
-
-            # Stop workers
-            self._stop_workers()
 
             # Process results and send alerts
             alerts_sent = self._process_health_results(health_results)
@@ -206,7 +181,7 @@ class PositionHealthMonitor(BaseProcess):
         except Exception as e:
             self.logger.error(f"Error in position health monitor cycle: {e}")
             self.error_count += 1
-            time.sleep(30)  # Wait before retry
+            time.sleep(30)
 
     def _should_run_health_check(self) -> bool:
         """Check if it's time to run health monitoring"""
@@ -220,19 +195,46 @@ class PositionHealthMonitor(BaseProcess):
         """Load active strategies from shared state"""
         try:
             if self.shared_state:
-                # Get active positions from shared state
                 positions = self.shared_state.get_all_positions()
 
-                # Convert to ActiveStrategy objects
+                # Convert position data to ActiveStrategy objects
                 for symbol, position_data in positions.items():
-                    # Create ActiveStrategy from position data
-                    # This would need proper conversion logic based on your position data structure
-                    self.logger.debug(f"Loaded active strategy for {symbol}")
+                    try:
+                        # Create ActiveStrategy from position data
+                        strategy = self._create_active_strategy_from_position(symbol, position_data)
+                        if strategy:
+                            self.active_strategies[symbol] = strategy
+                            self.logger.debug(f"Loaded active strategy for {symbol}")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to create strategy for {symbol}: {e}")
 
                 self.logger.info(f"Loaded {len(self.active_strategies)} active strategies")
 
         except Exception as e:
             self.logger.warning(f"Failed to load active strategies: {e}")
+
+    def _create_active_strategy_from_position(self, symbol: str, position_data: Dict) -> Optional[ActiveStrategy]:
+        """Create ActiveStrategy object from position data"""
+        try:
+            return ActiveStrategy(
+                symbol=symbol,
+                strategy_type=position_data.get('strategy_type', 'unknown'),
+                entry_time=datetime.fromisoformat(position_data.get('entry_time', datetime.now().isoformat())),
+                entry_price=position_data.get('entry_price', 0.0),
+                position_size=position_data.get('shares', 0) * 0.01,  # Convert to percentage
+                target_size=position_data.get('shares', 0) * 0.015,  # 1.5x current as target
+                status=StrategyStatus.ACTIVE,
+                parameters={'vol_scale_threshold': 0.35},
+                exit_conditions={
+                    'max_holding_days': 30,
+                    'profit_target_pct': 15.0,
+                    'stop_loss_pct': -8.0,
+                    'trailing_stop_pct': -5.0
+                }
+            )
+        except Exception as e:
+            self.logger.error(f"Error creating ActiveStrategy for {symbol}: {e}")
+            return None
 
     def _fetch_market_data(self) -> Dict[str, Any]:
         """Fetch market data for all active positions"""
@@ -261,102 +263,65 @@ class PositionHealthMonitor(BaseProcess):
             self.logger.error(f"Error fetching market data: {e}")
             return {}
 
-    def _start_workers(self):
-        """Start worker processes for parallel health analysis"""
+    def _run_parallel_health_analysis(self, market_data_dict: Dict[str, Any]) -> List[TaskResult]:
+        """Run health analysis using generic multiprocess manager"""
         try:
-            for i in range(self.num_workers):
-                worker = mp.Process(
-                    target=position_health_worker,
-                    args=(self.task_queue, self.result_queue),
-                    name=f'HealthWorker-{i}'
-                )
-                worker.start()
-                self.workers.append(worker)
-
-            self.logger.debug(f"Started {len(self.workers)} health monitoring workers")
-
-        except Exception as e:
-            self.logger.error(f"Error starting workers: {e}")
-            raise
-
-    def _stop_workers(self):
-        """Stop worker processes"""
-        try:
-            # Send stop signals
-            for _ in self.workers:
-                self.task_queue.put(None)
-
-            # Wait for workers to finish
-            for worker in self.workers:
-                worker.join(timeout=5)
-                if worker.is_alive():
-                    worker.terminate()
-                    worker.join()
-
-            self.workers.clear()
-            self.logger.debug("Health monitoring workers stopped")
-
-        except Exception as e:
-            self.logger.error(f"Error stopping workers: {e}")
-
-    def _run_parallel_health_analysis(self, market_data_dict: Dict[str, Any]) -> Dict[str, Any]:
-        """Run health analysis using parallel workers"""
-        try:
-            # Submit tasks for all analysis types
-            task_count = 0
+            # Create tasks for parallel execution
+            tasks = []
             for symbol, strategy in self.active_strategies.items():
-                if symbol not in market_data_dict:
-                    continue
-
-                # Submit different analysis tasks
-                for task_type in ['exit', 'scaling', 'risk', 'metrics']:
-                    task = {
+                if symbol in market_data_dict:
+                    tasks.append({
+                        'task_id': f"health-{symbol}",
+                        'task_type': 'position_health',
                         'symbol': symbol,
-                        'active_strategy': strategy,
+                        'strategy': strategy,
                         'market_data': market_data_dict[symbol],
-                        'task_type': task_type,
-                        'portfolio_state': self._get_portfolio_state(),
-                        'risk_limits': self._get_risk_limits()
-                    }
-                    self.task_queue.put(task)
-                    task_count += 1
+                        'analysis_type': 'comprehensive'
+                    })
 
-            # Collect results
-            results = []
-            collected = 0
-            timeout = 30
-            start_time = time.time()
+            if not tasks:
+                self.logger.warning("No tasks created for health analysis")
+                return []
 
-            while collected < task_count and time.time() - start_time < timeout:
-                try:
-                    result = self.result_queue.get(timeout=1)
-                    results.append(result)
-                    collected += 1
-                except queue.Empty:
-                    continue
+            # Execute tasks in parallel using Layer 2 (generic manager)
+            results = self.multiprocess_manager.execute_tasks_parallel(
+                tasks, position_health_worker, timeout=30
+            )
 
-            # Organize results by analysis type
-            organized_results = {'exit': [], 'scaling': [], 'risk': [], 'metrics': []}
-            for result in results:
-                if result.analysis_type in organized_results:
-                    organized_results[result.analysis_type].append(result)
-
-            self.logger.info(f"Collected {collected}/{task_count} health analysis results")
-            return organized_results
+            self.logger.info(f"Parallel health analysis complete - {len(results)} results collected")
+            return results
 
         except Exception as e:
             self.logger.error(f"Error in parallel health analysis: {e}")
-            return {'exit': [], 'scaling': [], 'risk': [], 'metrics': []}
+            return []
 
-    def _process_health_results(self, health_results: Dict[str, List[PositionHealthResult]]) -> int:
-        """Process health results and send critical alerts to queue"""
+    def _process_health_results(self, task_results: List[TaskResult]) -> int:
+        """Process health results and send alerts"""
         alerts_sent = 0
 
         try:
-            # Generate portfolio summary
-            portfolio_summary = self.health_analyzer.generate_portfolio_summary(health_results)
+            # Organize results for portfolio summary
+            all_analysis_results = []
 
-            # Send critical alerts to queue
+            for task_result in task_results:
+                if task_result.success:
+                    analysis_results = task_result.data.get('analysis_results', {})
+                    all_analysis_results.append(analysis_results)
+                else:
+                    self.logger.warning(f"Failed health analysis for {task_result.task_id}: {task_result.error}")
+
+            if not all_analysis_results:
+                return 0
+
+            # Generate portfolio summary using analytics component
+            portfolio_summary = self.health_analyzer.generate_portfolio_summary({
+                'exit': [r.get('exit') for r in all_analysis_results if r.get('exit')],
+                'scaling': [r.get('scaling') for r in all_analysis_results if r.get('scaling')],
+                'risk': [r.get('risk') for r in all_analysis_results if r.get('risk')],
+                'metrics': [r.get('metrics') for r in all_analysis_results if r.get('metrics')]
+            })
+
+            # Send critical alerts via Layer 1 (priority queue)
             for alert in portfolio_summary['alerts']:
                 if alert.severity == 'CRITICAL':
                     success = self._send_health_alert_to_queue(alert)
@@ -370,7 +335,7 @@ class PositionHealthMonitor(BaseProcess):
                     if success:
                         alerts_sent += 1
 
-            self.logger.info(f"Processed health results: {len(portfolio_summary['alerts'])} alerts, {len(portfolio_summary['actions'])} actions")
+            self.logger.info(f"Processed {len(portfolio_summary['alerts'])} alerts, {len(portfolio_summary['actions'])} actions")
             return alerts_sent
 
         except Exception as e:
@@ -378,7 +343,7 @@ class PositionHealthMonitor(BaseProcess):
             return 0
 
     def _send_health_alert_to_queue(self, alert) -> bool:
-        """Send health alert to priority queue"""
+        """Send health alert to priority queue (Layer 1)"""
         try:
             if not self.priority_queue:
                 return False
@@ -391,12 +356,11 @@ class PositionHealthMonitor(BaseProcess):
                 payload={
                     'alert_type': alert.alert_type,
                     'symbol': alert.symbol,
-                    'strategy_type': alert.strategy_type,
                     'severity': alert.severity,
                     'message': alert.message,
                     'action_required': alert.action_required,
                     'metrics': alert.metrics,
-                    'timestamp': alert.timestamp
+                    'timestamp': alert.timestamp.isoformat()
                 }
             )
 
@@ -409,7 +373,7 @@ class PositionHealthMonitor(BaseProcess):
             return False
 
     def _send_action_recommendation_to_queue(self, action: Dict[str, Any]) -> bool:
-        """Send action recommendation to priority queue"""
+        """Send action recommendation to priority queue (Layer 1)"""
         try:
             if not self.priority_queue:
                 return False
@@ -438,7 +402,7 @@ class PositionHealthMonitor(BaseProcess):
             return False
 
     def _get_portfolio_state(self) -> Dict[str, Any]:
-        """Get current portfolio state from shared state"""
+        """Get current portfolio state from shared state (Layer 1)"""
         try:
             if self.shared_state:
                 return {
@@ -450,53 +414,52 @@ class PositionHealthMonitor(BaseProcess):
             self.logger.warning(f"Failed to get portfolio state: {e}")
             return {}
 
-    def _get_risk_limits(self) -> Dict[str, Any]:
-        """Get risk limits configuration"""
-        return {
-            'max_volatility': 0.50,
-            'max_drawdown': -10.0,
-            'max_position_size': 0.15
-        }
-
-    def _update_shared_state(self, health_results: Dict[str, List[PositionHealthResult]]):
-        """Update shared state with health monitoring results"""
+    def _update_shared_state(self, task_results: List[TaskResult]):
+        """Update shared state with health monitoring results (Layer 1)"""
         try:
             if not self.shared_state:
                 return
 
             # Update position health metrics
-            for results_list in health_results.values():
-                for result in results_list:
-                    if result.success and result.current_metrics:
-                        # Update shared state with health metrics
-                        # This would depend on your shared state structure
-                        pass
+            for task_result in task_results:
+                if task_result.success:
+                    symbol = task_result.data.get('symbol')
+                    analysis_results = task_result.data.get('analysis_results', {})
+
+                    # Update shared state with health metrics
+                    if symbol and analysis_results:
+                        metrics = analysis_results.get('metrics', {})
+                        if metrics and metrics.current_metrics:
+                            # Update position health data
+                            pass  # Implementation depends on shared state structure
 
             self.logger.debug("Updated shared state with health results")
 
         except Exception as e:
             self.logger.warning(f"Failed to update shared state: {e}")
 
-    def _update_process_status(self, health_results: Dict[str, List[PositionHealthResult]], alerts_sent: int):
-        """Update process status in shared state"""
+    def _update_process_status(self, task_results: List[TaskResult], alerts_sent: int):
+        """Update process status in shared state (Layer 1)"""
         try:
             if not self.shared_state:
                 return
 
             # Calculate summary statistics
             total_positions = len(self.active_strategies)
-            healthy_positions = sum(1 for results in health_results.get('risk', [])
-                                  if results.success and results.risk_level != 'HIGH')
+            successful_analyses = sum(1 for r in task_results if r.success)
+
+            # Get multiprocess manager stats
+            manager_stats = self.multiprocess_manager.get_stats()
 
             status_data = {
                 'last_check_time': self.last_check_time.isoformat() if self.last_check_time else None,
                 'health_checks_count': self.health_checks_count,
                 'total_positions_monitored': total_positions,
-                'healthy_positions': healthy_positions,
+                'successful_analyses': successful_analyses,
                 'alerts_sent_this_cycle': alerts_sent,
                 'total_alerts_sent': self.alerts_sent_count,
                 'check_interval_seconds': self.check_interval,
-                'worker_count': self.num_workers,
+                'manager_stats': manager_stats,
                 'health_status': 'healthy' if self.error_count < 3 else 'degraded',
                 'error_count': self.error_count,
                 'process_state': self.state.value
@@ -512,16 +475,8 @@ class PositionHealthMonitor(BaseProcess):
         self.logger.info("Cleaning up PositionHealthMonitor...")
 
         try:
-            # Stop any running workers
-            self._stop_workers()
-
-            # Close queues
-            if self.task_queue:
-                self.task_queue.close()
-            if self.result_queue:
-                self.result_queue.close()
-
-            # Clear references
+            # Clear references (generic manager cleans itself up)
+            self.multiprocess_manager = None
             self.health_analyzer = None
             self.data_fetcher = None
             self.active_strategies.clear()
@@ -533,7 +488,7 @@ class PositionHealthMonitor(BaseProcess):
 
     def get_process_info(self) -> Dict[str, Any]:
         """Return process-specific information for monitoring"""
-        return {
+        base_info = {
             'process_type': 'position_health_monitor',
             'check_interval_seconds': self.check_interval,
             'risk_threshold': self.risk_threshold,
@@ -541,11 +496,16 @@ class PositionHealthMonitor(BaseProcess):
             'last_check_time': self.last_check_time.isoformat() if self.last_check_time else None,
             'health_checks_count': self.health_checks_count,
             'alerts_sent_count': self.alerts_sent_count,
-            'worker_count': self.num_workers,
             'error_count': self.error_count,
             'state': self.state.value,
             'strategies_monitored': list(self.active_strategies.keys())
         }
+
+        # Add multiprocess manager stats if available
+        if self.multiprocess_manager:
+            base_info['manager_stats'] = self.multiprocess_manager.get_stats()
+
+        return base_info
 
     # Public interface methods for external control
 
@@ -585,108 +545,23 @@ class PositionHealthMonitor(BaseProcess):
             if not market_data_dict:
                 return {'success': False, 'error': 'No market data available'}
 
-            # Start workers
-            self._start_workers()
-
-            # Run analysis
-            health_results = self._run_parallel_health_analysis(market_data_dict)
-
-            # Stop workers
-            self._stop_workers()
+            # Run analysis using generic manager
+            task_results = self._run_parallel_health_analysis(market_data_dict)
 
             # Process results
-            alerts_sent = self._process_health_results(health_results)
+            alerts_sent = self._process_health_results(task_results)
 
             # Generate summary
-            portfolio_summary = self.health_analyzer.generate_portfolio_summary(health_results)
+            successful_results = [r for r in task_results if r.success]
 
             return {
                 'success': True,
                 'alerts_sent': alerts_sent,
-                'summary': portfolio_summary['summary'],
-                'alerts': [
-                    {
-                        'symbol': alert.symbol,
-                        'severity': alert.severity,
-                        'message': alert.message,
-                        'action_required': alert.action_required
-                    }
-                    for alert in portfolio_summary['alerts']
-                ],
-                'actions': portfolio_summary['actions']
+                'results_collected': len(task_results),
+                'successful_analyses': len(successful_results),
+                'manager_stats': self.multiprocess_manager.get_stats() if self.multiprocess_manager else {}
             }
 
         except Exception as e:
             self.logger.error(f"Error in forced health check: {e}")
             return {'success': False, 'error': str(e)}
-
-    def get_strategy_health_summary(self) -> Dict[str, Any]:
-        """Get summary of all monitored strategies health"""
-        try:
-            if not self.active_strategies:
-                return {'total_strategies': 0, 'strategies': []}
-
-            strategy_summaries = []
-            total_pnl = 0
-            total_allocation = 0
-
-            for symbol, strategy in self.active_strategies.items():
-                # Calculate health score if analyzer is available
-                health_score = 50.0  # Default
-                if self.health_analyzer:
-                    try:
-                        # Would need market data for accurate health score
-                        health_score = 50.0  # Placeholder
-                    except:
-                        pass
-
-                strategy_info = {
-                    'symbol': symbol,
-                    'strategy_type': strategy.strategy_type,
-                    'status': strategy.status.value,
-                    'position_size': strategy.position_size,
-                    'pnl': strategy.unrealized_pnl,
-                    'pnl_pct': strategy.unrealized_pnl_pct,
-                    'time_active': str(strategy.time_in_position()),
-                    'risk_score': strategy.risk_score,
-                    'health_score': health_score,
-                    'entry_price': strategy.entry_price,
-                    'current_price': strategy.current_price
-                }
-                strategy_summaries.append(strategy_info)
-                total_pnl += strategy.unrealized_pnl
-                total_allocation += strategy.position_size
-
-            # Calculate status breakdown
-            status_breakdown = {}
-            for status in StrategyStatus:
-                count = len([s for s in self.active_strategies.values() if s.status == status])
-                if count > 0:
-                    status_breakdown[status.value] = count
-
-            return {
-                'total_strategies': len(self.active_strategies),
-                'total_allocation': total_allocation,
-                'total_pnl': total_pnl,
-                'average_health_score': sum(s['health_score'] for s in strategy_summaries) / len(strategy_summaries),
-                'strategies': sorted(strategy_summaries, key=lambda x: x['health_score'], reverse=True),
-                'status_breakdown': status_breakdown,
-                'last_check': self.last_check_time.isoformat() if self.last_check_time else None
-            }
-
-        except Exception as e:
-            self.logger.error(f"Error getting strategy health summary: {e}")
-            return {'error': str(e)}
-
-    def update_strategy_status(self, symbol: str, new_status: StrategyStatus) -> bool:
-        """Update the status of a monitored strategy"""
-        try:
-            if symbol in self.active_strategies:
-                old_status = self.active_strategies[symbol].status
-                self.active_strategies[symbol].status = new_status
-                self.logger.info(f"Updated {symbol} status: {old_status.value} -> {new_status.value}")
-                return True
-            return False
-        except Exception as e:
-            self.logger.error(f"Failed to update strategy status for {symbol}: {e}")
-            return False
