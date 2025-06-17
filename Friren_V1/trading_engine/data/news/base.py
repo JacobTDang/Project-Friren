@@ -7,7 +7,7 @@ The collector will handle FinBERT preparation later.
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Dict
 from abc import ABC, abstractmethod
 
 
@@ -31,7 +31,17 @@ class NewsDataSource(ABC):
 
     @abstractmethod
     def collect_news(self, hours_back: int = 24, max_articles: int = 50) -> List[NewsArticle]:
-        """Collect news articles from this source"""
+        """Collect general news articles from this source"""
+        pass
+
+    @abstractmethod
+    def get_symbol_news(self, symbol: str, hours_back: int = 24, max_articles: int = 20) -> List[NewsArticle]:
+        """Get news specifically for a symbol - CRITICAL for decision engine watchlist"""
+        pass
+
+    @abstractmethod
+    def get_watchlist_news(self, symbols: List[str], hours_back: int = 24, max_articles_per_symbol: int = 10) -> Dict[str, List[NewsArticle]]:
+        """Get news for multiple symbols (watchlist) - returns {symbol: [articles]}"""
         pass
 
     @abstractmethod
