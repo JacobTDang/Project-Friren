@@ -90,7 +90,7 @@ class SymbolExtractor:
 
 
 class YahooFinanceNews(NewsDataSource):
-    """Simple Yahoo Finance news collector"""
+    """Simple Yahoo Finance news collector - optimized for individual stock news"""
 
     def __init__(self):
         super().__init__("Yahoo Finance")
@@ -105,7 +105,7 @@ class YahooFinanceNews(NewsDataSource):
         self.symbol_extractor = SymbolExtractor()
 
     def collect_news(self, hours_back: int = 24, max_articles: int = 50) -> List[NewsArticle]:
-        """Collect news from Yahoo Finance"""
+        """Collect general news from Yahoo Finance"""
         sections = [
             'https://finance.yahoo.com/news/',
             'https://finance.yahoo.com/topic/stock-market-news/',
@@ -138,6 +138,67 @@ class YahooFinanceNews(NewsDataSource):
         # Remove duplicates
         unique_articles = self._remove_duplicates(all_articles)
         return unique_articles[:max_articles]
+
+    def get_symbol_news(self, symbol: str, hours_back: int = 24, max_articles: int = 20) -> List[NewsArticle]:
+        """
+        Get news specifically for a symbol - CRITICAL for decision engine
+
+        This is the key method for watchlist-based trading decisions
+        """
+        try:
+            self.logger.info(f"Fetching news for {symbol}")
+
+            # Yahoo Finance symbol-specific news page
+            symbol_url = f"https://finance.yahoo.com/quote/{symbol}/news"
+            articles = self._scrape_section(symbol_url)
+
+            # Filter by time
+            cutoff_time = datetime.now() - timedelta(hours=hours_back)
+            recent_articles = [
+                article for article in articles
+                if article.published_date >= cutoff_time
+            ]
+
+            # Filter to articles that actually mention the symbol
+            symbol_articles = []
+            for article in recent_articles:
+                if (symbol.upper() in article.symbols_mentioned or
+                    symbol.lower() in article.title.lower() or
+                    symbol.upper() in article.title):
+                    symbol_articles.append(article)
+
+            self.logger.info(f"Found {len(symbol_articles)} recent articles for {symbol}")
+            return symbol_articles[:max_articles]
+
+        except Exception as e:
+            self.logger.error(f"Error getting news for {symbol}: {e}")
+            return []
+
+    def get_watchlist_news(self, symbols: List[str], hours_back: int = 24, max_articles_per_symbol: int = 10) -> dict[str, List[NewsArticle]]:
+        """
+        Get news for multiple symbols (watchlist) - CRITICAL for decision engine
+
+        Returns: {symbol: [articles]} mapping for easy decision engine processing
+        """
+        watchlist_news = {}
+
+        for symbol in symbols:
+            try:
+                self.logger.info(f"Getting watchlist news for {symbol}")
+                symbol_articles = self.get_symbol_news(symbol, hours_back, max_articles_per_symbol)
+                watchlist_news[symbol] = symbol_articles
+
+                # Rate limiting between symbols
+                time.sleep(1)
+
+            except Exception as e:
+                self.logger.error(f"Error getting watchlist news for {symbol}: {e}")
+                watchlist_news[symbol] = []
+
+        total_articles = sum(len(articles) for articles in watchlist_news.values())
+        self.logger.info(f"Collected {total_articles} total articles for {len(symbols)} watchlist symbols")
+
+        return watchlist_news
 
     def test_connection(self) -> bool:
         """Test connection to Yahoo Finance"""
@@ -255,19 +316,29 @@ if __name__ == "__main__":
 
     if collector.test_connection():
         print("Testing Yahoo Finance news collection...")
-        articles = collector.collect_news(max_articles=10, hours_back=48)
 
-        print(f"Collected {len(articles)} articles")
+        # Test general news
+        articles = collector.collect_news(max_articles=5, hours_back=48)
+        print(f"General news: {len(articles)} articles")
 
-        for i, article in enumerate(articles[:3]):
-            print(f"\n{i+1}. {article.title}")
-            print(f"   Symbols: {article.symbols_mentioned}")
-            print(f"   URL: {article.url}")
+        # Test individual stock news (key for decision engine)
+        print(f"\nTesting individual stock news...")
+        aapl_news = collector.get_symbol_news('AAPL', hours_back=48)
+        print(f"AAPL news: {len(aapl_news)} articles")
 
-        # Test symbol-specific
-        print(f"\nTesting AAPL news...")
-        aapl_news = collector.get_symbol_news('AAPL')
-        print(f"Found {len(aapl_news)} AAPL articles")
+        for article in aapl_news[:2]:
+            print(f"  - {article.title}")
+            print(f"    Symbols: {article.symbols_mentioned}")
+
+        # Test watchlist news (key for decision engine)
+        print(f"\nTesting watchlist news...")
+        watchlist = ['AAPL', 'MSFT', 'GOOGL']
+        watchlist_news = collector.get_watchlist_news(watchlist, hours_back=48, max_articles_per_symbol=3)
+
+        for symbol, articles in watchlist_news.items():
+            print(f"  {symbol}: {len(articles)} articles")
+            for article in articles[:1]:  # Show first article
+                print(f"    - {article.title[:60]}...")
 
     else:
         print("Connection failed!")
