@@ -1,7 +1,7 @@
 """
 Reddit News Data Collector
 
-Clean Reddit integration for social sentiment and retail trader buzz.
+Social sentiment and retail trader buzz from Reddit.
 Key subreddits: wallstreetbets, investing, stocks, options.
 """
 
@@ -14,37 +14,38 @@ import logging
 
 try:
     from .base import NewsDataSource, NewsArticle
-    from .yahoo_news import SymbolExtractor  # Reuse symbol extractor
+    from .yahoo_news import SymbolExtractor
 except ImportError:
     from base import NewsDataSource, NewsArticle
     from yahoo_news import SymbolExtractor
 
 
 class RedditSymbolExtractor(SymbolExtractor):
-    """Enhanced symbol extraction for Reddit posts with trading slang"""
+    """Enhanced symbol extraction for Reddit trading posts with slang"""
 
     def __init__(self):
         super().__init__()
 
-        # Add Reddit-specific trading patterns
-        self.reddit_patterns = [
-            # Common Reddit trading patterns
+        # Reddit-specific trading patterns and slang
+        self.reddit_trading_terms = [
             r'\b(' + '|'.join(self.known_symbols) + r')\s+(?:calls?|puts?|options?)\b',
             r'(?:bought?|sold?|buying|selling)\s+(' + '|'.join(self.known_symbols) + r')\b',
-            r'\b(' + '|'.join(self.known_symbols) + r')\s+(?:to the moon|moon|rocket|diamond hands)\b',
-            r'\b(' + '|'.join(self.known_symbols) + r')\s+(?:yolo|hodl|squeeze)\b',
-            r'(?:position|holding)\s+(' + '|'.join(self.known_symbols) + r')\b',
-            r'\b(' + '|'.join(self.known_symbols) + r')\s+(?:gain|loss|profit)\b',
+            r'\b(' + '|'.join(self.known_symbols) + r')\s+(?:to the moon|moon|rocket|diamond hands|hodl)\b',
+            r'\b(' + '|'.join(self.known_symbols) + r')\s+(?:yolo|squeeze|apes?|tendies)\b',
+            r'(?:position|holding|bag)\s+(' + '|'.join(self.known_symbols) + r')\b',
+            r'\b(' + '|'.join(self.known_symbols) + r')\s+(?:gain|loss|profit|rip)\b',
+            r'\$(' + '|'.join(self.known_symbols) + r')\b',  # $AAPL format
         ]
 
     def extract_symbols(self, text: str) -> List[str]:
-        """Enhanced symbol extraction for Reddit posts"""
+        """Enhanced symbol extraction for Reddit trading posts"""
+        import re
+
         # Get base symbols first
         symbols = set(super().extract_symbols(text))
 
-        # Add Reddit-specific patterns
-        import re
-        for pattern in self.reddit_patterns:
+        # Add Reddit-specific trading patterns
+        for pattern in self.reddit_trading_terms:
             matches = re.findall(pattern, text, re.IGNORECASE)
             symbols.update(m.upper() for m in matches)
 
@@ -52,7 +53,7 @@ class RedditSymbolExtractor(SymbolExtractor):
 
 
 class RedditNews(NewsDataSource):
-    """Simplified Reddit news collector for trading sentiment"""
+    """Clean Reddit collector for trading sentiment and social buzz"""
 
     def __init__(self, client_id: Optional[str] = None, client_secret: Optional[str] = None,
                  user_agent: Optional[str] = None):
@@ -69,91 +70,110 @@ class RedditNews(NewsDataSource):
         self.logger = logging.getLogger(f"{__name__}.RedditNews")
         self.symbol_extractor = RedditSymbolExtractor()
 
-        # Initialize Reddit connection
+        # Initialize Reddit connection with error handling
+        self.reddit = None
+        self._initialize_reddit()
+
+        # Curated trading subreddits (prioritized by quality)
+        self.trading_subreddits = [
+            'wallstreetbets',     # High-energy retail trading (most active)
+            'investing',          # Long-term investment discussion
+            'stocks',            # General stock discussion
+            'SecurityAnalysis',  # Fundamental analysis
+            'ValueInvesting',    # Value investing strategies
+            'options',           # Options trading
+            'StockMarket',       # Market analysis
+            'pennystocks',       # Penny stock discussion
+        ]
+
+        # Track API usage for rate limiting
+        self.requests_made = 0
+        self.last_request_time = time.time()
+
+    def _initialize_reddit(self):
+        """Initialize Reddit connection with proper error handling"""
         try:
             self.reddit = praw.Reddit(
                 client_id=self.client_id,
                 client_secret=self.client_secret,
                 user_agent=self.user_agent
             )
-            # Test connection
+
+            # Test connection - this will fail if credentials are wrong
             self.reddit.user.me()
             self.logger.info("Reddit API connection successful")
+
         except Exception as e:
             self.logger.error(f"Reddit API connection failed: {e}")
             self.reddit = None
 
-        # Trading subreddits for financial sentiment
-        self.trading_subreddits = [
-            'wallstreetbets',    # High-energy retail trading
-            'investing',         # Long-term investment discussion
-            'stocks',           # General stock discussion
-            'StockMarket',      # Market analysis
-            'SecurityAnalysis', # Fundamental analysis
-            'ValueInvesting',   # Value investing
-            'options',          # Options trading
-            'pennystocks',      # Penny stock discussion
-            # 'investing_discussion', # Alternative if main subs are restricted
-        ]
-
     def collect_news(self, hours_back: int = 24, max_articles: int = 50) -> List[NewsArticle]:
-        """Collect general trading posts from Reddit"""
+        """Collect general trading posts from top Reddit communities"""
         if not self.reddit:
             self.logger.error("Reddit API not available")
             return []
 
-        cutoff_time = datetime.now() - timedelta(hours=hours_back)
-        all_posts = []
+        try:
+            self.logger.info("Collecting general trading posts from Reddit")
+            cutoff_time = datetime.now() - timedelta(hours=hours_back)
+            all_posts = []
 
-        for subreddit_name in self.trading_subreddits[:4]:  # Limit to top 4 for general collection
-            try:
-                posts = self._get_subreddit_posts(subreddit_name, limit=20, cutoff_time=cutoff_time)
-                all_posts.extend(posts)
+            # Get posts from top trading subreddits
+            for subreddit_name in self.trading_subreddits[:4]:  # Limit for efficiency
+                try:
+                    posts = self._get_subreddit_posts(
+                        subreddit_name,
+                        limit=15,
+                        cutoff_time=cutoff_time
+                    )
+                    all_posts.extend(posts)
 
-                if len(all_posts) >= max_articles:
-                    break
+                    if len(all_posts) >= max_articles:
+                        break
 
-                time.sleep(0.5)  # Rate limiting
+                    self._rate_limit()
 
-            except Exception as e:
-                self.logger.error(f"Error collecting from r/{subreddit_name}: {e}")
-                continue
+                except Exception as e:
+                    self.logger.error(f"Error collecting from r/{subreddit_name}: {e}")
+                    continue
 
-        unique_posts = self._remove_duplicates(all_posts)
-        return unique_posts[:max_articles]
+            unique_posts = self._remove_duplicates(all_posts)
+            self.logger.info(f"Collected {len(unique_posts)} Reddit posts")
+            return unique_posts[:max_articles]
+
+        except Exception as e:
+            self.logger.error(f"Error in Reddit general collection: {e}")
+            return []
 
     def get_symbol_news(self, symbol: str, hours_back: int = 24, max_articles: int = 20) -> List[NewsArticle]:
-        """Get Reddit posts specifically mentioning a symbol - KEY for decision engine"""
+        """Get Reddit posts mentioning a specific symbol - KEY for decision engine"""
         if not self.reddit:
             self.logger.error("Reddit API not available")
             return []
 
         try:
             self.logger.info(f"Searching Reddit for {symbol} mentions")
-
             cutoff_time = datetime.now() - timedelta(hours=hours_back)
             symbol_posts = []
 
-            # Search across trading subreddits for symbol mentions
-            for subreddit_name in self.trading_subreddits:
+            # Strategy 1: Search recent posts from trading subreddits
+            for subreddit_name in self.trading_subreddits[:5]:  # Top 5 subreddits
                 try:
-                    # Get recent posts from subreddit
-                    posts = self._get_subreddit_posts(subreddit_name, limit=50, cutoff_time=cutoff_time)
+                    posts = self._get_subreddit_posts(
+                        subreddit_name,
+                        limit=30,
+                        cutoff_time=cutoff_time
+                    )
 
                     # Filter for symbol mentions
                     for post in posts:
-                        if (symbol.upper() in post.symbols_mentioned or
-                            symbol.lower() in post.title.lower() or
-                            symbol.upper() in post.title.upper()):
-
+                        if self._post_mentions_symbol(post, symbol):
                             # Ensure symbol is in symbols_mentioned
                             if symbol.upper() not in post.symbols_mentioned:
                                 post.symbols_mentioned.append(symbol.upper())
-
                             symbol_posts.append(post)
 
-                    # Rate limiting
-                    time.sleep(0.3)
+                    self._rate_limit()
 
                     if len(symbol_posts) >= max_articles:
                         break
@@ -162,16 +182,16 @@ class RedditNews(NewsDataSource):
                     self.logger.debug(f"Error searching r/{subreddit_name} for {symbol}: {e}")
                     continue
 
-            # Also try Reddit search API for symbol
-            try:
-                search_posts = self._search_reddit_for_symbol(symbol, hours_back, max_articles // 2)
-                symbol_posts.extend(search_posts)
-            except Exception as e:
-                self.logger.debug(f"Reddit search failed for {symbol}: {e}")
+            # Strategy 2: Direct Reddit search (if we need more posts)
+            if len(symbol_posts) < max_articles // 2:
+                try:
+                    search_posts = self._search_reddit_for_symbol(symbol, hours_back, max_articles // 2)
+                    symbol_posts.extend(search_posts)
+                except Exception as e:
+                    self.logger.debug(f"Reddit search failed for {symbol}: {e}")
 
             unique_posts = self._remove_duplicates(symbol_posts)
             self.logger.info(f"Found {len(unique_posts)} Reddit posts mentioning {symbol}")
-
             return unique_posts[:max_articles]
 
         except Exception as e:
@@ -185,40 +205,41 @@ class RedditNews(NewsDataSource):
             self.logger.error("Reddit API not available")
             return {symbol: [] for symbol in symbols}
 
-        watchlist_news = {}
-        cutoff_time = datetime.now() - timedelta(hours=hours_back)
+        watchlist_news = {symbol: [] for symbol in symbols}
 
         try:
             self.logger.info(f"Collecting Reddit news for {len(symbols)} watchlist symbols")
+            cutoff_time = datetime.now() - timedelta(hours=hours_back)
 
-            # Collect all recent posts from trading subreddits once
+            # Collect posts from trading subreddits once (efficient approach)
             all_recent_posts = []
 
             for subreddit_name in self.trading_subreddits[:6]:  # More subreddits for watchlist
                 try:
-                    posts = self._get_subreddit_posts(subreddit_name, limit=100, cutoff_time=cutoff_time)
+                    posts = self._get_subreddit_posts(
+                        subreddit_name,
+                        limit=50,
+                        cutoff_time=cutoff_time
+                    )
                     all_recent_posts.extend(posts)
-                    time.sleep(0.5)  # Rate limiting
+                    self._rate_limit()
+
                 except Exception as e:
                     self.logger.debug(f"Error collecting from r/{subreddit_name}: {e}")
                     continue
 
-            # Filter posts for each symbol in watchlist
+            # Distribute posts to relevant symbols
             for symbol in symbols:
                 try:
-                    symbol_posts = []
+                    symbol_posts = [
+                        post for post in all_recent_posts
+                        if self._post_mentions_symbol(post, symbol)
+                    ]
 
-                    # Filter from all recent posts
-                    for post in all_recent_posts:
-                        if (symbol.upper() in post.symbols_mentioned or
-                            symbol.lower() in post.title.lower() or
-                            symbol.upper() in post.title.upper()):
-
-                            # Ensure symbol is in symbols_mentioned
-                            if symbol.upper() not in post.symbols_mentioned:
-                                post.symbols_mentioned.append(symbol.upper())
-
-                            symbol_posts.append(post)
+                    # Ensure symbol is added to symbols_mentioned
+                    for post in symbol_posts:
+                        if symbol.upper() not in post.symbols_mentioned:
+                            post.symbols_mentioned.append(symbol.upper())
 
                     # Deduplicate and limit
                     unique_posts = self._remove_duplicates(symbol_posts)
@@ -229,11 +250,10 @@ class RedditNews(NewsDataSource):
                     watchlist_news[symbol] = []
 
             total_posts = sum(len(posts) for posts in watchlist_news.values())
-            self.logger.info(f"Reddit watchlist complete: {total_posts} total posts for {len(symbols)} symbols")
+            self.logger.info(f"Reddit watchlist: {total_posts} total posts for {len(symbols)} symbols")
 
         except Exception as e:
             self.logger.error(f"Error in Reddit watchlist collection: {e}")
-            watchlist_news = {symbol: [] for symbol in symbols}
 
         return watchlist_news
 
@@ -243,9 +263,8 @@ class RedditNews(NewsDataSource):
             if not self.reddit:
                 return False
 
-            # Try to access a simple subreddit
+            # Simple test - access investing subreddit
             test_subreddit = self.reddit.subreddit('investing')
-            # Get just one post to test connection
             list(test_subreddit.hot(limit=1))
             return True
 
@@ -255,13 +274,13 @@ class RedditNews(NewsDataSource):
 
     def _get_subreddit_posts(self, subreddit_name: str, limit: int = 50,
                            cutoff_time: Optional[datetime] = None) -> List[NewsArticle]:
-        """Get posts from a specific subreddit"""
+        """Get posts from a specific subreddit with filtering"""
         posts = []
 
         try:
             subreddit = self.reddit.subreddit(subreddit_name)
 
-            # Get hot posts (most active/relevant)
+            # Get hot posts (most engaging content)
             for post in subreddit.hot(limit=limit):
                 try:
                     article = self._parse_reddit_post(post, subreddit_name)
@@ -270,7 +289,6 @@ class RedditNews(NewsDataSource):
                         # Filter by time if specified
                         if cutoff_time and article.published_date < cutoff_time:
                             continue
-
                         posts.append(article)
 
                 except Exception as e:
@@ -283,31 +301,40 @@ class RedditNews(NewsDataSource):
         return posts
 
     def _search_reddit_for_symbol(self, symbol: str, hours_back: int, max_results: int) -> List[NewsArticle]:
-        """Search Reddit for specific symbol mentions"""
+        """Search Reddit for specific symbol mentions using search API"""
         posts = []
 
         try:
-            # Search across all of Reddit for the symbol
-            search_results = self.reddit.subreddit('all').search(
-                f'"{symbol}"',
-                sort='new',
-                time_filter='day' if hours_back <= 24 else 'week',
-                limit=max_results
-            )
+            # Search across trading subreddits for the symbol
+            search_query = f'"{symbol}" OR "${symbol}"'  # Include $ format
 
-            cutoff_time = datetime.now() - timedelta(hours=hours_back)
-
-            for post in search_results:
+            for subreddit_name in self.trading_subreddits[:3]:  # Limit search scope
                 try:
-                    # Only include posts from trading-related subreddits
-                    if post.subreddit.display_name.lower() in [sub.lower() for sub in self.trading_subreddits]:
-                        article = self._parse_reddit_post(post, post.subreddit.display_name)
+                    subreddit = self.reddit.subreddit(subreddit_name)
+                    search_results = subreddit.search(
+                        search_query,
+                        sort='new',
+                        time_filter='day' if hours_back <= 24 else 'week',
+                        limit=max_results // 3
+                    )
 
-                        if article and article.published_date >= cutoff_time:
-                            posts.append(article)
+                    cutoff_time = datetime.now() - timedelta(hours=hours_back)
+
+                    for post in search_results:
+                        try:
+                            article = self._parse_reddit_post(post, subreddit_name)
+
+                            if article and article.published_date >= cutoff_time:
+                                posts.append(article)
+
+                        except Exception as e:
+                            self.logger.debug(f"Error parsing search result: {e}")
+                            continue
+
+                    self._rate_limit()
 
                 except Exception as e:
-                    self.logger.debug(f"Error parsing search result: {e}")
+                    self.logger.debug(f"Search failed in r/{subreddit_name}: {e}")
                     continue
 
         except Exception as e:
@@ -316,54 +343,61 @@ class RedditNews(NewsDataSource):
         return posts
 
     def _parse_reddit_post(self, post, subreddit_name: str) -> Optional[NewsArticle]:
-        """Parse Reddit post into NewsArticle format"""
+        """Parse Reddit post into NewsArticle format with quality filtering"""
         try:
             title = post.title.strip()
 
-            if not title or len(title) < 5:
+            if not title or len(title) < 10:  # Minimum title length
                 return None
 
-            # Filter out daily/weekly threads and low-quality posts
-            excluded_keywords = [
+            # Enhanced filtering for low-quality posts
+            excluded_patterns = [
                 'daily thread', 'daily discussion', 'weekly thread', 'what are your moves',
-                'daily general discussion', 'weekend discussion'
+                'daily general discussion', 'weekend discussion', 'daily options',
+                'gain/loss thread', 'yolo update', 'weekend discussion'
             ]
 
-            if any(keyword in title.lower() for keyword in excluded_keywords):
+            if any(pattern in title.lower() for pattern in excluded_patterns):
                 return None
 
-            # Parse post date
+            # Parse post creation time
             try:
                 post_date = datetime.fromtimestamp(post.created_utc)
             except (ValueError, OSError, OverflowError):
                 post_date = datetime.now()
 
-            # Extract symbols from title and body
+            # Extract symbols from title and limited post text
             full_text = title
-            if hasattr(post, 'selftext') and post.selftext:
-                full_text += f" {post.selftext[:200]}"  # Limit text for processing
+            if hasattr(post, 'selftext') and post.selftext and len(post.selftext) < 500:
+                full_text += f" {post.selftext[:200]}"  # Limit for performance
 
             symbols = self.symbol_extractor.extract_symbols(full_text)
 
-            # Create article with Reddit-specific data
+            # Skip posts with no symbols (unless from WSB where context matters)
+            if not symbols and subreddit_name.lower() != 'wallstreetbets':
+                return None
+
+            # Create article with Reddit-specific structure
             article = NewsArticle(
                 title=title,
-                content=title,  # Use title as content for consistency
+                content=title,  # Use title as primary content
                 source=f"Reddit-{subreddit_name}",
                 url=f"https://reddit.com{post.permalink}",
                 published_date=post_date,
                 symbols_mentioned=symbols,
-                author=str(post.author) if post.author else None
+                author=str(post.author) if post.author else "Unknown"
             )
 
-            # Add Reddit engagement metrics (stored in additional_metadata for now)
+            # Add Reddit engagement metrics (crucial for sentiment weighting)
             article.additional_metadata = {
                 'upvotes': getattr(post, 'ups', 0),
                 'downvotes': getattr(post, 'downs', 0),
                 'upvote_ratio': getattr(post, 'upvote_ratio', 0.5),
                 'comments': getattr(post, 'num_comments', 0),
                 'awards': getattr(post, 'total_awards_received', 0),
-                'subreddit': subreddit_name
+                'subreddit': subreddit_name,
+                'post_flair': getattr(post, 'link_flair_text', ''),
+                'is_self': getattr(post, 'is_self', True)
             }
 
             return article
@@ -372,32 +406,71 @@ class RedditNews(NewsDataSource):
             self.logger.debug(f"Error parsing Reddit post: {e}")
             return None
 
+    def _post_mentions_symbol(self, post: NewsArticle, symbol: str) -> bool:
+        """Check if a post mentions a specific symbol"""
+        symbol_upper = symbol.upper()
+        symbol_lower = symbol.lower()
+
+        return (
+            symbol_upper in post.symbols_mentioned or
+            symbol_lower in post.title.lower() or
+            symbol_upper in post.title.upper() or
+            f"${symbol_upper}" in post.title
+        )
+
     def _remove_duplicates(self, posts: List[NewsArticle]) -> List[NewsArticle]:
-        """Remove duplicate Reddit posts"""
+        """Remove duplicate Reddit posts based on title similarity"""
         unique_posts = []
         seen_titles = set()
 
         for post in posts:
-            title_key = post.title[:30].lower().replace(' ', '')
+            # Create normalized title key
+            title_key = post.title[:40].lower().replace(' ', '').replace('-', '')
+
             if title_key not in seen_titles:
                 seen_titles.add(title_key)
                 unique_posts.append(post)
 
         return unique_posts
 
+    def _rate_limit(self):
+        """Simple rate limiting to be respectful to Reddit API"""
+        current_time = time.time()
+
+        # Ensure at least 0.5 seconds between requests
+        time_since_last = current_time - self.last_request_time
+        if time_since_last < 0.5:
+            time.sleep(0.5 - time_since_last)
+
+        self.last_request_time = time.time()
+        self.requests_made += 1
+
     def get_engagement_metrics(self, articles: List[NewsArticle]) -> Dict[str, float]:
-        """Get Reddit engagement metrics for sentiment weighting"""
+        """Calculate engagement metrics for sentiment weighting"""
         if not articles:
             return {}
 
         total_upvotes = sum(article.additional_metadata.get('upvotes', 0) for article in articles)
         total_comments = sum(article.additional_metadata.get('comments', 0) for article in articles)
         avg_upvote_ratio = sum(article.additional_metadata.get('upvote_ratio', 0.5) for article in articles) / len(articles)
+        total_awards = sum(article.additional_metadata.get('awards', 0) for article in articles)
 
         return {
             'total_upvotes': total_upvotes,
             'total_comments': total_comments,
+            'total_awards': total_awards,
             'average_upvote_ratio': avg_upvote_ratio,
-            'engagement_score': (total_upvotes + total_comments) / len(articles),  # Per article engagement
-            'sentiment_strength': avg_upvote_ratio  # Higher ratio = more positive sentiment
+            'engagement_score': (total_upvotes + total_comments + total_awards * 5) / len(articles),
+            'sentiment_strength': avg_upvote_ratio,  # Higher ratio = more positive
+            'viral_factor': total_awards / len(articles)  # Awards indicate viral content
         }
+
+    def get_subreddit_breakdown(self, articles: List[NewsArticle]) -> Dict[str, int]:
+        """Get breakdown of articles by subreddit for analysis"""
+        breakdown = {}
+
+        for article in articles:
+            subreddit = article.additional_metadata.get('subreddit', 'Unknown')
+            breakdown[subreddit] = breakdown.get(subreddit, 0) + 1
+
+        return breakdown
