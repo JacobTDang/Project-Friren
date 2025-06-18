@@ -1,669 +1,648 @@
 """
-processes/enhanced_news_collector_process.py
+trading_engine/sentiment/finBERT_analysis.py
 
-Enhanced News Collector Process - Optimized integration with new FinBERT architecture.
-Removes redundant sentiment processing and focuses on news collection and caching.
+FinBERT Analysis Utility Tool - Pure Business Logic
+
+Handles FinBERT model loading, text preprocessing, and sentiment analysis.
+No process logic - just sentiment analysis utilities.
 """
 
 import time
-import threading
-from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional
 import logging
-import pickle
-import os
-import sys
-from dataclasses import asdict
-
-# Add the root directory to path to ensure imports work
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-# Import existing multiprocess infrastructure
-try:
-    from multiprocess_infrastructure.base_process import BaseProcess, ProcessState
-    from multiprocess_infrastructure.queue_manager import QueueMessage, MessageType, MessagePriority
-except ImportError:
-    # Fallback for different project structures
-    try:
-        from Friren_V1.multiprocess_infrastructure.base_process import BaseProcess, ProcessState
-        from Friren_V1.multiprocess_infrastructure.queue_manager import QueueMessage, MessageType, MessagePriority
-    except ImportError:
-        # Create minimal stubs if infrastructure not available
-        from enum import Enum
-        from abc import ABC, abstractmethod
-
-        class ProcessState(Enum):
-            INITIALIZING = "initializing"
-            RUNNING = "running"
-            STOPPED = "stopped"
-            ERROR = "error"
-
-        class MessageType(Enum):
-            NEWS_REQUEST = "news_request"
-            REGIME_CHANGE = "regime_change"
-            FINBERT_ANALYSIS = "finbert_analysis"
-
-        class MessagePriority(Enum):
-            HIGH = "high"
-            MEDIUM = "medium"
-            LOW = "low"
-
-        class QueueMessage:
-            def __init__(self, type, priority, sender_id, recipient_id, payload):
-                self.type = type
-                self.priority = priority
-                self.sender_id = sender_id
-                self.recipient_id = recipient_id
-                self.payload = payload
-
-        class BaseProcess(ABC):
-            def __init__(self, process_id: str):
-                self.process_id = process_id
-                self.state = ProcessState.INITIALIZING
-                self.logger = logging.getLogger(f"process.{process_id}")
-                self.error_count = 0
-                self.shared_state = None
-                self.priority_queue = None
-
-            @abstractmethod
-            def _initialize(self): pass
-            @abstractmethod
-            def _process_cycle(self): pass
-            @abstractmethod
-            def _cleanup(self): pass
-            @abstractmethod
-            def get_process_info(self): pass
-
-# Import the Enhanced News Collector utility we built
-try:
-    from trading_engine.data.news_collector import EnhancedNewsCollector, ProcessedNewsData
-    from trading_engine.data.news.base import NewsArticle
-except ImportError:
-    try:
-        from Friren_V1.trading_engine.data.news_collector import EnhancedNewsCollector, ProcessedNewsData
-        from Friren_V1.trading_engine.data.news.base import NewsArticle
-    except ImportError:
-        # Create minimal stubs for testing
-        from dataclasses import dataclass
-        from datetime import datetime
-
-        @dataclass
-        class NewsArticle:
-            title: str
-            content: str
-            source: str
-            url: str
-            published_date: datetime
-            symbols_mentioned: List[str]
-            author: Optional[str] = None
-
-        @dataclass
-        class ProcessedNewsData:
-            symbol: str
-            key_articles: List[NewsArticle]
-            news_volume: int
-            overall_sentiment_score: float
-            sentiment_confidence: float
-            professional_sentiment: float
-            social_sentiment: float
-            market_events: List[str]
-            data_quality_score: float
-            staleness_minutes: int
-            sources_used: List[str]
-            timestamp: datetime
-
-        class EnhancedNewsCollector:
-            def collect_symbol_news(self, symbol, hours_back=6, max_articles_per_source=15):
-                # Mock implementation for testing
-                return ProcessedNewsData(
-                    symbol=symbol,
-                    key_articles=[],
-                    news_volume=0,
-                    overall_sentiment_score=0.0,
-                    sentiment_confidence=0.0,
-                    professional_sentiment=0.0,
-                    social_sentiment=0.0,
-                    market_events=[],
-                    data_quality_score=0.0,
-                    staleness_minutes=0,
-                    sources_used=[],
-                    timestamp=datetime.now()
-                )
-
-            def collect_watchlist_news(self, symbols, hours_back=6, max_articles_per_symbol=12):
-                return {symbol: self.collect_symbol_news(symbol) for symbol in symbols}
-
-            def get_available_sources(self):
-                return ["MockSource"]
+from typing import List, Dict, Any, Optional, Tuple
+from dataclasses import dataclass
+import numpy as np
+from datetime import datetime
 
 
-class NewsCache:
-    """Memory-aware cache for news data with TTL and size limits"""
-
-    def __init__(self, max_memory_mb: int = 100, default_ttl_minutes: int = 30):
-        self.max_memory_bytes = max_memory_mb * 1024 * 1024
-        self.default_ttl = default_ttl_minutes * 60  # Convert to seconds
-
-        self.cache = {}  # {symbol: {data: ProcessedNewsData, timestamp: float, size: int}}
-        self.total_memory_usage = 0
-        self._lock = threading.Lock()
-
-        self.logger = logging.getLogger(f"{__name__}.NewsCache")
-
-    def get(self, symbol: str) -> Optional[ProcessedNewsData]:
-        """Get cached news data if still valid"""
-        with self._lock:
-            if symbol not in self.cache:
-                return None
-
-            entry = self.cache[symbol]
-            age = time.time() - entry['timestamp']
-
-            if age > self.default_ttl:
-                # Expired - remove from cache
-                self._remove_entry(symbol)
-                return None
-
-            return entry['data']
-
-    def set(self, symbol: str, data: ProcessedNewsData):
-        """Cache news data with memory management"""
-        with self._lock:
-            # Estimate size of the data
-            estimated_size = self._estimate_size(data)
-
-            # Clean old data if needed
-            while (self.total_memory_usage + estimated_size > self.max_memory_bytes and
-                   len(self.cache) > 0):
-                self._remove_oldest_entry()
-
-            # Remove existing entry if present
-            if symbol in self.cache:
-                self._remove_entry(symbol)
-
-            # Add new entry
-            self.cache[symbol] = {
-                'data': data,
-                'timestamp': time.time(),
-                'size': estimated_size
-            }
-            self.total_memory_usage += estimated_size
-
-            self.logger.debug(f"Cached news for {symbol} ({estimated_size} bytes)")
-
-    def _estimate_size(self, data: ProcessedNewsData) -> int:
-        """Estimate memory usage of ProcessedNewsData"""
-        # Conservative estimate based on typical content
-        base_size = 1000  # Base object overhead
-
-        # Articles content
-        articles_size = len(data.key_articles) * 500  # ~500 bytes per article
-
-        # String fields
-        string_size = len(data.symbol) + len(' '.join(data.market_events)) + len(' '.join(data.sources_used))
-
-        return base_size + articles_size + string_size
-
-    def _remove_entry(self, symbol: str):
-        """Remove entry and update memory usage"""
-        if symbol in self.cache:
-            self.total_memory_usage -= self.cache[symbol]['size']
-            del self.cache[symbol]
-
-    def _remove_oldest_entry(self):
-        """Remove the oldest entry to free memory"""
-        if not self.cache:
-            return
-
-        oldest_symbol = min(self.cache.keys(), key=lambda s: self.cache[s]['timestamp'])
-        self._remove_entry(oldest_symbol)
-
-    def get_cache_stats(self) -> Dict[str, Any]:
-        """Get cache statistics"""
-        with self._lock:
-            return {
-                'entries': len(self.cache),
-                'memory_usage_mb': self.total_memory_usage / (1024 * 1024),
-                'memory_limit_mb': self.max_memory_bytes / (1024 * 1024),
-                'utilization': self.total_memory_usage / self.max_memory_bytes,
-                'symbols_cached': list(self.cache.keys())
-            }
-
-    def clear(self):
-        """Clear all cached data"""
-        with self._lock:
-            self.cache.clear()
-            self.total_memory_usage = 0
+@dataclass
+class SentimentResult:
+    """Individual article sentiment analysis result"""
+    article_id: str
+    text: str
+    sentiment_score: float  # -1.0 to +1.0 (negative to positive)
+    confidence: float      # 0.0 to 1.0
+    classification: str    # POSITIVE, NEGATIVE, NEUTRAL
+    raw_scores: Dict[str, float]  # Raw model outputs
+    processing_time: float
+    model_version: str
+    is_reliable: bool      # True if confidence > threshold
 
 
-class EnhancedNewsCollectorProcess(BaseProcess):
+@dataclass
+class BatchSentimentResult:
+    """Batch sentiment analysis result"""
+    results: List[SentimentResult]
+    batch_processing_time: float
+    success_count: int
+    error_count: int
+    average_confidence: float
+    sentiment_distribution: Dict[str, int]  # Count by classification
+
+
+class EnhancedFinBERT:
     """
-    Enhanced News Collector Process - Optimized for new FinBERT architecture
+    Enhanced FinBERT Sentiment Analysis Tool
 
-    Core responsibilities:
-    - Multi-source news collection and basic processing
-    - Memory-aware caching for t3.micro constraints
-    - Feeding raw articles to dedicated FinBERT process
-    - Shared state updates with news metadata
-    - Regime detection triggers and watchlist precaching
+    Pure utility class for financial sentiment analysis using FinBERT.
+    Optimized for trading system integration with proper error handling,
+    batching, and performance monitoring.
+
+    Features:
+    - FinBERT model loading with fallback options
+    - Batch processing for efficiency
+    - Text preprocessing and cleaning
+    - Confidence scoring and classification
+    - Performance monitoring and caching
+    - Memory-aware processing for t3.micro
     """
 
-    def __init__(self, process_id: str = "enhanced_news_collector",
-                 watchlist_symbols: Optional[List[str]] = None,
-                 cache_memory_mb: int = 80,  # Reduced to leave room for FinBERT
-                 precache_interval_minutes: int = 20):
+    def __init__(self, model_name: str = "ProsusAI/finbert",
+                 max_length: int = 512,
+                 batch_size: int = 8,
+                 device: str = "cpu"):
+        self.model_name = model_name
+        self.max_length = max_length
+        self.batch_size = batch_size
+        self.device = device
 
-        super().__init__(process_id)
+        # Model components
+        self.model = None
+        self.tokenizer = None
+        self.initialized = False
+
+        # Performance tracking
+        self.total_texts_processed = 0
+        self.total_processing_time = 0.0
+        self.error_count = 0
+        self.cache = {}  # Simple text -> result cache
 
         # Configuration
-        self.watchlist_symbols = watchlist_symbols or ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA']
-        self.precache_interval = precache_interval_minutes * 60  # Convert to seconds
+        self.enable_caching = True
+        self.cache_max_size = 1000
+        self.confidence_threshold = 0.5  # Minimum confidence for reliable results
 
-        # Components (initialized in _initialize)
-        self.news_collector = None
-        self.cache = NewsCache(max_memory_mb=cache_memory_mb)
+        self.logger = logging.getLogger("enhanced_finbert")
+        self.logger.info(f"Enhanced FinBERT initialized - model: {model_name}, device: {device}")
 
-        # Timing control
-        self.last_precache_time = 0
-        self.last_regime_check = 0
+    def initialize(self) -> bool:
+        """
+        Initialize FinBERT model with proper error handling
 
-        # Statistics
-        self.stats = {
-            'news_requests_processed': 0,
-            'regime_triggers_processed': 0,
-            'cache_hits': 0,
-            'cache_misses': 0,
-            'articles_sent_to_finbert': 0,
-            'total_articles_collected': 0,
-            'watchlist_precaches': 0
-        }
-
-        self.logger.info(f"Enhanced News Collector Process configured with {len(self.watchlist_symbols)} watchlist symbols")
-
-    def _initialize(self):
-        """Initialize the Enhanced News Collector utility and components"""
+        Returns:
+            bool: True if successful, False if fallback to mock
+        """
         try:
-            self.logger.info("Initializing Enhanced News Collector Process...")
+            self.logger.info("Loading FinBERT model...")
 
-            # Initialize the news collector utility
-            self.news_collector = EnhancedNewsCollector()
+            # Import here to avoid loading unless needed
+            import torch
+            from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
-            # Get available sources for logging
-            available_sources = self.news_collector.get_available_sources()
-            self.logger.info(f"News sources available: {available_sources}")
+            # Load tokenizer
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
 
-            self.state = ProcessState.RUNNING
-            self.logger.info("Enhanced News Collector Process initialization complete")
+            # Load model
+            self.model = AutoModelForSequenceClassification.from_pretrained(self.model_name)
 
-        except Exception as e:
-            self.logger.error(f"Failed to initialize Enhanced News Collector Process: {e}")
-            self.state = ProcessState.ERROR
-            raise
+            # Move to device and set evaluation mode
+            self.model.to(self.device)
+            self.model.eval()
 
-    def _process_cycle(self):
-        """Main processing cycle - optimized for FinBERT separation"""
-        try:
-            # Check for high-priority regime change alerts
-            regime_message = self._check_regime_alerts()
-            if regime_message:
-                self._handle_regime_change(regime_message)
+            self.initialized = True
+            self.logger.info(f"FinBERT model loaded successfully on {self.device}")
 
-            # Check for regular news requests
-            news_request = self._check_news_requests()
-            if news_request:
-                self._handle_news_request(news_request)
+            # Test with a sample text to ensure everything works
+            test_result = self.analyze_text("The market is performing well today.")
+            self.logger.info(f"Model test successful: {test_result.classification}")
 
-            # Check if it's time for precaching
-            if self._should_precache():
-                self._precache_watchlist_news()
-
-            # Brief sleep to prevent busy waiting
-            time.sleep(5)
-
-        except Exception as e:
-            self.logger.error(f"Error in processing cycle: {e}")
-            self.error_count += 1
-            time.sleep(10)  # Longer sleep on error
-
-    def _check_regime_alerts(self) -> Optional[QueueMessage]:
-        """Check for regime change alerts (highest priority)"""
-        try:
-            # Check for regime change messages with timeout
-            message = self._get_priority_message(MessageType.REGIME_CHANGE, timeout=0.1)
-            return message
-        except:
-            return None
-
-    def _check_news_requests(self) -> Optional[QueueMessage]:
-        """Check for regular news requests"""
-        try:
-            # Check for news request messages
-            message = self._get_priority_message(MessageType.NEWS_REQUEST, timeout=0.1)
-            return message
-        except:
-            return None
-
-    def _handle_regime_change(self, message: QueueMessage):
-        """Handle regime change alert - immediate news processing"""
-        try:
-            self.logger.info("Processing regime change alert")
-
-            payload = message.payload
-            affected_symbols = payload.get('symbols', self.watchlist_symbols)
-            regime_type = payload.get('new_regime', 'UNKNOWN')
-
-            self.logger.info(f"Regime change to {regime_type}, updating news for {len(affected_symbols)} symbols")
-
-            # Collect fresh news for affected symbols (skip cache)
-            for symbol in affected_symbols:
-                try:
-                    news_data = self.news_collector.collect_symbol_news(
-                        symbol=symbol,
-                        hours_back=4,  # More recent for regime changes
-                        max_articles_per_source=10
-                    )
-
-                    # Cache the fresh data
-                    self.cache.set(symbol, news_data)
-
-                    # Update shared state with news metadata only
-                    self._update_shared_state_metadata(symbol, news_data, priority=True)
-
-                    # Send raw articles to FinBERT for sentiment analysis
-                    self._send_articles_to_finbert(symbol, news_data.key_articles, priority=True)
-
-                    self.stats['total_articles_collected'] += news_data.news_volume
-
-                except Exception as e:
-                    self.logger.error(f"Error processing regime change for {symbol}: {e}")
-                    continue
-
-            self.stats['regime_triggers_processed'] += 1
-            self.logger.info(f"Regime change processing complete for {len(affected_symbols)} symbols")
-
-        except Exception as e:
-            self.logger.error(f"Error handling regime change: {e}")
-
-    def _handle_news_request(self, message: QueueMessage):
-        """Handle specific news request from decision engine or strategy analyzer"""
-        try:
-            payload = message.payload
-            symbol = payload.get('symbol')
-            force_refresh = payload.get('force_refresh', False)
-
-            if not symbol:
-                self.logger.warning("Received news request without symbol")
-                return
-
-            self.logger.debug(f"Processing news request for {symbol}")
-
-            # Check cache first (unless forced refresh)
-            if not force_refresh:
-                cached_data = self.cache.get(symbol)
-                if cached_data:
-                    self.logger.debug(f"Cache hit for {symbol}")
-                    self._update_shared_state_metadata(symbol, cached_data)
-                    # Send cached articles to FinBERT if they haven't been processed recently
-                    if self._should_reprocess_for_finbert(symbol, cached_data):
-                        self._send_articles_to_finbert(symbol, cached_data.key_articles)
-                    self.stats['cache_hits'] += 1
-                    self.stats['news_requests_processed'] += 1
-                    return
-
-            # Cache miss - collect fresh news
-            self.logger.debug(f"Cache miss for {symbol}, collecting fresh news")
-            self.stats['cache_misses'] += 1
-
-            news_data = self.news_collector.collect_symbol_news(
-                symbol=symbol,
-                hours_back=6,
-                max_articles_per_source=15
-            )
-
-            # Cache the data
-            self.cache.set(symbol, news_data)
-
-            # Update shared state with metadata
-            self._update_shared_state_metadata(symbol, news_data)
-
-            # Send raw articles to FinBERT for sentiment processing
-            if news_data.key_articles:
-                self._send_articles_to_finbert(symbol, news_data.key_articles)
-
-            self.stats['news_requests_processed'] += 1
-            self.stats['total_articles_collected'] += news_data.news_volume
-
-        except Exception as e:
-            self.logger.error(f"Error handling news request: {e}")
-
-    def _should_precache(self) -> bool:
-        """Check if it's time for watchlist precaching"""
-        current_time = time.time()
-
-        # Check if enough time has passed
-        if current_time - self.last_precache_time < self.precache_interval:
-            return False
-
-        # During market hours, precache more frequently
-        if self._is_market_hours():
             return True
 
-        # After hours, precache less frequently
-        return current_time - self.last_precache_time > (self.precache_interval * 2)
-
-    def _precache_watchlist_news(self):
-        """Proactively collect and cache news for watchlist symbols"""
-        try:
-            self.logger.info(f"Starting watchlist precaching for {len(self.watchlist_symbols)} symbols")
-
-            # Use batch collection for efficiency
-            watchlist_data = self.news_collector.collect_watchlist_news(
-                symbols=self.watchlist_symbols,
-                hours_back=6,
-                max_articles_per_symbol=12
-            )
-
-            # Cache and update shared state for each symbol
-            total_articles = 0
-            articles_for_finbert = []
-
-            for symbol, news_data in watchlist_data.items():
-                try:
-                    # Cache the data
-                    self.cache.set(symbol, news_data)
-
-                    # Update shared state with metadata
-                    self._update_shared_state_metadata(symbol, news_data)
-
-                    # Collect articles for batch FinBERT processing
-                    if news_data.key_articles:
-                        articles_for_finbert.extend([
-                            (symbol, article) for article in news_data.key_articles
-                        ])
-
-                    total_articles += news_data.news_volume
-
-                except Exception as e:
-                    self.logger.error(f"Error precaching {symbol}: {e}")
-                    continue
-
-            # Send all collected articles to FinBERT in batch
-            if articles_for_finbert:
-                self._send_batch_to_finbert(articles_for_finbert, priority=False)
-
-            self.last_precache_time = time.time()
-            self.stats['total_articles_collected'] += total_articles
-            self.stats['watchlist_precaches'] += 1
-
-            self.logger.info(f"Watchlist precaching complete: {total_articles} total articles, "
-                           f"{len(articles_for_finbert)} sent to FinBERT")
-
-        except Exception as e:
-            self.logger.error(f"Error in watchlist precaching: {e}")
-
-    def _update_shared_state_metadata(self, symbol: str, news_data: ProcessedNewsData, priority: bool = False):
-        """Update shared state with news metadata only (no sentiment)"""
-        try:
-            if not self.shared_state:
-                return
-
-            # Only update news metadata - sentiment will come from FinBERT process
-            news_metadata = {
-                'news_volume': news_data.news_volume,
-                'market_events': news_data.market_events,
-                'data_quality_score': news_data.data_quality_score,
-                'staleness_minutes': news_data.staleness_minutes,
-                'sources_used': news_data.sources_used,
-                'article_count': len(news_data.key_articles),
-                'sources_count': len(news_data.sources_used),
-                'last_updated': news_data.timestamp.isoformat(),
-                'priority_update': priority
-            }
-
-            # Update shared state news metadata
-            self.shared_state.update_news_metadata(symbol, news_metadata)
-
-            self.logger.debug(f"Updated news metadata for {symbol}: "
-                            f"volume={news_data.news_volume}, quality={news_data.data_quality_score:.3f}")
-
-        except Exception as e:
-            self.logger.error(f"Error updating shared state metadata for {symbol}: {e}")
-
-    def _send_articles_to_finbert(self, symbol: str, articles: List[NewsArticle], priority: bool = False):
-        """Send individual symbol's articles to FinBERT process"""
-        try:
-            if not articles:
-                return
-
-            # Prepare articles for FinBERT analysis
-            articles_for_sentiment = []
-            for article in articles:
-                articles_for_sentiment.append({
-                    'id': f"{symbol}_{hash(article.url)}",
-                    'title': article.title,
-                    'content': article.content[:800],  # Increased limit for better sentiment analysis
-                    'source': article.source,
-                    'published_date': article.published_date.isoformat(),
-                    'symbols': article.symbols_mentioned,
-                    'url': article.url,
-                    'author': article.author
-                })
-
-            # Create message for FinBERT
-            finbert_message = QueueMessage(
-                type=MessageType.FINBERT_ANALYSIS,
-                priority=MessagePriority.HIGH if priority else MessagePriority.MEDIUM,
-                sender_id=self.process_id,
-                recipient_id="finbert_sentiment",
-                payload={
-                    'symbol': symbol,
-                    'articles': articles_for_sentiment,
-                    'request_id': f"{symbol}_{int(time.time())}",
-                    'priority': priority,
-                    'batch_processing': False
-                }
-            )
-
-            # Send to FinBERT queue
-            if self.priority_queue:
-                self.priority_queue.put(finbert_message)
-                self.stats['articles_sent_to_finbert'] += len(articles_for_sentiment)
-
-                self.logger.debug(f"Sent {len(articles_for_sentiment)} articles to FinBERT for {symbol}")
-
-        except Exception as e:
-            self.logger.error(f"Error sending articles to FinBERT for {symbol}: {e}")
-
-    def _send_batch_to_finbert(self, symbol_articles: List[tuple], priority: bool = False):
-        """Send multiple symbols' articles to FinBERT in batch"""
-        try:
-            if not symbol_articles:
-                return
-
-            # Group articles by symbol for efficient processing
-            symbol_groups = {}
-            for symbol, article in symbol_articles:
-                if symbol not in symbol_groups:
-                    symbol_groups[symbol] = []
-                symbol_groups[symbol].append(article)
-
-            # Send each symbol group to FinBERT
-            for symbol, articles in symbol_groups.items():
-                self._send_articles_to_finbert(symbol, articles, priority)
-
-            self.logger.info(f"Sent batch of {len(symbol_articles)} articles for {len(symbol_groups)} symbols to FinBERT")
-
-        except Exception as e:
-            self.logger.error(f"Error sending batch to FinBERT: {e}")
-
-    def _should_reprocess_for_finbert(self, symbol: str, news_data: ProcessedNewsData) -> bool:
-        """Check if cached news should be reprocessed by FinBERT"""
-        # Simple heuristic: reprocess if data is older than 1 hour
-        age_minutes = (datetime.now() - news_data.timestamp).total_seconds() / 60
-        return age_minutes > 60
-
-    def _is_market_hours(self) -> bool:
-        """Check if it's currently market hours (simple heuristic)"""
-        from datetime import datetime
-
-        now = datetime.now()
-
-        # Monday = 0, Sunday = 6
-        if now.weekday() >= 5:  # Weekend
+        except ImportError as e:
+            self.logger.warning(f"Required libraries not available: {e}")
+            self.logger.info("Falling back to mock sentiment analysis")
+            self.initialized = False
             return False
 
-        # Market hours: 9:30 AM - 4:00 PM ET (simplified)
-        market_start = now.replace(hour=9, minute=30, second=0, microsecond=0)
-        market_end = now.replace(hour=16, minute=0, second=0, microsecond=0)
+        except Exception as e:
+            self.logger.error(f"Failed to initialize FinBERT model: {e}")
+            self.logger.info("Falling back to mock sentiment analysis")
+            self.initialized = False
+            return False
 
-        return market_start <= now <= market_end
+    def analyze_text(self, text: str, article_id: str = None) -> SentimentResult:
+        """
+        Analyze sentiment of a single text
 
-    def _get_priority_message(self, message_type: MessageType, timeout: float = 0.1) -> Optional[QueueMessage]:
-        """Get message of specific type from priority queue"""
+        Args:
+            text: Text to analyze
+            article_id: Optional identifier for the text
+
+        Returns:
+            SentimentResult with sentiment analysis
+        """
+        start_time = time.time()
+
+        # Generate article ID if not provided
+        if article_id is None:
+            article_id = f"text_{hash(text) % 10000}"
+
+        # Check cache first
+        if self.enable_caching and text in self.cache:
+            cached_result = self.cache[text]
+            self.logger.debug(f"Cache hit for article {article_id}")
+
+            # Update article_id and return cached result
+            return SentimentResult(
+                article_id=article_id,
+                text=text,
+                sentiment_score=cached_result['sentiment_score'],
+                confidence=cached_result['confidence'],
+                classification=cached_result['classification'],
+                raw_scores=cached_result['raw_scores'],
+                processing_time=0.001,  # Cache access time
+                model_version=self.model_name,
+                is_reliable=cached_result['is_reliable']
+            )
+
         try:
-            if not self.priority_queue:
-                return None
+            if self.initialized:
+                result = self._analyze_with_finbert(text, article_id)
+            else:
+                result = self._analyze_with_mock(text, article_id)
 
-            # This is a simplified implementation
-            # In practice, you'd need to implement priority queue filtering
-            # based on your existing QueueManager implementation
-            message = self.priority_queue.get(timeout=timeout)
+            # Cache the result
+            if self.enable_caching:
+                self._cache_result(text, result)
 
-            if message and message.type == message_type:
-                return message
-            elif message:
-                # Put it back if it's not the type we want
-                self.priority_queue.put(message)
+            # Update statistics
+            processing_time = time.time() - start_time
+            self.total_texts_processed += 1
+            self.total_processing_time += processing_time
 
-            return None
-
-        except:
-            return None
-
-    def _cleanup(self):
-        """Cleanup resources"""
-        try:
-            self.logger.info("Cleaning up Enhanced News Collector Process")
-
-            # Clear cache to free memory
-            self.cache.clear()
-
-            # Log final statistics
-            self.logger.info(f"Final statistics: {self.stats}")
+            return result
 
         except Exception as e:
-            self.logger.error(f"Error during cleanup: {e}")
+            self.logger.error(f"Error analyzing text: {e}")
+            self.error_count += 1
 
-    def get_process_info(self) -> Dict[str, Any]:
-        """Return process-specific information for monitoring"""
-        return {
-            'process_type': 'enhanced_news_collector',
-            'watchlist_symbols': len(self.watchlist_symbols),
-            'cache_stats': self.cache.get_cache_stats(),
-            'available_sources': self.news_collector.get_available_sources() if self.news_collector else [],
-            'statistics': self.stats.copy(),
-            'last_precache': datetime.fromtimestamp(self.last_precache_time).isoformat() if self.last_precache_time > 0 else None,
-            'is_market_hours': self._is_market_hours(),
-            'finbert_integration': True
+            # Return fallback result
+            return self._create_fallback_result(text, article_id, time.time() - start_time)
+
+    def analyze_batch(self, texts: List[str],
+                      article_ids: Optional[List[str]] = None) -> BatchSentimentResult:
+        """
+        Analyze sentiment of multiple texts in batch for efficiency
+
+        Args:
+            texts: List of texts to analyze
+            article_ids: Optional list of identifiers for each text
+
+        Returns:
+            BatchSentimentResult with all analysis results
+        """
+        start_time = time.time()
+
+        if not texts:
+            return BatchSentimentResult(
+                results=[],
+                batch_processing_time=0.0,
+                success_count=0,
+                error_count=0,
+                average_confidence=0.0,
+                sentiment_distribution={'POSITIVE': 0, 'NEGATIVE': 0, 'NEUTRAL': 0}
+            )
+
+        # Generate article IDs if not provided
+        if article_ids is None:
+            article_ids = [f"batch_{i}_{hash(text) % 10000}" for i, text in enumerate(texts)]
+
+        self.logger.info(f"Analyzing batch of {len(texts)} texts")
+
+        try:
+            if self.initialized and len(texts) > 1:
+                # Use efficient batch processing
+                results = self._analyze_batch_with_finbert(texts, article_ids)
+            else:
+                # Process individually (for mock or single items)
+                results = []
+                for text, article_id in zip(texts, article_ids):
+                    result = self.analyze_text(text, article_id)
+                    results.append(result)
+
+            # Calculate batch statistics
+            batch_time = time.time() - start_time
+            success_count = len([r for r in results if r.sentiment_score is not None])
+            error_count = len(results) - success_count
+
+            confidences = [r.confidence for r in results if r.confidence is not None]
+            avg_confidence = np.mean(confidences) if confidences else 0.0
+
+            # Calculate sentiment distribution
+            distribution = {'POSITIVE': 0, 'NEGATIVE': 0, 'NEUTRAL': 0}
+            for result in results:
+                if result.classification in distribution:
+                    distribution[result.classification] += 1
+
+            self.logger.info(f"Batch analysis complete - {batch_time:.2f}s, "
+                           f"{success_count}/{len(texts)} successful")
+
+            return BatchSentimentResult(
+                results=results,
+                batch_processing_time=batch_time,
+                success_count=success_count,
+                error_count=error_count,
+                average_confidence=avg_confidence,
+                sentiment_distribution=distribution
+            )
+
+        except Exception as e:
+            self.logger.error(f"Error in batch analysis: {e}")
+            self.error_count += len(texts)
+
+            # Return fallback results
+            fallback_results = []
+            for text, article_id in zip(texts, article_ids):
+                fallback_results.append(self._create_fallback_result(text, article_id, 0.0))
+
+            return BatchSentimentResult(
+                results=fallback_results,
+                batch_processing_time=time.time() - start_time,
+                success_count=0,
+                error_count=len(texts),
+                average_confidence=0.0,
+                sentiment_distribution={'POSITIVE': 0, 'NEGATIVE': 0, 'NEUTRAL': len(texts)}
+            )
+
+    def _analyze_with_finbert(self, text: str, article_id: str) -> SentimentResult:
+        """Analyze text using actual FinBERT model"""
+        import torch
+
+        start_time = time.time()
+
+        # Clean and prepare text
+        cleaned_text = self._clean_text(text)
+
+        # Tokenize
+        inputs = self.tokenizer(
+            cleaned_text,
+            return_tensors="pt",
+            truncation=True,
+            padding=True,
+            max_length=self.max_length
+        )
+
+        # Move to device
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+
+        # Run inference
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+            predictions = torch.nn.functional.softmax(outputs.logits, dim=-1)
+
+        # Calculate processing time
+        processing_time = time.time() - start_time
+
+        # Extract scores
+        scores = predictions[0].cpu().numpy()
+
+        # FinBERT outputs: [negative, neutral, positive]
+        negative_score = float(scores[0])
+        neutral_score = float(scores[1])
+        positive_score = float(scores[2])
+
+        # Calculate overall sentiment (-1 to +1)
+        sentiment_score = positive_score - negative_score
+
+        # Classification based on highest score
+        max_idx = np.argmax(scores)
+        classifications = ['NEGATIVE', 'NEUTRAL', 'POSITIVE']
+        classification = classifications[max_idx]
+
+        # Confidence is the max probability
+        confidence = float(np.max(scores))
+
+        # Check reliability based on confidence threshold
+        is_reliable = confidence >= self.confidence_threshold
+
+        # Raw scores for debugging/analysis
+        raw_scores = {
+            'negative': negative_score,
+            'neutral': neutral_score,
+            'positive': positive_score,
+            'max_score': confidence,
+            'prediction_index': int(max_idx)
         }
 
+        return SentimentResult(
+            article_id=article_id,
+            text=text,
+            sentiment_score=sentiment_score,
+            confidence=confidence,
+            classification=classification,
+            raw_scores=raw_scores,
+            processing_time=processing_time,
+            model_version=self.model_name,
+            is_reliable=is_reliable
+        )
+
+    def _analyze_batch_with_finbert(self, texts: List[str], article_ids: List[str]) -> List[SentimentResult]:
+        """Efficiently analyze multiple texts using FinBERT"""
+        import torch
+
+        start_time = time.time()
+
+        # Clean all texts
+        cleaned_texts = [self._clean_text(text) for text in texts]
+
+        # Tokenize batch
+        inputs = self.tokenizer(
+            cleaned_texts,
+            return_tensors="pt",
+            truncation=True,
+            padding=True,
+            max_length=self.max_length
+        )
+
+        # Move to device
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+
+        # Run batch inference
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+            predictions = torch.nn.functional.softmax(outputs.logits, dim=-1)
+
+        # Calculate batch processing time
+        batch_processing_time = time.time() - start_time
+        individual_processing_time = batch_processing_time / len(texts)
+
+        # Process results
+        results = []
+        for i, (text, article_id) in enumerate(zip(texts, article_ids)):
+            scores = predictions[i].cpu().numpy()
+
+            # FinBERT outputs: [negative, neutral, positive]
+            negative_score = float(scores[0])
+            neutral_score = float(scores[1])
+            positive_score = float(scores[2])
+
+            # Calculate overall sentiment (-1 to +1)
+            sentiment_score = positive_score - negative_score
+
+            # Classification based on highest score
+            max_idx = np.argmax(scores)
+            classifications = ['NEGATIVE', 'NEUTRAL', 'POSITIVE']
+            classification = classifications[max_idx]
+
+            # Confidence is the max probability
+            confidence = float(np.max(scores))
+
+            # Check reliability based on confidence threshold
+            is_reliable = confidence >= self.confidence_threshold
+
+            # Raw scores
+            raw_scores = {
+                'negative': negative_score,
+                'neutral': neutral_score,
+                'positive': positive_score,
+                'max_score': confidence,
+                'prediction_index': int(max_idx)
+            }
+
+            result = SentimentResult(
+                article_id=article_id,
+                text=text,
+                sentiment_score=sentiment_score,
+                confidence=confidence,
+                classification=classification,
+                raw_scores=raw_scores,
+                processing_time=individual_processing_time,
+                model_version=self.model_name,
+                is_reliable=is_reliable
+            )
+
+            results.append(result)
+
+        return results
+
+    def _analyze_with_mock(self, text: str, article_id: str) -> SentimentResult:
+        """Mock sentiment analysis for development/fallback"""
+        import random
+
+        start_time = time.time()
+
+        # Simple keyword-based sentiment for more realistic mock results
+        text_lower = text.lower()
+
+        positive_keywords = ['good', 'great', 'excellent', 'strong', 'up', 'gain', 'profit', 'bull', 'buy',
+                           'growth', 'beat', 'exceeds', 'outperform', 'surge', 'rally', 'positive']
+        negative_keywords = ['bad', 'poor', 'weak', 'down', 'loss', 'bear', 'sell', 'crash', 'decline',
+                           'drop', 'fall', 'disappointing', 'miss', 'concern', 'risk', 'negative']
+
+        positive_count = sum(1 for word in positive_keywords if word in text_lower)
+        negative_count = sum(1 for word in negative_keywords if word in text_lower)
+
+        # Base sentiment on keyword analysis with some randomness
+        if positive_count > negative_count:
+            base_sentiment = 0.3 + random.uniform(0.0, 0.5)
+            classification = 'POSITIVE'
+        elif negative_count > positive_count:
+            base_sentiment = -0.3 - random.uniform(0.0, 0.5)
+            classification = 'NEGATIVE'
+        else:
+            base_sentiment = random.uniform(-0.2, 0.2)
+            classification = 'NEUTRAL'
+
+        # Add some noise but keep realistic
+        sentiment_score = base_sentiment + random.uniform(-0.1, 0.1)
+        sentiment_score = max(-1.0, min(1.0, sentiment_score))
+
+        # Generate realistic confidence based on keyword strength
+        keyword_strength = abs(positive_count - negative_count)
+        base_confidence = 0.5 + (keyword_strength * 0.1)
+        confidence = min(0.95, base_confidence + random.uniform(-0.1, 0.1))
+
+        # Check reliability
+        is_reliable = confidence >= self.confidence_threshold
+
+        # Create mock raw scores that are consistent with classification
+        if classification == 'POSITIVE':
+            positive_raw = 0.5 + abs(sentiment_score) / 2
+            negative_raw = 0.5 - abs(sentiment_score) / 2
+        elif classification == 'NEGATIVE':
+            positive_raw = 0.5 - abs(sentiment_score) / 2
+            negative_raw = 0.5 + abs(sentiment_score) / 2
+        else:
+            positive_raw = 0.4 + random.uniform(-0.1, 0.1)
+            negative_raw = 0.4 + random.uniform(-0.1, 0.1)
+
+        neutral_raw = max(0.05, 1.0 - positive_raw - negative_raw)
+
+        # Normalize to ensure they sum to 1
+        total = positive_raw + negative_raw + neutral_raw
+        positive_raw /= total
+        negative_raw /= total
+        neutral_raw /= total
+
+        raw_scores = {
+            'negative': negative_raw,
+            'neutral': neutral_raw,
+            'positive': positive_raw,
+            'max_score': confidence,
+            'prediction_index': 0 if classification == 'NEGATIVE' else (1 if classification == 'NEUTRAL' else 2)
+        }
+
+        # Simulate realistic processing time
+        processing_time = time.time() - start_time
+
+        return SentimentResult(
+            article_id=article_id,
+            text=text,
+            sentiment_score=sentiment_score,
+            confidence=confidence,
+            classification=classification,
+            raw_scores=raw_scores,
+            processing_time=processing_time,
+            model_version="mock_finbert_v1.0",
+            is_reliable=is_reliable
+        )
+
+    def _clean_text(self, text: str) -> str:
+        """Clean and prepare text for analysis"""
+        if not text:
+            return ""
+
+        # Remove excessive whitespace
+        text = " ".join(text.split())
+
+        # Remove very short texts
+        if len(text.strip()) < 10:
+            return text
+
+        # Truncate if too long (leave room for tokenization)
+        max_chars = self.max_length * 3  # Rough estimate: ~3 chars per token
+        if len(text) > max_chars:
+            text = text[:max_chars] + "..."
+
+        return text.strip()
+
+    def _cache_result(self, text: str, result: SentimentResult):
+        """Cache result for future use"""
+        if len(self.cache) >= self.cache_max_size:
+            # Simple cache eviction - remove oldest entries
+            keys_to_remove = list(self.cache.keys())[:self.cache_max_size // 4]
+            for key in keys_to_remove:
+                del self.cache[key]
+
+        self.cache[text] = {
+            'sentiment_score': result.sentiment_score,
+            'confidence': result.confidence,
+            'classification': result.classification,
+            'raw_scores': result.raw_scores,
+            'is_reliable': result.is_reliable
+        }
+
+    def _create_fallback_result(self, text: str, article_id: str, processing_time: float) -> SentimentResult:
+        """Create neutral fallback result for errors"""
+        return SentimentResult(
+            article_id=article_id,
+            text=text,
+            sentiment_score=0.0,
+            confidence=0.0,
+            classification='NEUTRAL',
+            raw_scores={'negative': 0.33, 'neutral': 0.34, 'positive': 0.33, 'max_score': 0.34, 'prediction_index': 1},
+            processing_time=processing_time,
+            model_version="fallback",
+            is_reliable=False  # Fallback results are never reliable
+        )
+
+    def get_statistics(self) -> Dict[str, Any]:
+        """Get performance and usage statistics"""
+        avg_processing_time = (self.total_processing_time / self.total_texts_processed
+                             if self.total_texts_processed > 0 else 0.0)
+
+        return {
+            'initialized': self.initialized,
+            'model_name': self.model_name,
+            'device': self.device,
+            'total_texts_processed': self.total_texts_processed,
+            'total_processing_time': self.total_processing_time,
+            'average_processing_time': avg_processing_time,
+            'error_count': self.error_count,
+            'error_rate': self.error_count / max(1, self.total_texts_processed),
+            'cache_size': len(self.cache),
+            'cache_enabled': self.enable_caching,
+            'confidence_threshold': self.confidence_threshold,
+            'reliability_enforcement': True,  # New feature indicator
+            'processing_time_tracking': True  # New feature indicator
+        }
+
+    def clear_cache(self):
+        """Clear the result cache"""
+        self.cache.clear()
+        self.logger.info("FinBERT cache cleared")
+
+    def set_confidence_threshold(self, threshold: float):
+        """Set minimum confidence threshold for reliable results"""
+        self.confidence_threshold = max(0.0, min(1.0, threshold))
+        self.logger.info(f"Confidence threshold set to {self.confidence_threshold}")
+
+
+# Example usage and testing
+if __name__ == "__main__":
+    # Test the FinBERT analyzer
+    finbert = EnhancedFinBERT()
+
+    # Initialize (will fall back to mock if FinBERT not available)
+    success = finbert.initialize()
+    print(f"FinBERT initialization: {'Success' if success else 'Mock mode'}")
+
+    # Test single text analysis
+    test_text = "Apple reported strong quarterly earnings, beating analyst expectations with robust iPhone sales driving revenue growth."
+    result = finbert.analyze_text(test_text)
+
+    print(f"\nSingle Text Analysis:")
+    print(f"Text: {test_text[:100]}...")
+    print(f"Sentiment: {result.classification} (score: {result.sentiment_score:.3f})")
+    print(f"Confidence: {result.confidence:.3f}")
+    print(f"Processing time: {result.processing_time:.4f}s")
+
+    # Test batch analysis
+    test_texts = [
+        "Tesla stock surges on strong delivery numbers and positive guidance",
+        "Market volatility continues amid economic uncertainty and inflation concerns",
+        "Microsoft announces disappointing quarterly results missing revenue expectations",
+        "Federal Reserve signals potential interest rate cuts supporting market sentiment"
+    ]
+
+    batch_result = finbert.analyze_batch(test_texts)
+
+    print(f"\nBatch Analysis ({len(test_texts)} texts):")
+    print(f"Processing time: {batch_result.batch_processing_time:.3f}s")
+    print(f"Success rate: {batch_result.success_count}/{len(test_texts)}")
+    print(f"Average confidence: {batch_result.average_confidence:.3f}")
+    print(f"Distribution: {batch_result.sentiment_distribution}")
+
+    for i, result in enumerate(batch_result.results):
+        print(f"  {i+1}. {result.classification} ({result.sentiment_score:+.3f}) "
+              f"[{result.confidence:.3f}] {'✓' if result.is_reliable else '✗'} - {test_texts[i][:60]}...")
+
+    # Show statistics
+    stats = finbert.get_statistics()
+    print(f"\nStatistics:")
+    for key, value in stats.items():
+        if isinstance(value, float):
+            print(f"  {key}: {value:.4f}")
+        else:
+            print(f"  {key}: {value}")
+
+    # Test confidence threshold
+    print(f"\nConfidence Threshold Analysis:")
+    reliable_count = sum(1 for r in batch_result.results if r.is_reliable)
+    print(f"Reliable results: {reliable_count}/{len(batch_result.results)} "
+          f"(threshold: {finbert.confidence_threshold:.2f})")
+
+    # Show processing time breakdown
+    total_time = sum(r.processing_time for r in batch_result.results)
+    print(f"Total processing time: {total_time:.4f}s")
+    print(f"Average per text: {total_time/len(batch_result.results):.4f}s")
