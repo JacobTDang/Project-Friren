@@ -1,0 +1,238 @@
+{
+  "test_configuration": {
+    "general": {
+      "test_timeout_seconds": 300,
+      "performance_threshold_ms": 30000,
+      "memory_threshold_mb": 400,
+      "enable_performance_tests": true,
+      "enable_failure_tests": true,
+      "verbose_logging": true
+    },
+    "test_data": {
+      "test_symbols": ["AAPL", "MSFT", "GOOGL", "TSLA", "NVDA"],
+      "max_articles_per_test": 20,
+      "sentiment_confidence_threshold": 0.6,
+      "recommendation_confidence_threshold": 0.65
+    },
+    "pipeline_config": {
+      "cycle_interval_minutes": 1,
+      "batch_size": 4,
+      "max_memory_mb": 300,
+      "max_articles_per_symbol": 12,
+      "hours_back": 6,
+      "quality_threshold": 0.7,
+      "finbert_batch_size": 4,
+      "min_confidence_threshold": 0.6,
+      "enable_xgboost": true,
+      "recommendation_threshold": 0.65,
+      "enable_caching": true,
+      "cache_ttl_minutes": 30
+    },
+    "thresholds": {
+      "minimum_success_rate_percent": 80,
+      "minimum_coverage_percent": 70,
+      "maximum_warnings": 10,
+      "maximum_memory_usage_mb": 500,
+      "maximum_processing_time_ms": 30000
+    },
+    "mock_data_settings": {
+      "simulate_network_delays": false,
+      "network_delay_range_ms": [100, 500],
+      "simulate_api_failures": false,
+      "failure_rate_percent": 5,
+      "generate_realistic_sentiment": true,
+      "sentiment_distribution": {
+        "positive": 0.4,
+        "negative": 0.3,
+        "neutral": 0.3
+      }
+    },
+    "test_categories": {
+      "component_tests": {
+        "enabled": true,
+        "tests": [
+          {
+            "name": "Enhanced Pipeline Process",
+            "enabled": true,
+            "timeout_seconds": 60
+          },
+          {
+            "name": "Orchestrator Integration",
+            "enabled": true,
+            "timeout_seconds": 120
+          },
+          {
+            "name": "Configuration Validation",
+            "enabled": true,
+            "timeout_seconds": 30
+          }
+        ]
+      },
+      "integration_tests": {
+        "enabled": true,
+        "tests": [
+          {
+            "name": "News-to-Recommendation Pipeline",
+            "enabled": true,
+            "timeout_seconds": 90
+          },
+          {
+            "name": "Queue Communication",
+            "enabled": true,
+            "timeout_seconds": 30
+          },
+          {
+            "name": "State Management",
+            "enabled": true,
+            "timeout_seconds": 45
+          }
+        ]
+      },
+      "performance_tests": {
+        "enabled": true,
+        "tests": [
+          {
+            "name": "Memory Usage",
+            "enabled": true,
+            "timeout_seconds": 120
+          },
+          {
+            "name": "Processing Performance",
+            "enabled": true,
+            "timeout_seconds": 180
+          },
+          {
+            "name": "Concurrent Processing",
+            "enabled": true,
+            "timeout_seconds": 240
+          }
+        ]
+      },
+      "failure_tests": {
+        "enabled": true,
+        "tests": [
+          {
+            "name": "Network Failure Simulation",
+            "enabled": true,
+            "timeout_seconds": 60
+          },
+          {
+            "name": "Resource Exhaustion",
+            "enabled": true,
+            "timeout_seconds": 120
+          },
+          {
+            "name": "Configuration Errors",
+            "enabled": true,
+            "timeout_seconds": 30
+          },
+          {
+            "name": "Process Crash Recovery",
+            "enabled": true,
+            "timeout_seconds": 90
+          }
+        ]
+      },
+      "security_tests": {
+        "enabled": false,
+        "tests": [
+          {
+            "name": "Input Validation",
+            "enabled": true,
+            "timeout_seconds": 60
+          },
+          {
+            "name": "Data Sanitization",
+            "enabled": true,
+            "timeout_seconds": 45
+          }
+        ]
+      },
+      "scalability_tests": {
+        "enabled": false,
+        "tests": [
+          {
+            "name": "High Volume Processing",
+            "enabled": true,
+            "timeout_seconds": 300
+          },
+          {
+            "name": "Multi-Symbol Concurrent Processing",
+            "enabled": true,
+            "timeout_seconds": 240
+          }
+        ]
+      }
+    },
+    "reporting": {
+      "generate_html_report": true,
+      "generate_json_report": true,
+      "generate_junit_xml": false,
+      "include_performance_graphs": true,
+      "include_detailed_logs": true,
+      "output_directory": "./test_reports",
+      "report_timestamp": true
+    },
+    "environment": {
+      "cleanup_temp_files": true,
+      "preserve_logs_on_failure": true,
+      "parallel_test_execution": false,
+      "max_parallel_tests": 3,
+      "test_isolation": true,
+      "mock_external_dependencies": true
+    }
+  },
+  "test_scenarios": {
+    "smoke_test": {
+      "description": "Quick validation of basic functionality",
+      "duration_minutes": 5,
+      "components": ["basic_pipeline", "simple_integration"],
+      "symbols": ["AAPL"],
+      "articles_per_symbol": 5
+    },
+    "regression_test": {
+      "description": "Full regression test suite",
+      "duration_minutes": 30,
+      "components": ["all"],
+      "symbols": ["AAPL", "MSFT", "GOOGL"],
+      "articles_per_symbol": 15
+    },
+    "stress_test": {
+      "description": "High-load stress testing",
+      "duration_minutes": 60,
+      "components": ["performance", "memory", "concurrent"],
+      "symbols": ["AAPL", "MSFT", "GOOGL", "TSLA", "NVDA"],
+      "articles_per_symbol": 50
+    },
+    "production_readiness": {
+      "description": "Production readiness validation",
+      "duration_minutes": 45,
+      "components": ["all"],
+      "symbols": ["AAPL", "MSFT", "GOOGL", "TSLA"],
+      "articles_per_symbol": 20,
+      "required_success_rate": 95,
+      "required_coverage": 90
+    }
+  },
+  "alerts": {
+    "memory_usage_alert_mb": 350,
+    "processing_time_alert_ms": 25000,
+    "error_rate_alert_percent": 10,
+    "warning_count_alert": 15,
+    "notification_webhooks": [],
+    "email_notifications": {
+      "enabled": false,
+      "smtp_server": "",
+      "recipients": []
+    }
+  },
+  "debugging": {
+    "enable_detailed_logging": true,
+    "log_level": "DEBUG",
+    "capture_stack_traces": true,
+    "save_intermediate_data": true,
+    "enable_profiling": false,
+    "profile_memory_usage": true,
+    "enable_breakpoints": false
+  }
+}
