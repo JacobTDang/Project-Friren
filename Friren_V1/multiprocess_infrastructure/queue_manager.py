@@ -33,6 +33,14 @@ class MessageType(Enum):
     SYSTEM_STATUS = "system_status"
     HEARTBEAT = "heartbeat"
 
+    # NEW: Strategy Management Messages (from implementation_rules.xml)
+    STRATEGY_ASSIGNMENT = "strategy_assignment"                 # Post-execution strategy assignment
+    STRATEGY_REASSESSMENT_REQUEST = "strategy_reassessment_request"  # Health monitor requests reassessment
+    STRATEGY_TRANSITION = "strategy_transition"                # Strategy change broadcast
+    MONITORING_STRATEGY_UPDATE = "monitoring_strategy_update"   # Immediate strategy updates
+    API_RATE_LIMIT_WARNING = "api_rate_limit_warning"          # API rate limit alerts
+    SENTIMENT_UPDATE = "sentiment_update"                       # FinBERT sentiment analysis updates
+
 
 @dataclass
 class QueueMessage:
@@ -87,11 +95,19 @@ class QueueManager:
         # Message routing rules
         self.routing_rules = self._setup_routing_rules()
 
-        # Rate limiting
+        # Rate limiting (from implementation_rules.xml)
         self.rate_limits = {
             MessageType.STRATEGY_SIGNAL: 60,    # Max 60 per minute
             MessageType.HEALTH_ALERT: 10,       # Max 10 per minute
             MessageType.REGIME_CHANGE: 5,       # Max 5 per minute
+
+            # NEW: Strategy Management Rate Limits
+            MessageType.STRATEGY_ASSIGNMENT: 20,        # Max 20 assignments per minute
+            MessageType.STRATEGY_REASSESSMENT_REQUEST: 15,  # Max 15 reassessments per minute
+            MessageType.STRATEGY_TRANSITION: 10,        # Max 10 transitions per minute (safety limit)
+            MessageType.MONITORING_STRATEGY_UPDATE: 30, # Max 30 immediate updates per minute
+            MessageType.API_RATE_LIMIT_WARNING: 5,      # Max 5 warnings per minute
+            MessageType.SENTIMENT_UPDATE: 12,           # Max 12 sentiment updates per minute (every 5 seconds)
         }
         self.rate_counters = {msg_type: 0 for msg_type in self.rate_limits}
         self.rate_reset_time = time.time()
@@ -125,6 +141,38 @@ class QueueManager:
                 'priority': MessagePriority.LOW,
                 'recipients': ['orchestrator'],
                 'retain_seconds': 30
+            },
+
+            # NEW: Strategy Management Routing Rules (from implementation_rules.xml)
+            MessageType.STRATEGY_ASSIGNMENT: {
+                'priority': MessagePriority.NORMAL,
+                'recipients': ['position_health_monitor'],
+                'retain_seconds': 300  # 5 minutes - important for monitoring
+            },
+            MessageType.STRATEGY_REASSESSMENT_REQUEST: {
+                'priority': MessagePriority.HIGH,
+                'recipients': ['market_decision_engine'],
+                'retain_seconds': 180  # 3 minutes - needs prompt attention
+            },
+            MessageType.STRATEGY_TRANSITION: {
+                'priority': MessagePriority.HIGH,  # CRITICAL for exits per rules
+                'recipients': ['position_health_monitor', 'market_decision_engine', 'orchestrator'],
+                'retain_seconds': 600  # 10 minutes - strategy changes are important
+            },
+            MessageType.MONITORING_STRATEGY_UPDATE: {
+                'priority': MessagePriority.CRITICAL,  # IMMEDIATE updates per rules
+                'recipients': ['position_health_monitor'],
+                'retain_seconds': 120  # 2 minutes - immediate but short-lived
+            },
+            MessageType.API_RATE_LIMIT_WARNING: {
+                'priority': MessagePriority.HIGH,
+                'recipients': ['market_decision_engine', 'orchestrator'],
+                'retain_seconds': 300  # 5 minutes - needs attention to prevent failures
+            },
+            MessageType.SENTIMENT_UPDATE: {
+                'priority': MessagePriority.NORMAL,
+                'recipients': ['market_decision_engine'],
+                'retain_seconds': 900  # 15 minutes - sentiment is slower-changing
             }
         }
 
@@ -351,3 +399,122 @@ class QueueManager:
             alpha * processing_time +
             (1 - alpha) * self.stats['avg_processing_time']
         )
+
+    # NEW: Strategy Management Convenience Methods (from implementation_rules.xml)
+
+    def send_strategy_assignment(self, sender_id: str, symbol: str, strategy_name: str,
+                               execution_result: Dict[str, Any]) -> bool:
+        """Send strategy assignment after successful execution"""
+        message = QueueMessage(
+            message_type=MessageType.STRATEGY_ASSIGNMENT,
+            priority=MessagePriority.NORMAL,
+            sender_id=sender_id,
+            recipient_id="position_health_monitor",
+            payload={
+                'symbol': symbol,
+                'assigned_strategy': strategy_name,
+                'execution_result': execution_result,
+                'assignment_time': datetime.now(),
+                'reason': 'post_execution_assignment'
+            }
+        )
+        return self.send_message(message)
+
+    def send_strategy_reassessment_request(self, sender_id: str, symbol: str,
+                                         current_strategy: str, reason: str,
+                                         performance_data: Dict[str, Any]) -> bool:
+        """Send strategy reassessment request from health monitor"""
+        message = QueueMessage(
+            message_type=MessageType.STRATEGY_REASSESSMENT_REQUEST,
+            priority=MessagePriority.HIGH,
+            sender_id=sender_id,
+            recipient_id="market_decision_engine",
+            payload={
+                'symbol': symbol,
+                'current_strategy': current_strategy,
+                'reassessment_reason': reason,
+                'performance_data': performance_data,
+                'request_time': datetime.now()
+            }
+        )
+        return self.send_message(message)
+
+    def send_strategy_transition(self, sender_id: str, symbol: str,
+                               old_strategy: str, new_strategy: str,
+                               transition_signals: List[Dict], confidence: float) -> bool:
+        """Broadcast strategy transition to all interested processes"""
+        message = QueueMessage(
+            message_type=MessageType.STRATEGY_TRANSITION,
+            priority=MessagePriority.HIGH,  # CRITICAL for exits per rules
+            sender_id=sender_id,
+            recipient_id="ALL_INTERESTED",  # Broadcast
+            payload={
+                'symbol': symbol,
+                'old_strategy': old_strategy,
+                'new_strategy': new_strategy,
+                'transition_signals': transition_signals,
+                'confidence': confidence,
+                'transition_time': datetime.now(),
+                'requires_immediate_action': True
+            }
+        )
+        return self.send_message(message)
+
+    def send_monitoring_strategy_update(self, sender_id: str, symbol: str,
+                                      strategy_name: str, update_type: str) -> bool:
+        """Send immediate monitoring strategy update"""
+        message = QueueMessage(
+            message_type=MessageType.MONITORING_STRATEGY_UPDATE,
+            priority=MessagePriority.CRITICAL,  # IMMEDIATE per rules
+            sender_id=sender_id,
+            recipient_id="position_health_monitor",
+            payload={
+                'symbol': symbol,
+                'strategy_name': strategy_name,
+                'update_type': update_type,  # 'immediate_change', 'forced_transition', etc.
+                'update_time': datetime.now(),
+                'requires_immediate_processing': True
+            }
+        )
+        return self.send_message(message)
+
+    def send_api_rate_limit_warning(self, sender_id: str, api_type: str,
+                                  current_usage: int, limit: int) -> bool:
+        """Send API rate limit warning"""
+        usage_pct = (current_usage / limit) * 100 if limit > 0 else 0
+
+        message = QueueMessage(
+            message_type=MessageType.API_RATE_LIMIT_WARNING,
+            priority=MessagePriority.HIGH,
+            sender_id=sender_id,
+            recipient_id="market_decision_engine",
+            payload={
+                'api_type': api_type,
+                'current_usage': current_usage,
+                'rate_limit': limit,
+                'usage_percentage': usage_pct,
+                'warning_time': datetime.now(),
+                'suggested_action': 'reduce_frequency' if usage_pct > 80 else 'monitor'
+            }
+        )
+        return self.send_message(message)
+
+    def send_sentiment_update(self, sender_id: str, symbol: str,
+                            sentiment_data: Dict[str, Any]) -> bool:
+        """Send sentiment analysis update"""
+        message = QueueMessage(
+            message_type=MessageType.SENTIMENT_UPDATE,
+            priority=MessagePriority.NORMAL,
+            sender_id=sender_id,
+            recipient_id="market_decision_engine",
+            payload={
+                'symbol': symbol,
+                'sentiment_score': sentiment_data.get('score', 0),
+                'sentiment_label': sentiment_data.get('label', 'neutral'),
+                'confidence': sentiment_data.get('confidence', 0),
+                'news_items_analyzed': sentiment_data.get('news_count', 0),
+                'analysis_time': datetime.now(),
+                'data': sentiment_data
+            }
+        )
+        return self.send_message(message)

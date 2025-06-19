@@ -1,232 +1,377 @@
 import pandas as pd
 import numpy as np
-from trading_engine.data.yahoo import StockDataTools
+import matplotlib.pyplot as plt
+from datetime import datetime
 
-class bb_backtest:
-  def __init__(self, starting_cash=25000):
+class EnhancedBollingerBacktest:
+    """
+    Enhanced Bollinger Bands backtest with multiple improvements
+    """
+
+    def __init__(self, starting_cash=25000):
         self.starting_cash = starting_cash
-        self.cash = starting_cash
+        self.reset()
+
+    def reset(self):
+        """Reset backtest state"""
+        self.cash = self.starting_cash
         self.shares = 0
         self.portfolio_value = []
         self.trades = []
-        self.SDT = StockDataTools()
+        self.daily_returns = []
 
-  def bollinger_strategy(self, df):
-    """
-    Use the SDT to create the bollinger band strategy
-    """
-    df_bb = self.SDT.add_bollinger_bands(df)
-
-    # Initialize signals
-    df_bb['signal'] = 0  # 0 = hold, 1 = buy, -1 = sell
-    df_bb['position'] = 0  # Track current position
-
-    # Calculate additional indicators for better signals
-    df_bb['bb_position'] = (df_bb['Close'] - df_bb['LowerBand']) / (df_bb['UpperBand'] - df_bb['LowerBand'])
-    df_bb['bb_width'] = (df_bb['UpperBand'] - df_bb['LowerBand']) / df_bb['MA']
-    df_bb['price_vs_ma'] = df_bb['Close'] / df_bb['MA']
-
-    current_position = 0
-
-    for i in range(len(df_bb)):
-        if pd.isna(df_bb.iloc[i]['UpperBand']):
-            continue
-
-        current_price = df_bb.iloc[i]['Close']
-        upper_band = df_bb.iloc[i]['UpperBand']
-        lower_band = df_bb.iloc[i]['LowerBand']
-        middle_band = df_bb.iloc[i]['MA']
-        bb_position = df_bb.iloc[i]['bb_position']
-        bb_width = df_bb.iloc[i]['bb_width']
-
-        # Buy Signal: Price touches or goes below lower band
-        if current_price <= lower_band and current_position == 0:
-            df_bb.iloc[i, df_bb.columns.get_loc('signal')] = 1
-            current_position = 1
-
-        # Sell Signal: Price touches or goes above upper band
-        elif current_price >= upper_band and current_position == 1:
-            df_bb.iloc[i, df_bb.columns.get_loc('signal')] = -1
-            current_position = 0
-
-        # Alternative exit: Return to middle band (more conservative)
-        elif current_price >= middle_band and current_position == 1:
-            df_bb.iloc[i, df_bb.columns.get_loc('signal')] = -1
-            current_position = 0
-
-        # Track position
-        df_bb.iloc[i, df_bb.columns.get_loc('position')] = current_position
-
-    return df_bb
-
-  def backtest_bollinger_strategy(self, df, period=20, num_std=2):
+    def analyze_current_strategy_problems(self, df):
         """
-        Backtest Bollinger Bands mean reversion strategy
-        Buy when price touches lower band, sell when price touches upper band
+        Analyze why the current Bollinger Bands strategy is failing
         """
-        # Add Bollinger Bands to data
+        print(" ANALYZING STRATEGY PROBLEMS:")
+        print("="*60)
+
+        # Add Bollinger Bands
         df = df.copy()
-        df['MA'] = df['Close'].rolling(window=period).mean()
-        df['STD'] = df['Close'].rolling(window=period).std()
-        df['UpperBand'] = df['MA'] + (num_std * df['STD'])
-        df['LowerBand'] = df['MA'] - (num_std * df['STD'])
+        df['MA'] = df['Close'].rolling(20).mean()
+        df['STD'] = df['Close'].rolling(20).std()
+        df['UpperBand'] = df['MA'] + (2 * df['STD'])
+        df['LowerBand'] = df['MA'] - (2 * df['STD'])
+        df['BB_Position'] = (df['Close'] - df['LowerBand']) / (df['UpperBand'] - df['LowerBand'])
+        df['BB_Width'] = (df['UpperBand'] - df['LowerBand']) / df['MA']
 
-        # Track position
-        position = 0  # 0 = no position, 1 = long position
+        # Analyze band touches
+        lower_touches = df[df['Close'] <= df['LowerBand']]
+        upper_touches = df[df['Close'] >= df['UpperBand']]
+
+        print(f" BOLLINGER BAND ANALYSIS:")
+        print(f"   • Lower band touches: {len(lower_touches)}")
+        print(f"   • Upper band touches: {len(upper_touches)}")
+        print(f"   • Average BB width: {df['BB_Width'].mean():.3f}")
+        print(f"   • BB width std: {df['BB_Width'].std():.3f}")
+
+        # Check market regime
+        returns = df['Close'].pct_change()
+        volatility = returns.rolling(20).std() * np.sqrt(252)
+        trend = (df['Close'].iloc[-1] / df['Close'].iloc[0]) ** (252/len(df)) - 1
+
+        print(f"\n MARKET REGIME ANALYSIS:")
+        print(f"   • Average volatility: {volatility.mean():.1%}")
+        print(f"   • Annualized trend: {trend:.1%}")
+        print(f"   • Max drawdown period: {self._calculate_max_dd_period(df['Close'])}")
+
+        # Problem identification
+        problems = []
+        if len(lower_touches) < 5:
+            problems.append(" Too few lower band touches - bands may be too tight")
+        if len(upper_touches) < 5:
+            problems.append(" Too few upper band touches - strategy not active enough")
+        if df['BB_Width'].mean() < 0.05:
+            problems.append(" Bands too narrow - not capturing enough volatility")
+        if abs(trend) > 0.15:
+            problems.append(" Strong trending market - mean reversion may not work")
+
+        print(f"\n IDENTIFIED PROBLEMS:")
+        for problem in problems:
+            print(f"   {problem}")
+
+        return problems
+
+    def _calculate_max_dd_period(self, prices):
+        """Calculate maximum drawdown period"""
+        peak = prices.expanding().max()
+        dd = (prices - peak) / peak
+        max_dd = dd.min()
+        dd_start = dd[dd == max_dd].index[0]
+        recovery = prices[dd_start:][prices[dd_start:] >= peak[dd_start]]
+        if len(recovery) > 0:
+            dd_end = recovery.index[0]
+            return (dd_end - dd_start).days
+        return "Ongoing"
+
+    def enhanced_bollinger_strategy(self, df,
+                                  bb_period=20,
+                                  bb_std=2,
+                                  rsi_period=14,
+                                  volume_filter=True,
+                                  trend_filter=True,
+                                  position_sizing='fixed'):
+        """
+        Enhanced Bollinger Bands strategy with multiple filters
+        """
+        self.reset()
+        df = df.copy()
+
+        # Basic Bollinger Bands
+        df['MA'] = df['Close'].rolling(bb_period).mean()
+        df['STD'] = df['Close'].rolling(bb_period).std()
+        df['UpperBand'] = df['MA'] + (bb_std * df['STD'])
+        df['LowerBand'] = df['MA'] - (bb_std * df['STD'])
+        df['BB_Position'] = (df['Close'] - df['LowerBand']) / (df['UpperBand'] - df['LowerBand'])
+        df['BB_Width'] = (df['UpperBand'] - df['LowerBand']) / df['MA']
+
+        # Additional filters
+        # 1. RSI filter
+        delta = df['Close'].diff()
+        gains = delta.where(delta > 0, 0).ewm(alpha=1/rsi_period).mean()
+        losses = (-delta.where(delta < 0, 0)).ewm(alpha=1/rsi_period).mean()
+        rs = gains / losses
+        df['RSI'] = 100 - (100 / (1 + rs))
+
+        # 2. Volume filter
+        df['Volume_MA'] = df['Volume'].rolling(20).mean()
+        df['Volume_Ratio'] = df['Volume'] / df['Volume_MA']
+
+        # 3. Trend filter
+        df['Trend_MA'] = df['Close'].rolling(50).mean()
+        df['Trend_Direction'] = np.where(df['Close'] > df['Trend_MA'], 1, -1)
+
+        # 4. Volatility regime
+        returns = df['Close'].pct_change()
+        df['Volatility'] = returns.rolling(20).std()
+        df['Vol_Regime'] = pd.qcut(df['Volatility'].fillna(df['Volatility'].mean()),
+                                   q=3, labels=['Low', 'Medium', 'High'])
+
+        position = 0
+        entry_price = 0
 
         for i, row in df.iterrows():
             current_price = row['Close']
-            current_date = row.name if hasattr(row.name, 'date') else i
+            current_date = i
 
-            # Skip first 'period' days (need data for BB calculation)
-            if pd.isna(row['UpperBand']):
-                self.portfolio_value.append(self.starting_cash)
+            # Skip if we don't have enough data
+            if pd.isna(row['UpperBand']) or pd.isna(row['RSI']):
+                self.portfolio_value.append(self.cash + (self.shares * current_price))
                 continue
 
-            upper_band = row['UpperBand']
-            lower_band = row['LowerBand']
-            middle_band = row['MA']
+            # Generate signals with filters
+            # Buy conditions (enhanced)
+            buy_conditions = [
+                current_price <= row['LowerBand'],  # Basic BB signal
+                row['RSI'] < 35 if trend_filter else True,  # RSI oversold
+                row['Volume_Ratio'] > 1.2 if volume_filter else True,  # Volume confirmation
+                row['Vol_Regime'] != 'Low' if len(df) > 60 else True,  # Avoid low vol periods
+                position == 0  # No current position
+            ]
 
-            # Buy signal: Price touches or goes below lower band
-            if current_price <= lower_band and position == 0:
-                self.shares = self.cash // current_price
-                self.cash -= self.shares * current_price
-                position = 1
+            # Sell conditions (enhanced)
+            sell_conditions = [
+                current_price >= row['UpperBand'],  # Basic BB signal
+                row['RSI'] > 65 if trend_filter else True,  # RSI overbought
+                position == 1  # Have position
+            ]
 
-                self.trades.append({
-                    'date': current_date,
-                    'action': 'BUY',
-                    'price': current_price,
-                    'shares': self.shares,
-                    'signal': 'Lower Band Touch',
-                    'cash_remaining': self.cash
-                })
-                print(f"BUY: {self.shares} shares at ${current_price:.2f} (Lower Band) on {current_date}")
+            # Alternative exit conditions
+            stop_loss_conditions = [
+                position == 1,
+                (current_price - entry_price) / entry_price < -0.08  # 8% stop loss
+            ]
 
-            # Sell signal: Price touches or goes above upper band
-            elif current_price >= upper_band and position == 1:
-                self.cash += self.shares * current_price
+            # Execute trades
+            if all(buy_conditions):
+                # Position sizing
+                if position_sizing == 'fixed':
+                    shares = self.cash // current_price
+                elif position_sizing == 'volatility':
+                    vol_adj = min(0.02 / (row['Volatility'] + 0.01), 1.0)  # Risk-adjusted sizing
+                    shares = int((self.cash * vol_adj) // current_price)
+                else:  # conservative
+                    shares = int((self.cash * 0.8) // current_price)
 
-                self.trades.append({
-                    'date': current_date,
-                    'action': 'SELL',
-                    'price': current_price,
-                    'shares': self.shares,
-                    'signal': 'Upper Band Touch',
-                    'cash_total': self.cash
-                })
-                print(f"SELL: {self.shares} shares at ${current_price:.2f} (Upper Band) on {current_date}")
-                self.shares = 0
-                position = 0
+                if shares > 0:
+                    self.shares = shares
+                    self.cash -= shares * current_price
+                    position = 1
+                    entry_price = current_price
 
-            # Calculate current portfolio value
-            current_portfolio_value = self.cash + (self.shares * current_price)
-            self.portfolio_value.append(current_portfolio_value)
+                    self.trades.append({
+                        'date': current_date,
+                        'action': 'BUY',
+                        'price': current_price,
+                        'shares': shares,
+                        'rsi': row['RSI'],
+                        'bb_position': row['BB_Position'],
+                        'volume_ratio': row['Volume_Ratio'],
+                        'volatility': row['Volatility'],
+                        'signal': 'Enhanced BB Buy'
+                    })
 
-        return self.calculate_performance()
+            elif all(sell_conditions) or all(stop_loss_conditions):
+                if position == 1:
+                    self.cash += self.shares * current_price
+                    profit = (current_price - entry_price) * self.shares
 
-  def calculate_performance(self):
-      """
-      Calculate strategy performance metrics
-      """
-      final_value = self.portfolio_value[-1]
-      total_return = (final_value - self.starting_cash) / self.starting_cash
+                    signal_type = 'Stop Loss' if all(stop_loss_conditions) else 'BB Sell'
 
-      # Calculate some basic metrics
-      portfolio_series = pd.Series(self.portfolio_value)
-      daily_returns = portfolio_series.pct_change().dropna()
+                    self.trades.append({
+                        'date': current_date,
+                        'action': 'SELL',
+                        'price': current_price,
+                        'shares': self.shares,
+                        'rsi': row['RSI'],
+                        'bb_position': row['BB_Position'],
+                        'profit': profit,
+                        'signal': signal_type
+                    })
 
-      # Sharpe ratio (simplified - assuming 0% risk-free rate)
-      sharpe_ratio = daily_returns.mean() / daily_returns.std() * np.sqrt(252) if daily_returns.std() > 0 else 0
+                    self.shares = 0
+                    position = 0
+                    entry_price = 0
 
-      # Maximum drawdown
-      rolling_max = portfolio_series.expanding().max()
-      drawdown = (portfolio_series - rolling_max) / rolling_max
-      max_drawdown = drawdown.min()
+            # Track portfolio value
+            current_value = self.cash + (self.shares * current_price)
+            self.portfolio_value.append(current_value)
 
-      # Win rate
-      profitable_trades = 0
-      total_trades = len(self.trades) // 2  # Buy and sell pairs
+        return self.calculate_enhanced_performance(df)
 
-      for i in range(0, len(self.trades), 2):
-          if i + 1 < len(self.trades):
-              buy_price = self.trades[i]['price']
-              sell_price = self.trades[i + 1]['price']
-              if sell_price > buy_price:
-                  profitable_trades += 1
+    def calculate_enhanced_performance(self, df):
+        """Calculate enhanced performance metrics"""
+        if not self.portfolio_value:
+            return {'error': 'No portfolio values'}
 
-      win_rate = profitable_trades / total_trades if total_trades > 0 else 0
+        portfolio_series = pd.Series(self.portfolio_value)
+        returns = portfolio_series.pct_change().dropna()
 
-      results = {
-          'starting_cash': self.starting_cash,
-          'final_value': final_value,
-          'total_return': total_return * 100,  # Convert to percentage
-          'total_trades': total_trades,
-          'win_rate': win_rate * 100,  # Convert to percentage
-          'sharpe_ratio': sharpe_ratio,
-          'max_drawdown': max_drawdown * 100,  # Convert to percentage
-          'portfolio_values': self.portfolio_value
-      }
+        # Basic metrics
+        final_value = portfolio_series.iloc[-1]
+        total_return = (final_value - self.starting_cash) / self.starting_cash
 
-      return results
+        # Risk metrics
+        sharpe = returns.mean() / returns.std() * np.sqrt(252) if returns.std() > 0 else 0
+        sortino = returns.mean() / returns[returns < 0].std() * np.sqrt(252) if len(returns[returns < 0]) > 0 else 0
 
-def run_backtest_example():
+        # Drawdown analysis
+        rolling_max = portfolio_series.expanding().max()
+        drawdown = (portfolio_series - rolling_max) / rolling_max
+        max_dd = drawdown.min()
+
+        # Trade analysis
+        profitable_trades = len([t for t in self.trades if t['action'] == 'SELL' and t.get('profit', 0) > 0])
+        total_completed_trades = len([t for t in self.trades if t['action'] == 'SELL'])
+        win_rate = profitable_trades / total_completed_trades if total_completed_trades > 0 else 0
+
+        # Benchmark comparison (buy and hold)
+        buy_hold_return = (df['Close'].iloc[-1] / df['Close'].iloc[0]) - 1
+
+        results = {
+            'starting_cash': self.starting_cash,
+            'final_value': final_value,
+            'total_return': total_return * 100,
+            'buy_hold_return': buy_hold_return * 100,
+            'alpha': (total_return - buy_hold_return) * 100,
+            'total_trades': total_completed_trades,
+            'win_rate': win_rate * 100,
+            'sharpe_ratio': sharpe,
+            'sortino_ratio': sortino,
+            'max_drawdown': max_dd * 100,
+            'profit_factor': self._calculate_profit_factor(),
+            'avg_trade_duration': self._calculate_avg_trade_duration(),
+            'portfolio_values': self.portfolio_value
+        }
+
+        return results
+
+    def _calculate_profit_factor(self):
+        """Calculate profit factor (gross profits / gross losses)"""
+        profits = sum([t.get('profit', 0) for t in self.trades if t.get('profit', 0) > 0])
+        losses = abs(sum([t.get('profit', 0) for t in self.trades if t.get('profit', 0) < 0]))
+        return profits / losses if losses > 0 else float('inf')
+
+    def _calculate_avg_trade_duration(self):
+        """Calculate average trade duration"""
+        durations = []
+        buy_trades = [t for t in self.trades if t['action'] == 'BUY']
+        sell_trades = [t for t in self.trades if t['action'] == 'SELL']
+
+        for i, sell_trade in enumerate(sell_trades):
+            if i < len(buy_trades):
+                duration = (sell_trade['date'] - buy_trades[i]['date']).days
+                durations.append(duration)
+
+        return np.mean(durations) if durations else 0
+
+    def parameter_optimization(self, df, param_ranges=None):
+        """
+        Test different parameter combinations to find optimal settings
+        """
+        if param_ranges is None:
+            param_ranges = {
+                'bb_period': [15, 20, 25],
+                'bb_std': [1.5, 2.0, 2.5],
+                'rsi_period': [10, 14, 20]
+            }
+
+        results = []
+
+        print(" PARAMETER OPTIMIZATION:")
+        print("="*60)
+
+        for bb_period in param_ranges['bb_period']:
+            for bb_std in param_ranges['bb_std']:
+                for rsi_period in param_ranges['rsi_period']:
+
+                    # Test configuration
+                    result = self.enhanced_bollinger_strategy(
+                        df,
+                        bb_period=bb_period,
+                        bb_std=bb_std,
+                        rsi_period=rsi_period,
+                        volume_filter=True,
+                        trend_filter=True
+                    )
+
+                    if 'error' not in result:
+                        results.append({
+                            'bb_period': bb_period,
+                            'bb_std': bb_std,
+                            'rsi_period': rsi_period,
+                            'total_return': result['total_return'],
+                            'sharpe_ratio': result['sharpe_ratio'],
+                            'max_drawdown': result['max_drawdown'],
+                            'win_rate': result['win_rate'],
+                            'total_trades': result['total_trades']
+                        })
+
+        # Sort by risk-adjusted return
+        results_df = pd.DataFrame(results)
+        results_df['score'] = results_df['total_return'] * results_df['sharpe_ratio'] / abs(results_df['max_drawdown'] + 0.01)
+        results_df = results_df.sort_values('score', ascending=False)
+
+        print(" TOP 5 PARAMETER COMBINATIONS:")
+        print(results_df.head().to_string(index=False))
+
+        return results_df
+
+def compare_strategies(df):
     """
-    Example of how to run a Bollinger Bands backtest
+    Compare original vs enhanced Bollinger Bands strategies
     """
-    # Create sample data with more realistic BB patterns
-    dates = pd.date_range('2023-01-01', '2023-12-31', freq='D')
-    np.random.seed(42)  # For reproducible results
+    print(" STRATEGY COMPARISON")
+    print("="*60)
 
-    # Create price data that oscillates (good for mean reversion)
-    prices = [100]  # Starting price
-    for i in range(1, len(dates)):
-        # Add cyclical pattern + noise for realistic BB testing
-        cycle = 5 * np.sin(i * 0.1) + 2 * np.sin(i * 0.05)  # Multi-frequency oscillation
-        noise = np.random.normal(0, 1.5)
-        trend = 0.002 * i  # Small upward trend
+    backtester = EnhancedBollingerBacktest(starting_cash=25000)
 
-        price_change = (cycle + noise + trend) / 100
-        new_price = prices[-1] * (1 + price_change)
-        prices.append(max(new_price, 50))  # Floor at $50
+    # Analyze problems with current strategy
+    problems = backtester.analyze_current_strategy_problems(df)
 
-    sample_data = pd.DataFrame({
-        'Date': dates,
-        'Open': [p + np.random.normal(0, 0.5) for p in prices],
-        'High': [p + abs(np.random.normal(1, 0.5)) for p in prices],
-        'Low': [p - abs(np.random.normal(1, 0.5)) for p in prices],
-        'Close': prices,
-        'Volume': [int(np.random.uniform(800000, 1200000)) for _ in prices]
-    })
-    sample_data.set_index('Date', inplace=True)
+    # Test enhanced strategy
+    print(f"\n TESTING ENHANCED STRATEGY:")
+    enhanced_results = backtester.enhanced_bollinger_strategy(df)
 
-    # Run the backtest
-    backtester = bb_backtest(starting_cash=10000)
-    results = backtester.backtest_bollinger_strategy(sample_data)
+    if 'error' not in enhanced_results:
+        print(f"Enhanced Strategy Results:")
+        print(f"   • Total Return: {enhanced_results['total_return']:.2f}%")
+        print(f"   • Alpha vs Buy-Hold: {enhanced_results['alpha']:.2f}%")
+        print(f"   • Sharpe Ratio: {enhanced_results['sharpe_ratio']:.2f}")
+        print(f"   • Win Rate: {enhanced_results['win_rate']:.1f}%")
+        print(f"   • Max Drawdown: {enhanced_results['max_drawdown']:.2f}%")
+        print(f"   • Total Trades: {enhanced_results['total_trades']}")
 
-    # Print results
-    print("\n" + "="*50)
-    print("BOLLINGER BANDS BACKTEST RESULTS")
-    print("="*50)
-    print(f"Starting Cash: ${results['starting_cash']:,.2f}")
-    print(f"Final Value: ${results['final_value']:,.2f}")
-    print(f"Total Return: {results['total_return']:.2f}%")
-    print(f"Total Trades: {results['total_trades']}")
-    print(f"Win Rate: {results['win_rate']:.1f}%")
-    print(f"Sharpe Ratio: {results['sharpe_ratio']:.2f}")
-    print(f"Max Drawdown: {results['max_drawdown']:.2f}%")
+        # Parameter optimization
+        print(f"\n RUNNING PARAMETER OPTIMIZATION...")
+        opt_results = backtester.parameter_optimization(df)
 
-    print("\n" + "="*50)
-    print("TRADE HISTORY")
-    print("="*50)
-    for trade in backtester.trades:
-        action = trade['action']
-        shares = trade['shares']
-        price = trade['price']
-        signal = trade.get('signal', 'N/A')
-        print(f"{action}: {shares} shares at ${price:.2f} ({signal})")
-
-    return results
+        return enhanced_results, opt_results
+    else:
+        print("Enhanced strategy failed to execute")
+        return None, None
 
 if __name__ == "__main__":
-    results = run_backtest_example()
+    # This would be called from your main script
+    pass

@@ -11,7 +11,8 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(os.path.dirname(current_dir))  # Go up 2 levels
 sys.path.insert(0, project_root)
 
-from trading_engine.data.yahoo import StockDataTools
+from trading_engine.data.data_utils import StockDataTools
+from Friren_V1.trading_engine.data.yahoo_price import StockDataFetcher
 
 class CointegrationAnalyzer:
     """

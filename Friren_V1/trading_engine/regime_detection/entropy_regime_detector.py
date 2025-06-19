@@ -16,7 +16,7 @@ project_root = os.path.dirname(os.path.dirname(current_dir))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from trading_engine.data.yahoo import StockDataTools
+from Friren_V1.trading_engine.data.yahoo_price import StockDataTools
 
 @dataclass
 class EntropyConfig:

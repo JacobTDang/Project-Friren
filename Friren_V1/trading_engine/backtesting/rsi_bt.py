@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from trading_engine.data.yahoo import StockDataTools
+from trading_engine.data.data_utils import StockDataTools
 
 class rsi_backtest:
     def __init__(self, starting_cash=25000):

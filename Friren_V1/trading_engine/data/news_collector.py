@@ -15,15 +15,37 @@ import re
 
 try:
     # Import all news sources
-    from news.marketaux_api import MarketauxNews
-    from news.alpha_vintage_api import AlphaVantageNews
-    from news.fmp_api import FMPNews
-    from news.news_api import NewsAPIData
-    from news.reddit_api import RedditNews
-    from news.base import NewsArticle
+    from Friren_V1.trading_engine.data.news.marketaux_api import MarketauxNews
+    from Friren_V1.trading_engine.data.news.alpha_vintage_api import AlphaVantageNews
+    from Friren_V1.trading_engine.data.news.fmp_api import FMPNews
+    from Friren_V1.trading_engine.data.news.news_api import NewsAPIData
+    from Friren_V1.trading_engine.data.news.reddit_api import RedditNews
+    from Friren_V1.trading_engine.data.news.base import NewsArticle
 except ImportError as e:
-    # Fallback for direct execution
-    print(f"Error importing {e}")
+    # Fallback for direct execution - try relative imports
+    try:
+        from .news.marketaux_api import MarketauxNews
+        from .news.alpha_vintage_api import AlphaVantageNews
+        from .news.fmp_api import FMPNews
+        from .news.news_api import NewsAPIData
+        from .news.reddit_api import RedditNews
+        from .news.base import NewsArticle
+    except ImportError as e2:
+        print(f"Error importing news sources: {e}, {e2}")
+        # Define minimal fallback classes
+        class NewsArticle:
+            def __init__(self, title="", description="", url="", source="", published_date=None):
+                self.title = title
+                self.description = description
+                self.url = url
+                self.source = source
+                self.published_date = published_date
+
+        MarketauxNews = None
+        AlphaVantageNews = None
+        FMPNews = None
+        NewsAPIData = None
+        RedditNews = None
 
 
 @dataclass

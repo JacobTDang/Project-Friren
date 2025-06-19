@@ -1,6 +1,0 @@
-2025-06-18 18:07:13,534 - process.market_decision_engine - INFO - Process market_decision_engine initialized
-2025-06-18 18:07:13,536 - process.market_decision_engine - INFO - Enhanced Market Decision Engine initialized
-2025-06-18 18:07:13,536 - process.market_decision_engine - WARNING - Running with fallback components - some features limited
-2025-06-18 18:07:13,537 - process.market_decision_engine - WARNING - Conflict resolver using simple fallback - XGBoost features unavailable
-2025-06-18 18:07:13,570 - process.market_decision_engine - INFO - Cleaning up enhanced decision engine resources...
-2025-06-18 18:07:13,571 - process.market_decision_engine - INFO - Enhanced decision engine cleanup complete

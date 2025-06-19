@@ -625,7 +625,7 @@ if __name__ == "__main__":
 
     for i, result in enumerate(batch_result.results):
         print(f"  {i+1}. {result.classification} ({result.sentiment_score:+.3f}) "
-              f"[{result.confidence:.3f}] {'✓' if result.is_reliable else '✗'} - {test_texts[i][:60]}...")
+              f"[{result.confidence:.3f}] {'' if result.is_reliable else ''} - {test_texts[i][:60]}...")
 
     # Show statistics
     stats = finbert.get_statistics()

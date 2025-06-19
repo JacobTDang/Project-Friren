@@ -841,7 +841,7 @@ class StockDataTools:
 
 if __name__ == "__main__":
     # Test the data tools with sample data
-    from yahoo import StockDataFetcher
+    from Friren_V1.trading_engine.data.yahoo_price import StockDataFetcher
 
     # Fetch some sample data
     fetcher = StockDataFetcher()

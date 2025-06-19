@@ -11,10 +11,6 @@ import time
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict
 import logging
-from pathlib import Path
-from dotenv import load_dotenv
-
-
 
 try:
     from .base import NewsDataSource, NewsArticle

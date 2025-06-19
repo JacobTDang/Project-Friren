@@ -413,7 +413,7 @@ class YahooFinanceImporter:
                     )
 
                     articles.append(article)
-                    print(f"✓ Extracted: {title[:60]}... | Symbols: {symbols}")
+                    print(f" Extracted: {title[:60]}... | Symbols: {symbols}")
 
                 except Exception as e:
                     print(f"Error processing link: {e}")

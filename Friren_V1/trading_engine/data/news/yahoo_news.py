@@ -1,8 +1,7 @@
 """
-Yahoo Finance News Data Collector - Simplified
+Yahoo Finance News Data Collector - Fixed Version
 
-Pure news scraping from Yahoo Finance. Clean and simple.
-The enhanced collector will handle FinBERT prep later.
+Pure news scraping from Yahoo Finance with corrected URLs and enhanced symbol extraction.
 """
 
 import requests
@@ -10,14 +9,17 @@ import time
 import re
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
-from typing import List, Optional
+from typing import List, Optional, Dict
 import logging
 
-from .base import NewsDataSource, NewsArticle
+try:
+    from .base import NewsDataSource, NewsArticle
+except ImportError:
+    from base import NewsDataSource, NewsArticle
 
 
 class SymbolExtractor:
-    """Simple symbol extraction for Yahoo Finance"""
+    """Enhanced symbol extraction for Yahoo Finance"""
 
     def __init__(self):
         # Key symbols we care about
@@ -71,16 +73,38 @@ class SymbolExtractor:
         paren_symbols = re.findall(r'\(([A-Z]{1,5})\)', text)
         symbols.update(paren_symbols)
 
-        # 3. Known symbols as words
+        # 3. Yahoo Finance specific patterns
+        yahoo_patterns = [
+            r'([A-Z]{2,5})[+-]?\s*\d+\.\d+%?',  # AAPL+1.23% or AAPL 150.23
+            r'([A-Z]{2,5})\s*(?:stock|shares?|equity)',  # AAPL stock
+            r'([A-Z]{2,5})\s*(?:Corporation|Corp|Inc\.?)',  # AAPL Inc
+        ]
+
+        for pattern in yahoo_patterns:
+            matches = re.findall(pattern, text)
+            symbols.update(matches)
+
+        # 4. Known symbols as words
         words = re.findall(r'\b[A-Za-z]{1,5}\b', text)
         for word in words:
             if word.upper() in self.known_symbols:
                 symbols.add(word.upper())
 
-        # 4. Company names
+        # 5. Company names
         for company_name, symbol in self.company_mappings.items():
             if company_name in text_lower:
                 symbols.add(symbol)
+
+        # 6. Financial context patterns
+        financial_patterns = [
+            r'\b(' + '|'.join(self.known_symbols) + r')\s+(?:earnings|revenue|beat|miss)\b',
+            r'\b(' + '|'.join(self.known_symbols) + r')\s+(?:up|down|gained?|lost)\s+\d+',
+            r'(?:upgraded?|downgraded?)\s+(' + '|'.join(self.known_symbols) + r')\b',
+        ]
+
+        for pattern in financial_patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            symbols.update(m.upper() for m in matches)
 
         # Filter out false positives
         false_positives = {'US', 'USA', 'UK', 'EU', 'CEO', 'CFO', 'IPO', 'SEC', 'FDA', 'AI', 'IT'}
@@ -90,26 +114,31 @@ class SymbolExtractor:
 
 
 class YahooFinanceNews(NewsDataSource):
-    """Simple Yahoo Finance news collector - optimized for individual stock news"""
+    """Fixed Yahoo Finance news collector with working URLs"""
 
     def __init__(self):
         super().__init__("Yahoo Finance")
         self.logger = logging.getLogger(f"{__name__}.YahooFinanceNews")
 
-        # Simple session
+        # Session with proper headers
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
         })
 
         self.symbol_extractor = SymbolExtractor()
 
     def collect_news(self, hours_back: int = 24, max_articles: int = 50) -> List[NewsArticle]:
-        """Collect general news from Yahoo Finance"""
+        """Collect general financial news from Yahoo Finance"""
         sections = [
             'https://finance.yahoo.com/news/',
             'https://finance.yahoo.com/topic/stock-market-news/',
-            'https://finance.yahoo.com/topic/earnings/'
+            'https://finance.yahoo.com/topic/earnings/',
+            'https://finance.yahoo.com/markets/'
         ]
 
         all_articles = []
@@ -139,64 +168,114 @@ class YahooFinanceNews(NewsDataSource):
         unique_articles = self._remove_duplicates(all_articles)
         return unique_articles[:max_articles]
 
-    def get_symbol_news(self, symbol: str, hours_back: int = 24, max_articles: int = 20) -> List[NewsArticle]:
-        """
-        Get news specifically for a symbol - CRITICAL for decision engine
-
-        This is the key method for watchlist-based trading decisions
-        """
+    def get_symbol_news(self, symbol: str, max_articles: int = 20) -> List[NewsArticle]:
+        """Get news specifically for a symbol - FIXED URLs"""
         try:
             self.logger.info(f"Fetching news for {symbol}")
 
-            # Yahoo Finance symbol-specific news page
-            symbol_url = f"https://finance.yahoo.com/quote/{symbol}/news"
-            articles = self._scrape_section(symbol_url)
-
-            # Filter by time
-            cutoff_time = datetime.now() - timedelta(hours=hours_back)
-            recent_articles = [
-                article for article in articles
-                if article.published_date >= cutoff_time
+            # Try multiple Yahoo Finance URLs for symbol news
+            urls_to_try = [
+                f"https://finance.yahoo.com/quote/{symbol}/",  # Main quote page
+                f"https://finance.yahoo.com/quote/{symbol}/news/",  # Direct news page
+                f"https://finance.yahoo.com/quote/{symbol}",  # Without trailing slash
+                f"https://finance.yahoo.com/lookup?s={symbol}",  # Search results
             ]
 
-            # Filter to articles that actually mention the symbol
-            symbol_articles = []
-            for article in recent_articles:
+            all_articles = []
+
+            for url in urls_to_try:
+                try:
+                    articles = self._scrape_section(url)
+                    all_articles.extend(articles)
+
+                    if articles:  # If we got articles, no need to try other URLs
+                        self.logger.info(f"Successfully got articles from {url}")
+                        break
+
+                except Exception as e:
+                    self.logger.debug(f"URL {url} failed: {e}")
+                    continue
+
+            # Also search in general news for symbol mentions
+            general_articles = self.collect_news(hours_back=24, max_articles=50)
+
+            # Filter general articles for symbol mentions
+            symbol_filtered = []
+            for article in general_articles:
                 if (symbol.upper() in article.symbols_mentioned or
                     symbol.lower() in article.title.lower() or
-                    symbol.upper() in article.title):
-                    symbol_articles.append(article)
+                    symbol.upper() in article.title.upper() or
+                    any(company in article.title.lower()
+                        for company, sym in self.symbol_extractor.company_mappings.items()
+                        if sym == symbol.upper())):
 
-            self.logger.info(f"Found {len(symbol_articles)} recent articles for {symbol}")
-            return symbol_articles[:max_articles]
+                    # Ensure symbol is in the symbols_mentioned list
+                    if symbol.upper() not in article.symbols_mentioned:
+                        article.symbols_mentioned.append(symbol.upper())
+
+                    symbol_filtered.append(article)
+
+            # Combine all articles
+            all_symbol_articles = all_articles + symbol_filtered
+            unique_articles = self._remove_duplicates(all_symbol_articles)
+
+            self.logger.info(f"Found {len(unique_articles)} articles for {symbol}")
+            return unique_articles[:max_articles]
 
         except Exception as e:
             self.logger.error(f"Error getting news for {symbol}: {e}")
             return []
 
-    def get_watchlist_news(self, symbols: List[str], hours_back: int = 24, max_articles_per_symbol: int = 10) -> dict[str, List[NewsArticle]]:
-        """
-        Get news for multiple symbols (watchlist) - CRITICAL for decision engine
-
-        Returns: {symbol: [articles]} mapping for easy decision engine processing
-        """
+    def get_watchlist_news(self, symbols: List[str], max_articles_per_symbol: int = 10) -> Dict[str, List[NewsArticle]]:
+        """Get news for multiple symbols (watchlist) - FIXED for decision engine"""
         watchlist_news = {}
 
-        for symbol in symbols:
-            try:
-                self.logger.info(f"Getting watchlist news for {symbol}")
-                symbol_articles = self.get_symbol_news(symbol, hours_back, max_articles_per_symbol)
-                watchlist_news[symbol] = symbol_articles
+        # Get general news once to avoid repeated scraping
+        try:
+            self.logger.info(f"Collecting general news for watchlist filtering...")
+            general_articles = self.collect_news(hours_back=24, max_articles=100)
 
-                # Rate limiting between symbols
-                time.sleep(1)
+            for symbol in symbols:
+                try:
+                    # Filter general articles for this symbol
+                    symbol_articles = []
 
-            except Exception as e:
-                self.logger.error(f"Error getting watchlist news for {symbol}: {e}")
-                watchlist_news[symbol] = []
+                    for article in general_articles:
+                        if (symbol.upper() in article.symbols_mentioned or
+                            symbol.lower() in article.title.lower() or
+                            symbol.upper() in article.title.upper() or
+                            any(company in article.title.lower()
+                                for company, sym in self.symbol_extractor.company_mappings.items()
+                                if sym == symbol.upper())):
 
-        total_articles = sum(len(articles) for articles in watchlist_news.values())
-        self.logger.info(f"Collected {total_articles} total articles for {len(symbols)} watchlist symbols")
+                            # Ensure symbol is in the symbols_mentioned list
+                            if symbol.upper() not in article.symbols_mentioned:
+                                article.symbols_mentioned.append(symbol.upper())
+
+                            symbol_articles.append(article)
+
+                    # Also try to get symbol-specific articles (with rate limiting)
+                    try:
+                        specific_articles = self.get_symbol_news(symbol, max_articles=max_articles_per_symbol)
+                        symbol_articles.extend(specific_articles)
+                        time.sleep(1)  # Rate limiting
+                    except Exception as e:
+                        self.logger.debug(f"Symbol-specific search failed for {symbol}: {e}")
+
+                    # Remove duplicates and limit
+                    unique_articles = self._remove_duplicates(symbol_articles)
+                    watchlist_news[symbol] = unique_articles[:max_articles_per_symbol]
+
+                except Exception as e:
+                    self.logger.error(f"Error processing {symbol} for watchlist: {e}")
+                    watchlist_news[symbol] = []
+
+            total_articles = sum(len(articles) for articles in watchlist_news.values())
+            self.logger.info(f"Watchlist processing complete: {total_articles} total articles for {len(symbols)} symbols")
+
+        except Exception as e:
+            self.logger.error(f"Error in watchlist collection: {e}")
+            watchlist_news = {symbol: [] for symbol in symbols}
 
         return watchlist_news
 
@@ -209,33 +288,64 @@ class YahooFinanceNews(NewsDataSource):
             return False
 
     def _scrape_section(self, url: str) -> List[NewsArticle]:
-        """Scrape a Yahoo Finance news section"""
+        """Scrape a Yahoo Finance section with improved selectors"""
         articles = []
 
         try:
+            self.logger.debug(f"Scraping {url}")
             response = self.session.get(url, timeout=15)
             response.raise_for_status()
+
             soup = BeautifulSoup(response.content, 'html.parser')
 
-            # Find article links
+            # Enhanced selectors for Yahoo Finance
             selectors = [
+                # News page selectors
                 'h3 a[href*="/news/"]',
                 'a[data-testid]',
-                '.js-content-viewer a'
+                'h3 a',
+                '.js-content-viewer a',
+
+                # Quote page selectors (for symbol-specific news)
+                '.stream-item h3 a',
+                '.stream-item a',
+                '.news-list a',
+
+                # General content selectors
+                'a[href*="/finance/news/"]',
+                'a[href*="/news/"]',
+                '[data-module] a',
+
+                # Market page selectors
+                '.market-news a',
+                '.trending-list a'
             ]
 
             links = []
             for selector in selectors:
-                links.extend(soup.select(selector))
+                found_links = soup.select(selector)
+                if found_links:
+                    self.logger.debug(f"Found {len(found_links)} links with selector: {selector}")
+                    links.extend(found_links)
 
             # Process links
             seen_urls = set()
-            for link in links[:30]:  # Limit per section
+            processed_count = 0
+
+            for link in links:
+                if processed_count >= 50:  # Limit per section
+                    break
+
                 try:
                     title = link.get_text(strip=True)
                     href = link.get('href', '')
 
                     if not title or len(title) < 10 or href in seen_urls:
+                        continue
+
+                    # Skip navigation and non-news items
+                    skip_keywords = ['sign in', 'newsletters', 'premium', 'more...', 'subscribe']
+                    if any(keyword in title.lower() for keyword in skip_keywords):
                         continue
 
                     seen_urls.add(href)
@@ -251,7 +361,7 @@ class YahooFinanceNews(NewsDataSource):
                     # Clean title
                     title = ' '.join(title.split()).replace('...', '').strip()
 
-                    # Extract symbols
+                    # Extract symbols with enhanced detection
                     symbols = self.symbol_extractor.extract_symbols(title)
 
                     # Create article
@@ -260,15 +370,20 @@ class YahooFinanceNews(NewsDataSource):
                         content=title,  # Use title as content for now
                         source=self.source_name,
                         url=full_url,
-                        published_date=datetime.now(),
+                        published_date=datetime.now(),  # Could be enhanced to extract real date
                         symbols_mentioned=symbols
                     )
 
                     articles.append(article)
+                    processed_count += 1
+
+                    self.logger.debug(f" {title[:50]}... | Symbols: {symbols}")
 
                 except Exception as e:
                     self.logger.debug(f"Error processing link: {e}")
                     continue
+
+            self.logger.info(f"Scraped {len(articles)} articles from {url}")
 
         except Exception as e:
             self.logger.error(f"Error scraping {url}: {e}")
@@ -288,24 +403,6 @@ class YahooFinanceNews(NewsDataSource):
 
         return unique_articles
 
-    def get_symbol_news(self, symbol: str, max_articles: int = 20) -> List[NewsArticle]:
-        """Get news for a specific symbol"""
-        try:
-            url = f"https://finance.yahoo.com/quote/{symbol}/news"
-            articles = self._scrape_section(url)
-
-            # Filter to articles mentioning the symbol
-            symbol_articles = [
-                article for article in articles
-                if symbol.upper() in article.symbols_mentioned
-            ]
-
-            return symbol_articles[:max_articles]
-
-        except Exception as e:
-            self.logger.error(f"Error getting news for {symbol}: {e}")
-            return []
-
 
 # Example usage
 if __name__ == "__main__":
@@ -315,30 +412,35 @@ if __name__ == "__main__":
     collector = YahooFinanceNews()
 
     if collector.test_connection():
-        print("Testing Yahoo Finance news collection...")
+        print("Yahoo Finance connection working!")
 
         # Test general news
-        articles = collector.collect_news(max_articles=5, hours_back=48)
-        print(f"General news: {len(articles)} articles")
+        print("\nTesting general news...")
+        articles = collector.collect_news(max_articles=3)
+        print(f"Found {len(articles)} general articles")
 
-        # Test individual stock news (key for decision engine)
-        print(f"\nTesting individual stock news...")
-        aapl_news = collector.get_symbol_news('AAPL', hours_back=48)
-        print(f"AAPL news: {len(aapl_news)} articles")
-
-        for article in aapl_news[:2]:
-            print(f"  - {article.title}")
+        for article in articles:
+            print(f"  - {article.title[:60]}...")
             print(f"    Symbols: {article.symbols_mentioned}")
 
-        # Test watchlist news (key for decision engine)
-        print(f"\nTesting watchlist news...")
-        watchlist = ['AAPL', 'MSFT', 'GOOGL']
-        watchlist_news = collector.get_watchlist_news(watchlist, hours_back=48, max_articles_per_symbol=3)
+        # Test symbol-specific news (FIXED)
+        print(f"\nTesting AAPL news...")
+        aapl_news = collector.get_symbol_news('AAPL', max_articles=5)
+        print(f"Found {len(aapl_news)} AAPL articles")
+
+        for article in aapl_news:
+            print(f"  - {article.title[:60]}...")
+            print(f"    Symbols: {article.symbols_mentioned}")
+
+        # Test watchlist (FIXED)
+        print(f"\nTesting watchlist...")
+        watchlist = ['AAPL', 'MSFT']
+        watchlist_news = collector.get_watchlist_news(watchlist, max_articles_per_symbol=3)
 
         for symbol, articles in watchlist_news.items():
             print(f"  {symbol}: {len(articles)} articles")
-            for article in articles[:1]:  # Show first article
-                print(f"    - {article.title[:60]}...")
+            for article in articles[:1]:
+                print(f"    - {article.title[:50]}...")
 
     else:
         print("Connection failed!")
