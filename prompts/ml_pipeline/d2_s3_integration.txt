@@ -1,0 +1,37 @@
+<S3_Model_Storage_Prompt>
+  <Context>
+    Need to implement model storage and versioning for trading ML system using AWS S3.
+  </Context>
+
+  <Requirements>
+    <ModelStorage>
+      <Feature>Store XGBoost models with metadata (training date, performance metrics, feature list)</Feature>
+      <Feature>Model versioning (keep last 10 versions, archive older ones)</Feature>
+      <Feature>Fast model loading for real-time predictions</Feature>
+      <Feature>Model integrity validation (checksums, loading tests)</Feature>
+    </ModelStorage>
+
+    <Performance>
+      <Requirement>Model upload under 30 seconds</Requirement>
+      <Requirement>Model loading under 5 seconds</Requirement>
+      <Requirement>Support for model rollback if new version fails</Requirement>
+    </Performance>
+
+    <BucketStructure>
+      <Path>models/{strategy_name}/v{version}/model.joblib</Path>
+      <Path>metadata/{strategy_name}/v{version}/metadata.json</Path>
+      <Path>archived/{strategy_name}/v{version}/</Path>
+    </BucketStructure>
+  </Requirements>
+
+  <Deliverables>
+    <Item>S3Handler class with save/load/list operations</Item>
+    <Item>Model versioning and rollback functionality</Item>
+    <Item>Metadata storage and retrieval</Item>
+    <Item>Error handling and retry logic</Item>
+  </Deliverables>
+
+  <SuccessCriteria>
+    Can save trained XGBoost model to S3, load it back, and make predictions successfully
+  </SuccessCriteria>
+</S3_Model_Storage_Prompt>

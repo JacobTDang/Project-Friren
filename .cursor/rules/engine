@@ -1,0 +1,8 @@
+in decision engine, if it is already holding posiiotn, and the reccomendation is buy, then it should instead continue holding, but if it the sentiment score is like relly high then it should buy more of the stock, but remember there is limit of 15% max position holding, check my positoin sizer logic and integrate this. also when coding dont use emojis, they mess up the code.
+
+Next Steps to Get Real Paper Trading Working
+Fix Module Structure: Resolve the portfolio_manager.py import path issue
+Test ExecutionOrchestrator: Verify it can connect to Alpaca and database
+Replace Mock Trading: Update your orchestrator to use real ExecutionOrchestrator
+Verify Database Logging: Confirm transactions are being saved to PostgreSQL
+Monitor Strategy Performance: Check that strategies are being assigned and tracked

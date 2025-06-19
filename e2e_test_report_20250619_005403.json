@@ -1,0 +1,187 @@
+{
+  "test_runner_version": "1.0",
+  "config_file": "e2e_test_config.json",
+  "generation_time": "2025-06-19T00:54:03.162271",
+  "system_info": {
+    "platform": "Windows-10-10.0.22631-SP0",
+    "python_version": "3.11.5",
+    "architecture": "64bit",
+    "processor": "Intel64 Family 6 Model 186 Stepping 2, GenuineIntel",
+    "memory": {
+      "total_gb": 15.627880096435547,
+      "available_gb": 2.334667205810547
+    },
+    "cpu": {
+      "cpu_count": 20,
+      "cpu_percent": 5.5
+    }
+  },
+  "results": {
+    "test_summary": {
+      "total_tests": 9,
+      "passed_tests": 9,
+      "failed_tests": 0,
+      "success_rate_percent": 100.0,
+      "total_warnings": 4,
+      "total_duration_seconds": 0.612345,
+      "peak_memory_mb": 29.17578125
+    },
+    "coverage_analysis": {
+      "components_tested": [
+        "PipelineConfig",
+        "NewsCollection",
+        "MainOrchestrator",
+        "SentimentAnalysis",
+        "EnhancedNewsPipelineProcess",
+        "RecommendationGeneration",
+        "ResourceExhaustionRecovery",
+        "SystemConfig",
+        "NetworkFailureHandling",
+        "ConfigurationValidation",
+        "XGBoostRecommendationEngine",
+        "QueueCommunication"
+      ],
+      "total_possible_components": [
+        "PipelineConfig",
+        "NewsCollection",
+        "MainOrchestrator",
+        "SentimentAnalysis",
+        "EnhancedNewsPipelineProcess",
+        "RecommendationGeneration",
+        "ResourceExhaustionRecovery",
+        "SystemConfig",
+        "NetworkFailureHandling",
+        "ConfigurationValidation",
+        "XGBoostRecommendationEngine",
+        "QueueCommunication"
+      ],
+      "untested_components": [],
+      "coverage_percentage": 100.0
+    },
+    "performance_analysis": {
+      "initialization_ms": [
+        10.596752166748047
+      ],
+      "orchestrator_init_ms": [
+        5.560874938964844
+      ],
+      "initial_memory_mb": [
+        25.4296875
+      ],
+      "peak_memory_mb": [
+        29.17578125
+      ],
+      "final_memory_mb": [
+        26.9375
+      ],
+      "memory_freed_mb": [
+        2.23828125
+      ],
+      "avg_processing_time_ms": [
+        0.0
+      ],
+      "max_processing_time_ms": [
+        0.0
+      ],
+      "total_symbols_processed": [
+        5
+      ]
+    },
+    "detailed_results": [
+      {
+        "category": " Component Tests",
+        "test_name": "Enhanced Pipeline Process",
+        "status": "PASS",
+        "duration_seconds": 0.012612,
+        "metrics": "TestMetrics(start_time=datetime.datetime(2025, 6, 19, 0, 54, 2, 545405), end_time=datetime.datetime(2025, 6, 19, 0, 54, 2, 558017), duration_seconds=0.012612, memory_usage_mb=0.0, cpu_usage_percent=0.0, errors_encountered=[], warnings_generated=[], components_tested=['PipelineConfig', 'EnhancedNewsPipelineProcess', 'XGBoostRecommendationEngine'], test_data_generated={}, performance_benchmarks={'initialization_ms': 10.596752166748047})",
+        "elapsed_time": 0.014615058898925781
+      },
+      {
+        "category": " Component Tests",
+        "test_name": "Orchestrator Integration",
+        "status": "PASS",
+        "duration_seconds": 0.008003,
+        "metrics": "TestMetrics(start_time=datetime.datetime(2025, 6, 19, 0, 54, 2, 560020), end_time=datetime.datetime(2025, 6, 19, 0, 54, 2, 568023), duration_seconds=0.008003, memory_usage_mb=0.0, cpu_usage_percent=0.0, errors_encountered=[], warnings_generated=[], components_tested=['SystemConfig', 'MainOrchestrator'], test_data_generated={}, performance_benchmarks={'orchestrator_init_ms': 5.560874938964844})",
+        "elapsed_time": 0.009003162384033203
+      },
+      {
+        "category": " Integration Tests",
+        "test_name": "News-to-Recommendation Pipeline",
+        "status": "PASS",
+        "duration_seconds": 0.001028,
+        "metrics": "TestMetrics(start_time=datetime.datetime(2025, 6, 19, 0, 54, 2, 569023), end_time=datetime.datetime(2025, 6, 19, 0, 54, 2, 570051), duration_seconds=0.001028, memory_usage_mb=0.0, cpu_usage_percent=0.0, errors_encountered=[], warnings_generated=[], components_tested=['NewsCollection', 'SentimentAnalysis', 'RecommendationGeneration'], test_data_generated={'articles': 5, 'sentiment_results': 5, 'recommendation': 'BUY'}, performance_benchmarks={})",
+        "elapsed_time": 0.0010285377502441406
+      },
+      {
+        "category": " Integration Tests",
+        "test_name": "Queue Communication",
+        "status": "PASS",
+        "duration_seconds": 0.000973,
+        "metrics": "TestMetrics(start_time=datetime.datetime(2025, 6, 19, 0, 54, 2, 570051), end_time=datetime.datetime(2025, 6, 19, 0, 54, 2, 571024), duration_seconds=0.000973, memory_usage_mb=0.0, cpu_usage_percent=0.0, errors_encountered=[], warnings_generated=[], components_tested=['QueueCommunication'], test_data_generated={}, performance_benchmarks={})",
+        "elapsed_time": 0.0009732246398925781
+      },
+      {
+        "category": " Performance Tests",
+        "test_name": "Memory Usage",
+        "status": "PASS",
+        "duration_seconds": 0.010559,
+        "metrics": "TestMetrics(start_time=datetime.datetime(2025, 6, 19, 0, 54, 2, 572031), end_time=datetime.datetime(2025, 6, 19, 0, 54, 2, 582590), duration_seconds=0.010559, memory_usage_mb=29.17578125, cpu_usage_percent=0.0, errors_encountered=[], warnings_generated=[], components_tested=[], test_data_generated={}, performance_benchmarks={'initial_memory_mb': 25.4296875, 'peak_memory_mb': 29.17578125, 'final_memory_mb': 26.9375, 'memory_freed_mb': 2.23828125})",
+        "elapsed_time": 0.012547492980957031
+      },
+      {
+        "category": " Performance Tests",
+        "test_name": "Processing Performance",
+        "status": "PASS",
+        "duration_seconds": 0.001004,
+        "metrics": "TestMetrics(start_time=datetime.datetime(2025, 6, 19, 0, 54, 2, 584570), end_time=datetime.datetime(2025, 6, 19, 0, 54, 2, 585574), duration_seconds=0.001004, memory_usage_mb=0.0, cpu_usage_percent=0.0, errors_encountered=[], warnings_generated=[], components_tested=[], test_data_generated={}, performance_benchmarks={'avg_processing_time_ms': 0.0, 'max_processing_time_ms': 0.0, 'total_symbols_processed': 5})",
+        "elapsed_time": 0.0020020008087158203
+      },
+      {
+        "category": " Failure Tests",
+        "test_name": "Network Failure Simulation",
+        "status": "PASS",
+        "duration_seconds": 0.448183,
+        "metrics": "TestMetrics(start_time=datetime.datetime(2025, 6, 19, 0, 54, 2, 586569), end_time=datetime.datetime(2025, 6, 19, 0, 54, 3, 34752), duration_seconds=0.448183, memory_usage_mb=0.0, cpu_usage_percent=0.0, errors_encountered=[], warnings_generated=[], components_tested=['NetworkFailureHandling'], test_data_generated={}, performance_benchmarks={})",
+        "elapsed_time": 0.44917821884155273
+      },
+      {
+        "category": " Failure Tests",
+        "test_name": "Resource Exhaustion",
+        "status": "PASS",
+        "duration_seconds": 0.117023,
+        "metrics": "TestMetrics(start_time=datetime.datetime(2025, 6, 19, 0, 54, 3, 35729), end_time=datetime.datetime(2025, 6, 19, 0, 54, 3, 152752), duration_seconds=0.117023, memory_usage_mb=0.0, cpu_usage_percent=0.0, errors_encountered=[], warnings_generated=[], components_tested=['ResourceExhaustionRecovery'], test_data_generated={}, performance_benchmarks={})",
+        "elapsed_time": 0.11799979209899902
+      },
+      {
+        "category": " Failure Tests",
+        "test_name": "Configuration Errors",
+        "status": "PASS",
+        "duration_seconds": 0.0,
+        "metrics": "TestMetrics(start_time=datetime.datetime(2025, 6, 19, 0, 54, 3, 153752), end_time=datetime.datetime(2025, 6, 19, 0, 54, 3, 153752), duration_seconds=0.0, memory_usage_mb=0.0, cpu_usage_percent=0.0, errors_encountered=[], warnings_generated=['Config validation 1: Invalid cycle interval', 'Config validation 2: Invalid batch size', 'Config validation 3: Invalid memory limit', 'Config validation 4: Invalid recommendation threshold'], components_tested=['ConfigurationValidation'], test_data_generated={}, performance_benchmarks={})",
+        "elapsed_time": 0.0009999275207519531
+      }
+    ],
+    "error_summary": {
+      "total_errors": 0,
+      "unique_errors": [],
+      "total_warnings": 4,
+      "unique_warnings": [
+        "Config validation 3: Invalid memory limit",
+        "Config validation 4: Invalid recommendation threshold",
+        "Config validation 1: Invalid cycle interval",
+        "Config validation 2: Invalid batch size"
+      ]
+    },
+    "recommendations": [
+      "GOOD: High success rate achieved. System appears stable.",
+      "EXCELLENT: High test coverage achieved."
+    ],
+    "scenario_info": {
+      "name": "smoke_test",
+      "description": "Quick validation of basic functionality",
+      "start_time": "2025-06-19T00:54:02.541406",
+      "end_time": "2025-06-19T00:54:03.157265",
+      "actual_duration_minutes": 0.010264316666666667
+    }
+  }
+}

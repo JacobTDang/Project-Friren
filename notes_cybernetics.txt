@@ -1,0 +1,6 @@
+credentials
+
+aws db
+identifier - FrirenDB
+username - tamdng
+pass = Jtd231198!

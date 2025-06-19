@@ -25,48 +25,64 @@ queue_based_*.py
 logs/
 Friren_V1/logs/
 
-# Reports and Test Outputs
-*.html
-*.json
-e2e_test_report_*
-demo_smoke_results.*
-comprehensive_test_report.json
-comprehensive_e2e_test.log
-e2e_test_runner.log
-
-# Scripts and Keys
-load_keys.ps1
-ec2_load_keys.sh
-commit_*.ps1
-emergency_cleanup.ps1
-
-# Documentation and Notes
-notes_*.txt
-directory_architecture.txt
-project_changes_summary.txt
-~bashrc
-
-# Cache and IDE
+# Cache and Temporary Files
 __pycache__/
 *.pyc
 *.pyo
-.cursor/
+*.pyd
+.Python
+*.so
+.coverage
+.pytest_cache/
+.tox/
+.cache/
+nosetests.xml
+coverage.xml
+
+# IDE Files
 .vscode/
 .idea/
-
-# OS Files
+*.swp
+*.swo
+*~
 .DS_Store
-Thumbs.db
 
-# Virtual Environment
+# Python Virtual Environments
 venv/
 env/
+ENV/
+.venv/
 
-# Prompts Directory
-prompts/
+# Django
+*.sqlite3
+db.sqlite3
+/media/
+/static/
 
-# Ignore ALL root-level files except core engine
-/*
-!/Friren_V1/
-!/.gitignore
-!/README.md
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# Distribution / Packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Documentation builds
+docs/_build/

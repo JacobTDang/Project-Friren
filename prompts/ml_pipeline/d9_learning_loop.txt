@@ -1,0 +1,41 @@
+<Basic_Learning_Loop_Prompt>
+  <Context>
+    Implement cybernetic learning system that automatically improves model based on trade outcomes.
+  </Context>
+
+  <LearningTriggers>
+    <DailyTrigger>After 10 completed trades (incremental learning)</DailyTrigger>
+    <WeeklyTrigger>Every Saturday (full model retraining)</WeeklyTrigger>
+    <PerformanceTrigger>If model accuracy drops below 50%</PerformanceTrigger>
+  </LearningTriggers>
+
+  <LearningComponents>
+    <Component name="feedback_analyzer">
+      <Purpose>Analyze prediction accuracy vs actual outcomes</Purpose>
+      <Metrics>Directional accuracy, prediction error, confidence calibration</Metrics>
+    </Component>
+
+    <Component name="incremental_learner">
+      <Purpose>Quick daily updates with recent trades</Purpose>
+      <Method>XGBoost incremental training</Method>
+      <Duration>Under 5 minutes</Duration>
+    </Component>
+
+    <Component name="full_retrainer">
+      <Purpose>Complete weekly model retraining</Purpose>
+      <Method>Full hyperparameter optimization</Method>
+      <Duration>Under 45 minutes</Duration>
+    </Component>
+  </LearningComponents>
+
+  <Deliverables>
+    <Item>CyberneticLearner class with feedback analysis</Item>
+    <Item>Incremental and full retraining workflows</Item>
+    <Item>Performance monitoring and trigger detection</Item>
+    <Item>Model validation before deployment</Item>
+  </Deliverables>
+
+  <SuccessCriteria>
+    System automatically triggers learning after 10 trades and improves model performance
+  </SuccessCriteria>
+</Basic_Learning_Loop_Prompt>
