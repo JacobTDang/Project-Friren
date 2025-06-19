@@ -1,0 +1,1076 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ModelMaintenanceImplementationPlan>
+
+  <ProjectOverview>
+    <Objective>Build cybernetic learning XGBoost model system that continuously improves trading decisions</Objective>
+    <Architecture>Remote PostgreSQL + S3 Model Storage + Local/EC2 Execution</Architecture>
+    <LearningSchedule>
+      <DailyUpdates trigger="after_10_completed_trades" type="incremental_learning"/>
+      <WeeklyUpdates schedule="saturdays_after_market_close" type="full_retraining"/>
+    </LearningSchedule>
+    <Integration>Seamless interface with existing portfolio_manager orchestrator</Integration>
+  </ProjectOverview>
+
+  <DirectoryStructure>
+    <ModelMaintenance path="Friren_V1/model_maintenance/">
+      <Core>
+        <File name="__init__.py" purpose="Package initialization"/>
+        <File name="model_manager.py" purpose="Central XGBoost model management hub"/>
+        <File name="feature_engine.py" purpose="Aggregate all data sources into ML features"/>
+        <File name="trainer.py" purpose="Model training and retraining logic"/>
+        <File name="evaluator.py" purpose="Model performance monitoring and validation"/>
+        <File name="cybernetic_core.py" purpose="Self-improvement and adaptive learning engine"/>
+      </Core>
+
+      <Models>
+        <Directory name="xgboost/" purpose="XGBoost model artifacts">
+          <Subdirectory name="current/" purpose="Active production models"/>
+          <Subdirectory name="staging/" purpose="Models being validated"/>
+          <Subdirectory name="archive/" purpose="Historical model versions"/>
+        </Directory>
+        <Directory name="metadata/" purpose="Model configurations and performance metrics"/>
+      </Models>
+
+      <Data>
+        <Directory name="cache/" purpose="Temporary data storage for processing"/>
+        <Directory name="exports/" purpose="Data exports for analysis"/>
+      </Data>
+
+      <Utils>
+        <File name="postgres_handler.py" purpose="PostgreSQL database operations"/>
+        <File name="s3_storage.py" purpose="S3 model storage and retrieval"/>
+        <File name="feature_utils.py" purpose="Feature engineering utilities"/>
+        <File name="validation_utils.py" purpose="Model validation helpers"/>
+      </Utils>
+
+      <Config>
+        <File name="model_config.py" purpose="XGBoost hyperparameters and training settings"/>
+        <File name="feature_config.py" purpose="Feature engineering configurations"/>
+        <File name="deployment_config.py" purpose="Database and S3 connection settings"/>
+        <File name="learning_config.py" purpose="Cybernetic learning parameters"/>
+      </Config>
+    </ModelMaintenance>
+
+    <PortfolioManagerIntegration path="Friren_V1/portfolio_manager/">
+      <File name="model_interface.py" purpose="Clean interface between portfolio manager and ML system"/>
+      <LoggedTrades>
+        <Directory name="daily/" purpose="Daily trade execution logs"/>
+        <Directory name="features/" purpose="Feature snapshots at trade time"/>
+        <Directory name="predictions/" purpose="Model predictions log"/>
+        <Directory name="outcomes/" purpose="Actual trade outcomes for learning"/>
+      </LoggedTrades>
+    </PortfolioManagerIntegration>
+  </DirectoryStructure>
+
+  <DatabaseSchema>
+    <PostgreSQLTables>
+      <Table name="current_positions">
+        <Purpose>Track active portfolio positions</Purpose>
+        <Columns>
+          <Column name="position_id" type="SERIAL PRIMARY KEY"/>
+          <Column name="symbol" type="VARCHAR(10) NOT NULL"/>
+          <Column name="quantity" type="DECIMAL(15,4) NOT NULL"/>
+          <Column name="avg_cost" type="DECIMAL(10,4) NOT NULL"/>
+          <Column name="current_value" type="DECIMAL(15,2) NOT NULL"/>
+          <Column name="unrealized_pnl" type="DECIMAL(15,2) NOT NULL"/>
+          <Column name="position_size_pct" type="DECIMAL(5,4) NOT NULL"/>
+          <Column name="entry_date" type="TIMESTAMP NOT NULL"/>
+          <Column name="strategy_used" type="VARCHAR(50) NOT NULL"/>
+          <Column name="model_confidence" type="DECIMAL(5,4)"/>
+          <Column name="updated_at" type="TIMESTAMP DEFAULT CURRENT_TIMESTAMP"/>
+        </Columns>
+        <Indexes>
+          <Index columns="symbol, entry_date"/>
+          <Index columns="strategy_used"/>
+        </Indexes>
+      </Table>
+
+      <Table name="historical_positions">
+        <Purpose>Completed trades for model learning</Purpose>
+        <Columns>
+          <Column name="trade_id" type="SERIAL PRIMARY KEY"/>
+          <Column name="symbol" type="VARCHAR(10) NOT NULL"/>
+          <Column name="quantity" type="DECIMAL(15,4) NOT NULL"/>
+          <Column name="entry_price" type="DECIMAL(10,4) NOT NULL"/>
+          <Column name="exit_price" type="DECIMAL(10,4)"/>
+          <Column name="entry_date" type="TIMESTAMP NOT NULL"/>
+          <Column name="exit_date" type="TIMESTAMP"/>
+          <Column name="realized_pnl" type="DECIMAL(15,2)"/>
+          <Column name="holding_period_days" type="INTEGER"/>
+          <Column name="strategy_used" type="VARCHAR(50) NOT NULL"/>
+          <Column name="exit_reason" type="VARCHAR(100)"/>
+          <Column name="trade_success" type="BOOLEAN"/>
+          <Column name="created_at" type="TIMESTAMP DEFAULT CURRENT_TIMESTAMP"/>
+        </Columns>
+        <Indexes>
+          <Index columns="symbol, entry_date"/>
+          <Index columns="exit_date"/>
+          <Index columns="trade_success"/>
+        </Indexes>
+      </Table>
+
+      <Table name="trade_features">
+        <Purpose>ML features captured at trade execution time</Purpose>
+        <Columns>
+          <Column name="feature_id" type="SERIAL PRIMARY KEY"/>
+          <Column name="trade_id" type="INTEGER REFERENCES historical_positions(trade_id)"/>
+          <Column name="symbol" type="VARCHAR(10) NOT NULL"/>
+          <Column name="timestamp" type="TIMESTAMP NOT NULL"/>
+
+          <!-- Market Features -->
+          <Column name="close_price" type="DECIMAL(10,4)"/>
+          <Column name="volume" type="BIGINT"/>
+          <Column name="volatility_20d" type="DECIMAL(8,6)"/>
+          <Column name="rsi_14" type="DECIMAL(5,2)"/>
+          <Column name="sma_20" type="DECIMAL(10,4)"/>
+          <Column name="sma_50" type="DECIMAL(10,4)"/>
+
+          <!-- Sentiment Features -->
+          <Column name="sentiment_score" type="DECIMAL(6,4)"/>
+          <Column name="sentiment_change_1d" type="DECIMAL(6,4)"/>
+          <Column name="sentiment_change_5d" type="DECIMAL(6,4)"/>
+          <Column name="news_volume" type="INTEGER"/>
+
+          <!-- Regime Features -->
+          <Column name="regime" type="VARCHAR(20)"/>
+          <Column name="regime_confidence" type="DECIMAL(5,4)"/>
+          <Column name="regime_transition_prob" type="DECIMAL(5,4)"/>
+          <Column name="market_volatility_regime" type="VARCHAR(20)"/>
+
+          <!-- Strategy Features -->
+          <Column name="momentum_signal" type="DECIMAL(6,4)"/>
+          <Column name="momentum_confidence" type="DECIMAL(5,4)"/>
+          <Column name="mean_reversion_signal" type="DECIMAL(6,4)"/>
+          <Column name="mean_reversion_confidence" type="DECIMAL(5,4)"/>
+          <Column name="bollinger_signal" type="DECIMAL(6,4)"/>
+          <Column name="volatility_signal" type="DECIMAL(6,4)"/>
+          <Column name="pairs_signal" type="DECIMAL(6,4)"/>
+          <Column name="strategy_consensus" type="DECIMAL(6,4)"/>
+
+          <!-- Portfolio Features -->
+          <Column name="portfolio_exposure" type="DECIMAL(5,4)"/>
+          <Column name="correlation_to_portfolio" type="DECIMAL(6,4)"/>
+          <Column name="position_concentration" type="DECIMAL(5,4)"/>
+          <Column name="portfolio_volatility" type="DECIMAL(8,6)"/>
+
+          <!-- Risk Features -->
+          <Column name="var_1d" type="DECIMAL(8,6)"/>
+          <Column name="sharpe_ratio" type="DECIMAL(6,4)"/>
+          <Column name="max_drawdown" type="DECIMAL(6,4)"/>
+
+          <!-- Model Predictions -->
+          <Column name="predicted_return_1d" type="DECIMAL(8,6)"/>
+          <Column name="predicted_return_5d" type="DECIMAL(8,6)"/>
+          <Column name="predicted_return_10d" type="DECIMAL(8,6)"/>
+          <Column name="model_confidence" type="DECIMAL(5,4)"/>
+          <Column name="model_version" type="VARCHAR(20)"/>
+
+          <Column name="created_at" type="TIMESTAMP DEFAULT CURRENT_TIMESTAMP"/>
+        </Columns>
+        <Indexes>
+          <Index columns="symbol, timestamp"/>
+          <Index columns="trade_id"/>
+          <Index columns="regime"/>
+          <Index columns="model_version"/>
+        </Indexes>
+      </Table>
+
+      <Table name="model_versions">
+        <Purpose>Track model versions and metadata</Purpose>
+        <Columns>
+          <Column name="model_id" type="SERIAL PRIMARY KEY"/>
+          <Column name="model_name" type="VARCHAR(100) NOT NULL"/>
+          <Column name="version" type="VARCHAR(20) NOT NULL"/>
+          <Column name="s3_path" type="VARCHAR(500) NOT NULL"/>
+          <Column name="training_date" type="TIMESTAMP NOT NULL"/>
+          <Column name="training_samples" type="INTEGER NOT NULL"/>
+          <Column name="feature_count" type="INTEGER NOT NULL"/>
+          <Column name="validation_score" type="DECIMAL(8,6)"/>
+          <Column name="cross_val_mean" type="DECIMAL(8,6)"/>
+          <Column name="cross_val_std" type="DECIMAL(8,6)"/>
+          <Column name="feature_importance" type="JSONB"/>
+          <Column name="hyperparameters" type="JSONB"/>
+          <Column name="is_active" type="BOOLEAN DEFAULT FALSE"/>
+          <Column name="deployment_date" type="TIMESTAMP"/>
+          <Column name="created_at" type="TIMESTAMP DEFAULT CURRENT_TIMESTAMP"/>
+        </Columns>
+        <Indexes>
+          <Index columns="model_name, version"/>
+          <Index columns="is_active"/>
+          <Index columns="training_date"/>
+        </Indexes>
+      </Table>
+
+      <Table name="model_performance">
+        <Purpose>Track real-time model performance</Purpose>
+        <Columns>
+          <Column name="performance_id" type="SERIAL PRIMARY KEY"/>
+          <Column name="model_id" type="INTEGER REFERENCES model_versions(model_id)"/>
+          <Column name="trade_id" type="INTEGER REFERENCES historical_positions(trade_id)"/>
+          <Column name="predicted_return" type="DECIMAL(8,6)"/>
+          <Column name="actual_return" type="DECIMAL(8,6)"/>
+          <Column name="prediction_error" type="DECIMAL(8,6)"/>
+          <Column name="absolute_error" type="DECIMAL(8,6)"/>
+          <Column name="prediction_date" type="TIMESTAMP NOT NULL"/>
+          <Column name="days_to_outcome" type="INTEGER"/>
+          <Column name="trade_success_predicted" type="BOOLEAN"/>
+          <Column name="trade_success_actual" type="BOOLEAN"/>
+          <Column name="created_at" type="TIMESTAMP DEFAULT CURRENT_TIMESTAMP"/>
+        </Columns>
+        <Indexes>
+          <Index columns="model_id, prediction_date"/>
+          <Index columns="trade_id"/>
+        </Indexes>
+      </Table>
+
+      <Table name="learning_events">
+        <Purpose>Log cybernetic learning activities</Purpose>
+        <Columns>
+          <Column name="event_id" type="SERIAL PRIMARY KEY"/>
+          <Column name="event_type" type="VARCHAR(50) NOT NULL"/>
+          <Column name="trigger_reason" type="VARCHAR(100)"/>
+          <Column name="trades_analyzed" type="INTEGER"/>
+          <Column name="performance_improvement" type="DECIMAL(8,6)"/>
+          <Column name="features_added" type="INTEGER"/>
+          <Column name="features_removed" type="INTEGER"/>
+          <Column name="model_before_version" type="VARCHAR(20)"/>
+          <Column name="model_after_version" type="VARCHAR(20)"/>
+          <Column name="learning_insights" type="JSONB"/>
+          <Column name="execution_time_seconds" type="INTEGER"/>
+          <Column name="created_at" type="TIMESTAMP DEFAULT CURRENT_TIMESTAMP"/>
+        </Columns>
+        <Indexes>
+          <Index columns="event_type, created_at"/>
+          <Index columns="created_at"/>
+        </Indexes>
+      </Table>
+    </PostgreSQLTables>
+  </DatabaseSchema>
+
+  <ComponentImplementation>
+
+    <ModelInterface>
+      <Purpose>Clean API between portfolio manager and ML system</Purpose>
+      <Location>portfolio_manager/model_interface.py</Location>
+      <Methods>
+        <Method name="get_trade_prediction">
+          <Input>symbol, current_features, portfolio_state</Input>
+          <Output>predicted_returns, confidence_score, risk_assessment</Output>
+          <Purpose>Get ML prediction for trade decision</Purpose>
+        </Method>
+        <Method name="get_position_size_multiplier">
+          <Input>symbol, base_size, strategy_confidence</Input>
+          <Output>ml_adjusted_multiplier</Output>
+          <Purpose>ML-enhanced position sizing</Purpose>
+        </Method>
+        <Method name="get_strategy_weights">
+          <Input>available_strategies, market_regime, portfolio_state</Input>
+          <Output>strategy_weight_dict</Output>
+          <Purpose>ML-determined strategy allocation</Purpose>
+        </Method>
+        <Method name="log_trade_execution">
+          <Input>trade_data, features, prediction</Input>
+          <Output>trade_id</Output>
+          <Purpose>Log trade for learning</Purpose>
+        </Method>
+        <Method name="log_trade_outcome">
+          <Input>trade_id, exit_data, realized_pnl</Input>
+          <Output>learning_trigger_status</Output>
+          <Purpose>Complete trade cycle for learning</Purpose>
+        </Method>
+        <Method name="check_learning_trigger">
+          <Output>should_trigger_daily_update, trades_since_last_update</Output>
+          <Purpose>Check if learning should be triggered</Purpose>
+        </Method>
+      </Methods>
+    </ModelInterface>
+
+    <FeatureEngine>
+      <Purpose>Aggregate all data sources into ML-ready features</Purpose>
+      <Location>model_maintenance/core/feature_engine.py</Location>
+      <DataSources>
+        <Source name="MarketData" includes="OHLCV, technical_indicators, volume_patterns"/>
+        <Source name="SentimentData" includes="finbert_scores, news_volume, sentiment_momentum"/>
+        <Source name="RegimeData" includes="market_regime, volatility_regime, transition_probabilities"/>
+        <Source name="StrategySignals" includes="all_strategy_outputs, consensus_measures, confidence_scores"/>
+        <Source name="PortfolioState" includes="positions, correlations, risk_metrics, exposure_levels"/>
+        <Source name="RiskMetrics" includes="var, sharpe_ratios, drawdowns, volatility_measures"/>
+      </DataSources>
+      <FeatureCategories>
+        <Category name="PriceFeatures">
+          <Features>returns_1d, returns_5d, returns_20d, price_momentum, price_mean_reversion</Features>
+        </Category>
+        <Category name="TechnicalFeatures">
+          <Features>rsi_divergence, sma_crossovers, bollinger_position, volume_surge</Features>
+        </Category>
+        <Category name="SentimentFeatures">
+          <Features>sentiment_score, sentiment_momentum, sentiment_divergence, news_surprise</Features>
+        </Category>
+        <Category name="RegimeFeatures">
+          <Features>regime_stability, transition_risk, regime_compatibility, volatility_regime</Features>
+        </Category>
+        <Category name="StrategyFeatures">
+          <Features>strategy_consensus, signal_strength, confidence_dispersion, strategy_momentum</Features>
+        </Category>
+        <Category name="PortfolioFeatures">
+          <Features>correlation_risk, concentration_risk, portfolio_momentum, diversification_ratio</Features>
+        </Category>
+        <Category name="MetaFeatures">
+          <Features>model_uncertainty, prediction_stability, feature_importance_drift</Features>
+        </Category>
+      </FeatureCategories>
+      <Methods>
+        <Method name="extract_all_features">
+          <Purpose>Main feature extraction pipeline</Purpose>
+          <Returns>feature_vector, feature_metadata</Returns>
+        </Method>
+        <Method name="validate_features">
+          <Purpose>Check feature quality and completeness</Purpose>
+        </Method>
+        <Method name="transform_features">
+          <Purpose>Apply scaling, encoding, and feature engineering</Purpose>
+        </Method>
+      </Methods>
+    </FeatureEngine>
+
+    <ModelManager>
+      <Purpose>Central XGBoost model management</Purpose>
+      <Location>model_maintenance/core/model_manager.py</Location>
+      <Responsibilities>
+        <Item>Load/save models from S3</Item>
+        <Item>Version control and model registry</Item>
+        <Item>Model validation and performance tracking</Item>
+        <Item>A/B testing framework</Item>
+        <Item>Model deployment and rollback</Item>
+      </Responsibilities>
+      <Methods>
+        <Method name="load_active_model">
+          <Purpose>Load current production model</Purpose>
+        </Method>
+        <Method name="save_model">
+          <Purpose>Save model to S3 with versioning</Purpose>
+        </Method>
+        <Method name="validate_model">
+          <Purpose>Validate model performance before deployment</Purpose>
+        </Method>
+        <Method name="deploy_model">
+          <Purpose>Promote model to production</Purpose>
+        </Method>
+        <Method name="rollback_model">
+          <Purpose>Rollback to previous model version</Purpose>
+        </Method>
+      </Methods>
+    </ModelManager>
+
+    <Trainer>
+      <Purpose>Model training and retraining logic</Purpose>
+      <Location>model_maintenance/core/trainer.py</Location>
+      <TrainingTypes>
+        <Type name="InitialTraining">
+          <Purpose>Train model from scratch with historical data</Purpose>
+          <DataRequirement>200+ completed trades</DataRequirement>
+          <Schedule>One-time setup</Schedule>
+        </Type>
+        <Type name="DailyIncrementalUpdate">
+          <Purpose>Quick updates with recent trade outcomes</Purpose>
+          <DataRequirement>10+ completed trades</DataRequirement>
+          <Schedule>After 10 trades or end of trading day</Schedule>
+          <Method>XGBoost incremental learning</Method>
+        </Type>
+        <Type name="WeeklyFullRetraining">
+          <Purpose>Complete model retraining</Purpose>
+          <DataRequirement>50+ trades from past month</DataRequirement>
+          <Schedule>Saturday after market close</Schedule>
+          <Method>Full hyperparameter optimization</Method>
+        </Type>
+      </TrainingTypes>
+      <Methods>
+        <Method name="train_initial_model">
+          <Purpose>Train from historical data</Purpose>
+        </Method>
+        <Method name="incremental_update">
+          <Purpose>Quick daily learning updates</Purpose>
+        </Method>
+        <Method name="full_retrain">
+          <Purpose>Complete weekly retraining</Purpose>
+        </Method>
+        <Method name="optimize_hyperparameters">
+          <Purpose>Hyperparameter tuning with Optuna</Purpose>
+        </Method>
+      </Methods>
+    </Trainer>
+
+    <CyberneticCore>
+      <Purpose>Self-improvement and adaptive learning engine</Purpose>
+      <Location>model_maintenance/core/cybernetic_core.py</Location>
+      <LearningComponents>
+        <Component name="FeedbackAnalyzer">
+          <Purpose>Analyze prediction accuracy and trade outcomes</Purpose>
+          <Functions>identify_prediction_patterns, measure_model_drift, detect_regime_changes</Functions>
+        </Component>
+        <Component name="PatternDiscovery">
+          <Purpose>Discover new predictive patterns</Purpose>
+          <Functions>feature_interaction_analysis, regime_pattern_mining, strategy_effectiveness_analysis</Functions>
+        </Component>
+        <Component name="AdaptiveLearning">
+          <Purpose>Adapt model based on recent performance</Purpose>
+          <Functions>dynamic_feature_weighting, confidence_calibration, strategy_weight_adjustment</Functions>
+        </Component>
+        <Component name="StrategyEvolution">
+          <Purpose>Suggest improvements to trading strategies</Purpose>
+          <Functions>strategy_parameter_optimization, new_signal_discovery, portfolio_allocation_improvement</Functions>
+        </Component>
+      </LearningComponents>
+      <Methods>
+        <Method name="analyze_recent_performance">
+          <Purpose>Analyze model performance over recent period</Purpose>
+        </Method>
+        <Method name="discover_new_patterns">
+          <Purpose>Identify emerging market patterns</Purpose>
+        </Method>
+        <Method name="adapt_model_parameters">
+          <Purpose>Dynamically adjust model behavior</Purpose>
+        </Method>
+        <Method name="generate_insights">
+          <Purpose>Generate actionable trading insights</Purpose>
+        </Method>
+        <Method name="suggest_strategy_improvements">
+          <Purpose>Recommend strategy modifications</Purpose>
+        </Method>
+      </Methods>
+    </CyberneticCore>
+
+    <Evaluator>
+      <Purpose>Model performance monitoring and validation</Purpose>
+      <Location>model_maintenance/core/evaluator.py</Location>
+      <Metrics>
+        <Category name="PredictionAccuracy">
+          <Metrics>mean_absolute_error, mean_squared_error, r2_score, directional_accuracy</Metrics>
+        </Category>
+        <Category name="TradingPerformance">
+          <Metrics>sharpe_ratio, max_drawdown, win_rate, profit_factor, calmar_ratio</Metrics>
+        </Category>
+        <Category name="RiskMetrics">
+          <Metrics>var_accuracy, volatility_prediction_error, correlation_prediction_accuracy</Metrics>
+        </Category>
+        <Category name="ModelHealth">
+          <Metrics>feature_drift, prediction_stability, confidence_calibration</Metrics>
+        </Category>
+      </Metrics>
+      <Methods>
+        <Method name="evaluate_prediction_accuracy">
+          <Purpose>Measure how well model predicts returns</Purpose>
+        </Method>
+        <Method name="evaluate_trading_performance">
+          <Purpose>Measure trading strategy performance</Purpose>
+        </Method>
+        <Method name="detect_model_drift">
+          <Purpose>Identify when model needs retraining</Purpose>
+        </Method>
+        <Method name="validate_new_model">
+          <Purpose>Validate model before deployment</Purpose>
+        </Method>
+      </Methods>
+    </Evaluator>
+
+  </ComponentImplementation>
+
+  <LearningWorkflow>
+
+    <DailyLearningCycle>
+      <Trigger>
+        <Condition>completed_trades >= 10</Condition>
+        <Condition>market_close AND trades_today > 5</Condition>
+      </Trigger>
+      <Steps>
+        <Step order="1" component="ModelInterface">
+          <Action>Check learning trigger status</Action>
+          <Duration>1 second</Duration>
+        </Step>
+        <Step order="2" component="FeatureEngine">
+          <Action>Extract features for recent trades</Action>
+          <Duration>30 seconds</Duration>
+        </Step>
+        <Step order="3" component="CyberneticCore">
+          <Action>Analyze recent performance patterns</Action>
+          <Duration>60 seconds</Duration>
+        </Step>
+        <Step order="4" component="Trainer">
+          <Action>Perform incremental model update</Action>
+          <Duration>45 seconds</Duration>
+        </Step>
+        <Step order="5" component="Evaluator">
+          <Action>Validate updated model performance</Action>
+          <Duration>30 seconds</Duration>
+        </Step>
+        <Step order="6" component="ModelManager">
+          <Action>Deploy updated model if validation passes</Action>
+          <Duration>15 seconds</Duration>
+        </Step>
+      </Steps>
+      <TotalDuration>3 minutes</TotalDuration>
+      <RollbackPlan>Keep previous model active if update fails validation</RollbackPlan>
+    </DailyLearningCycle>
+
+    <WeeklyLearningCycle>
+      <Schedule>Saturday 6:00 PM EST (after market close)</Schedule>
+      <Trigger>
+        <Condition>day_of_week == 'Saturday'</Condition>
+        <Condition>completed_trades_this_week >= 20</Condition>
+      </Trigger>
+      <Steps>
+        <Step order="1" component="PostgreSQLHandler">
+          <Action>Extract full week's trading data</Action>
+          <Duration>2 minutes</Duration>
+        </Step>
+        <Step order="2" component="FeatureEngine">
+          <Action>Generate comprehensive feature set</Action>
+          <Duration>5 minutes</Duration>
+        </Step>
+        <Step order="3" component="CyberneticCore">
+          <Action>Deep pattern analysis and insight generation</Action>
+          <Duration>10 minutes</Duration>
+        </Step>
+        <Step order="4" component="Trainer">
+          <Action>Full model retraining with hyperparameter optimization</Action>
+          <Duration>15 minutes</Duration>
+        </Step>
+        <Step order="5" component="Evaluator">
+          <Action>Comprehensive model validation and backtesting</Action>
+          <Duration>8 minutes</Duration>
+        </Step>
+        <Step order="6" component="ModelManager">
+          <Action>Version control and deployment preparation</Action>
+          <Duration>3 minutes</Duration>
+        </Step>
+        <Step order="7" component="S3Storage">
+          <Action>Save model artifacts and metadata</Action>
+          <Duration>2 minutes</Duration>
+        </Step>
+      </Steps>
+      <TotalDuration>45 minutes</TotalDuration>
+      <ValidationGates>
+        <Gate name="PerformanceImprovement">New model must outperform previous by 2%</Gate>
+        <Gate name="StabilityCheck">Model predictions must be stable across validation set</Gate>
+        <Gate name="RiskCheck">Model must not increase portfolio risk beyond limits</Gate>
+      </ValidationGates>
+    </WeeklyLearningCycle>
+
+  </LearningWorkflow>
+
+  <IntegrationProtocol>
+
+    <OrchestratorIntegration>
+      <TradeDecisionFlow>
+        <Step order="1">Orchestrator receives strategy signals</Step>
+        <Step order="2">Orchestrator calls ModelInterface.get_trade_prediction()</Step>
+        <Step order="3">Model returns prediction + confidence + risk assessment</Step>
+        <Step order="4">Orchestrator combines ML prediction with strategy signals</Step>
+        <Step order="5">Orchestrator makes final trade decision</Step>
+        <Step order="6">Trade execution logged via ModelInterface.log_trade_execution()</Step>
+      </TradeDecisionFlow>
+
+      <PositionSizingFlow>
+        <Step order="1">Position sizer calculates base position size</Step>
+        <Step order="2">Position sizer calls ModelInterface.get_position_size_multiplier()</Step>
+        <Step order="3">Model returns ML-adjusted multiplier based on confidence and risk</Step>
+        <Step order="4">Final position size = base_size × ml_multiplier × other_adjustments</Step>
+      </PositionSizingFlow>
+
+      <StrategySelectionFlow>
+        <Step order="1">Strategy selector identifies available strategies</Step>
+        <Step order="2">Strategy selector calls ModelInterface.get_strategy_weights()</Step>
+        <Step order="3">Model returns ML-determined strategy weights based on regime and performance</Step>
+        <Step order="4">Final strategy allocation uses ML weights as input</Step>
+      </StrategySelectionFlow>
+    </OrchestratorIntegration>
+
+    <DataFlow>
+      <RealTimeData>
+        <Source name="MarketData" frequency="real_time" format="pandas_dataframe"/>
+        <Source name="SentimentData" frequency="hourly" format="sentiment_scores"/>
+        <Source name="RegimeData" frequency="daily" format="regime_classification"/>
+        <Source name="PortfolioState" frequency="real_time" format="position_dictionary"/>
+      </RealTimeData>
+
+      <HistoricalData>
+        <Source name="TradeOutcomes" location="PostgreSQL.historical_positions"/>
+        <Source name="FeatureSnapshots" location="PostgreSQL.trade_features"/>
+        <Source name="ModelPerformance" location="PostgreSQL.model_performance"/>
+      </HistoricalData>
+    </DataFlow>
+
+  </IntegrationProtocol>
+
+  <DeploymentConfiguration>
+
+    <PostgreSQLSetup>
+      <Connection>
+        <Host>your-db.abc123.us-east-1.rds.amazonaws.com</Host>
+        <Port>5432</Port>
+        <Database>trading_db</Database>
+        <Authentication>environment_variables</Authentication>
+      </Connection>
+      <Performance>
+        <ConnectionPooling>enabled</ConnectionPooling>
+        <MaxConnections>20</MaxConnections>
+        <QueryTimeout>30_seconds</QueryTimeout>
+      </Performance>
+    </PostgreSQLSetup>
+
+    <S3Configuration>
+      <Bucket>your-trading-models</Bucket>
+      <Region>us-east-1</Region>
+      <Structure>
+        <ModelPath>models/{strategy_name}/xgb_model_{timestamp}.joblib</ModelPath>
+        <MetadataPath>metadata/{model_name}/v{version}/metadata.json</MetadataPath>
+      </Structure>
+      <Versioning>enabled</Versioning>
+      <Lifecycle>archive_old_models_after_90_days</Lifecycle>
+    </S3Configuration>
+
+    <EnvironmentVariables>
+      <Variable name="DB_HOST" purpose="PostgreSQL hostname"/>
+      <Variable name="DB_USER" purpose="Database username"/>
+      <Variable name="DB_PASSWORD" purpose="Database password"/>
+      <Variable name="DB_NAME" purpose="Database name"/>
+      <Variable name="S3_BUCKET" purpose="S3 bucket for model storage"/>
+      <Variable name="AWS_ACCESS_KEY_ID" purpose="AWS credentials"/>
+      <Variable name="AWS_SECRET_ACCESS_KEY" purpose="AWS credentials"/>
+      <Variable name="ENVIRONMENT" purpose="dev/staging/production"/>
+    </EnvironmentVariables>
+
+  </DeploymentConfiguration>
+
+  <SecurityConsiderations>
+    <DatabaseSecurity>
+      <Item>Use environment variables for credentials</Item>
+      <Item>Enable SSL connections to PostgreSQL</Item>
+      <Item>Implement connection timeout and retry logic</Item>
+      <Item>Use read-only database user for model inference</Item>
+      <Item>Regular database backup and recovery testing</Item>
+    </DatabaseSecurity>
+
+    <S3Security>
+      <Item>Use IAM roles instead of access keys when possible</Item>
+      <Item>Enable S3 bucket versioning for model rollback</Item>
+      <Item>Implement S3 bucket encryption at rest</Item>
+      <Item>Use signed URLs for temporary model access</Item>
+    </S3Security>
+
+    <ModelSecurity>
+      <Item>Validate model integrity before deployment</Item>
+      <Item>Implement model signature verification</Item>
+      <Item>Log all model loading and deployment events</Item>
+      <Item>Implement automated model rollback on anomalies</Item>
+    </ModelSecurity>
+  </SecurityConsiderations>
+
+  <MonitoringAndAlerting>
+    <ModelHealthMonitoring>
+      <Metric name="prediction_accuracy" threshold="accuracy_drop_5_percent" alert="immediate"/>
+      <Metric name="model_drift" threshold="feature_drift_10_percent" alert="daily_report"/>
+      <Metric name="training_errors" threshold="any_training_failure" alert="immediate"/>
+      <Metric name="data_quality" threshold="missing_features_20_percent" alert="immediate"/>
+    </ModelHealthMonitoring>
+
+    <PerformanceMonitoring>
+      <Metric name="prediction_latency" threshold="response_time_2_seconds" alert="hourly"/>
+      <Metric name="database_connections" threshold="max_connections_80_percent" alert="immediate"/>
+      <Metric name="s3_access_errors" threshold="any_s3_error" alert="immediate"/>
+      <Metric name="learning_cycle_duration" threshold="daily_update_5_minutes" alert="daily_report"/>
+    </PerformanceMonitoring>
+
+    <TradingPerformanceMonitoring>
+      <Metric name="model_sharpe_ratio" threshold="sharpe_below_1.0" alert="weekly_report"/>
+      <Metric name="prediction_vs_outcome" threshold="correlation_below_0.3" alert="daily_report"/>
+      <Metric name="trade_success_rate" threshold="below_55_percent" alert="daily_report"/>
+      <Metric name="max_drawdown" threshold="exceeds_10_percent" alert="immediate"/>
+    </TradingPerformanceMonitoring>
+  </MonitoringAndAlerting>
+
+  <ImplementationPhases>
+
+    <Phase1 name="Foundation" duration="2_weeks">
+      <Objective>Set up core infrastructure and basic ML pipeline</Objective>
+      <Deliverables>
+        <Item>PostgreSQL database schema creation</Item>
+        <Item>S3 bucket setup and model storage utilities</Item>
+        <Item>Basic ModelInterface for portfolio manager integration</Item>
+        <Item>FeatureEngine with core data source aggregation</Item>
+        <Item>Simple XGBoost model training and prediction</Item>
+        <Item>Basic logging and data collection</Item>
+      </Deliverables>
+      <TestingCriteria>
+        <Criterion>Successfully train model with historical data</Criterion>
+        <Criterion>Portfolio manager can get predictions via ModelInterface</Criterion>
+        <Criterion>Features are correctly extracted and stored</Criterion>
+        <Criterion>Models can be saved/loaded from S3</Criterion>
+      </TestingCriteria>
+    </Phase1>
+
+    <Phase2 name="Learning_System" duration="2_weeks">
+      <Objective>Implement cybernetic learning and adaptive capabilities</Objective>
+      <Deliverables>
+        <Item>CyberneticCore with feedback analysis</Item>
+        <Item>Daily incremental learning workflow</Item>
+        <Item>Weekly full retraining pipeline</Item>
+        <Item>Model performance evaluation and validation</Item>
+        <Item>Automated learning trigger system</Item>
+        <Item>Pattern discovery and insight generation</Item>
+      </Deliverables>
+      <TestingCriteria>
+        <Criterion>Daily learning updates execute successfully</Criterion>
+        <Criterion>Weekly retraining improves model performance</Criterion>
+        <Criterion>Model validation prevents deployment of poor models</Criterion>
+        <Criterion>Learning insights are generated and logged</Criterion>
+      </TestingCriteria>
+    </Phase2>
+
+    <Phase3 name="Advanced_Features" duration="2_weeks">
+      <Objective>Add sophisticated features and production optimizations</Objective>
+      <Deliverables>
+        <Item>Advanced feature engineering and selection</Item>
+        <Item>Hyperparameter optimization with Optuna</Item>
+        <Item>A/B testing framework for model comparison</Item>
+        <Item>Model ensemble capabilities</Item>
+        <Item>Advanced pattern discovery algorithms</Item>
+        <Item>Strategy evolution and improvement suggestions</Item>
+      </Deliverables>
+      <TestingCriteria>
+        <Criterion>Hyperparameter optimization improves model performance</Criterion>
+        <Criterion>A/B testing successfully compares model versions</Criterion>
+        <Criterion>Advanced patterns are discovered and utilized</Criterion>
+        <Criterion>Strategy improvement suggestions are actionable</Criterion>
+      </TestingCriteria>
+    </Phase3>
+
+    <Phase4 name="Production_Deployment" duration="1_week">
+      <Objective>Deploy to production environment with monitoring</Objective>
+      <Deliverables>
+        <Item>Production database configuration</Item>
+        <Item>AWS EC2/RDS deployment</Item>
+        <Item>Monitoring and alerting system</Item>
+        <Item>Automated backup and recovery procedures</Item>
+        <Item>Performance optimization and scaling</Item>
+        <Item>Documentation and runbooks</Item>
+      </Deliverables>
+      <TestingCriteria>
+        <Criterion>System runs reliably in production environment</Criterion>
+        <Criterion>Monitoring alerts work correctly</Criterion>
+        <Criterion>Backup and recovery procedures validated</Criterion>
+        <Criterion>Performance meets production requirements</Criterion>
+      </TestingCriteria>
+    </Phase4>
+
+  </ImplementationPhases>
+
+  <ConfigurationFiles>
+
+    <ModelConfig>
+      <Location>model_maintenance/config/model_config.py</Location>
+      <Parameters>
+        <XGBoostParams>
+          <Param name="objective" value="reg:squarederror"/>
+          <Param name="max_depth" value="6"/>
+          <Param name="learning_rate" value="0.1"/>
+          <Param name="n_estimators" value="100"/>
+          <Param name="subsample" value="0.8"/>
+          <Param name="colsample_bytree" value="0.8"/>
+          <Param name="random_state" value="42"/>
+        </XGBoostParams>
+        <TrainingParams>
+          <Param name="train_test_split" value="0.8"/>
+          <Param name="cross_validation_folds" value="5"/>
+          <Param name="early_stopping_rounds" value="10"/>
+          <Param name="validation_fraction" value="0.2"/>
+        </TrainingParams>
+        <HyperparameterOptimization>
+          <Param name="optimization_trials" value="100"/>
+          <Param name="optimization_timeout" value="1800"/>
+          <Param name="pruning_enabled" value="true"/>
+        </HyperparameterOptimization>
+      </Parameters>
+    </ModelConfig>
+
+    <FeatureConfig>
+      <Location>model_maintenance/config/feature_config.py</Location>
+      <Parameters>
+        <FeatureEngineering>
+          <Param name="technical_indicators_window" value="20"/>
+          <Param name="sentiment_smoothing_window" value="5"/>
+          <Param name="regime_stability_window" value="10"/>
+          <Param name="portfolio_correlation_window" value="30"/>
+        </FeatureEngineering>
+        <FeatureSelection>
+          <Param name="max_features" value="50"/>
+          <Param name="feature_importance_threshold" value="0.01"/>
+          <Param name="correlation_threshold" value="0.95"/>
+          <Param name="variance_threshold" value="0.01"/>
+        </FeatureSelection>
+        <DataQuality>
+          <Param name="max_missing_percentage" value="0.1"/>
+          <Param name="outlier_detection_method" value="isolation_forest"/>
+          <Param name="outlier_contamination" value="0.05"/>
+        </DataQuality>
+      </Parameters>
+    </FeatureConfig>
+
+    <LearningConfig>
+      <Location>model_maintenance/config/learning_config.py</Location>
+      <Parameters>
+        <DailyLearning>
+          <Param name="min_trades_for_update" value="10"/>
+          <Param name="learning_rate_decay" value="0.95"/>
+          <Param name="incremental_training_enabled" value="true"/>
+          <Param name="max_daily_update_time" value="300"/>
+        </DailyLearning>
+        <WeeklyLearning>
+          <Param name="min_weekly_trades" value="50"/>
+          <Param name="full_retrain_enabled" value="true"/>
+          <Param name="hyperparameter_optimization_enabled" value="true"/>
+          <Param name="max_weekly_training_time" value="2700"/>
+        </WeeklyLearning>
+        <CyberneticLearning>
+          <Param name="pattern_discovery_enabled" value="true"/>
+          <Param name="strategy_evolution_enabled" value="true"/>
+          <Param name="adaptive_feature_weighting" value="true"/>
+          <Param name="confidence_calibration_enabled" value="true"/>
+        </CyberneticLearning>
+        <PerformanceThresholds>
+          <Param name="min_accuracy_improvement" value="0.02"/>
+          <Param name="max_performance_degradation" value="0.05"/>
+          <Param name="min_sharpe_ratio" value="1.0"/>
+          <Param name="max_drawdown_threshold" value="0.15"/>
+        </PerformanceThresholds>
+      </Parameters>
+    </LearningConfig>
+
+  </ConfigurationFiles>
+
+  <TestingFramework>
+
+    <UnitTests>
+      <TestModule name="test_feature_engine">
+        <Test name="test_feature_extraction" purpose="Verify all features are extracted correctly"/>
+        <Test name="test_feature_validation" purpose="Ensure feature quality checks work"/>
+        <Test name="test_feature_transformation" purpose="Validate feature scaling and encoding"/>
+      </TestModule>
+
+      <TestModule name="test_model_manager">
+        <Test name="test_model_save_load" purpose="Verify S3 model persistence"/>
+        <Test name="test_model_versioning" purpose="Check version control functionality"/>
+        <Test name="test_model_validation" purpose="Ensure model validation logic works"/>
+      </TestModule>
+
+      <TestModule name="test_trainer">
+        <Test name="test_initial_training" purpose="Verify model can be trained from scratch"/>
+        <Test name="test_incremental_learning" purpose="Check daily update functionality"/>
+        <Test name="test_full_retraining" purpose="Validate weekly retraining process"/>
+      </TestModule>
+
+      <TestModule name="test_cybernetic_core">
+        <Test name="test_performance_analysis" purpose="Verify feedback analysis works"/>
+        <Test name="test_pattern_discovery" purpose="Check pattern mining algorithms"/>
+        <Test name="test_adaptive_learning" purpose="Validate adaptive mechanisms"/>
+      </TestModule>
+
+      <TestModule name="test_model_interface">
+        <Test name="test_prediction_api" purpose="Verify portfolio manager integration"/>
+        <Test name="test_logging_functionality" purpose="Check trade logging works"/>
+        <Test name="test_learning_triggers" purpose="Validate learning trigger logic"/>
+      </TestModule>
+    </UnitTests>
+
+    <IntegrationTests>
+      <Test name="test_end_to_end_workflow">
+        <Purpose>Test complete workflow from feature extraction to model prediction</Purpose>
+        <Steps>
+          <Step>Generate synthetic trade data</Step>
+          <Step>Extract features using FeatureEngine</Step>
+          <Step>Train model using Trainer</Step>
+          <Step>Make predictions using ModelManager</Step>
+          <Step>Log outcomes and trigger learning</Step>
+          <Step>Verify model improvement</Step>
+        </Steps>
+      </Test>
+
+      <Test name="test_portfolio_manager_integration">
+        <Purpose>Test integration with existing portfolio manager</Purpose>
+        <Steps>
+          <Step>Mock portfolio manager calls to ModelInterface</Step>
+          <Step>Verify predictions are returned correctly</Step>
+          <Step>Test position sizing adjustments</Step>
+          <Step>Validate strategy weight recommendations</Step>
+          <Step>Check trade logging functionality</Step>
+        </Steps>
+      </Test>
+
+      <Test name="test_learning_cycles">
+        <Purpose>Test both daily and weekly learning cycles</Purpose>
+        <Steps>
+          <Step>Simulate 10 completed trades</Step>
+          <Step>Trigger daily learning update</Step>
+          <Step>Verify model is updated correctly</Step>
+          <Step>Simulate week of trading</Step>
+          <Step>Trigger weekly retraining</Step>
+          <Step>Validate performance improvement</Step>
+        </Steps>
+      </Test>
+    </IntegrationTests>
+
+    <PerformanceTests>
+      <Test name="test_prediction_latency">
+        <Purpose>Ensure predictions are returned within acceptable time</Purpose>
+        <Requirement>95% of predictions under 500ms</Requirement>
+      </Test>
+
+      <Test name="test_learning_performance">
+        <Purpose>Verify learning cycles complete within time limits</Purpose>
+        <Requirement>Daily updates under 5 minutes, weekly under 45 minutes</Requirement>
+      </Test>
+
+      <Test name="test_database_performance">
+        <Purpose>Ensure database operations are efficient</Purpose>
+        <Requirement>Feature queries under 100ms, bulk inserts under 5 seconds</Requirement>
+      </Test>
+    </PerformanceTests>
+
+  </TestingFramework>
+
+  <MaintenanceAndOperations>
+
+    <RegularMaintenance>
+      <Task name="database_cleanup" frequency="weekly">
+        <Purpose>Remove old trade data and optimize database performance</Purpose>
+        <Actions>
+          <Action>Archive trades older than 6 months</Action>
+          <Action>Update database statistics</Action>
+          <Action>Rebuild indexes if needed</Action>
+          <Action>Check database integrity</Action>
+        </Actions>
+      </Task>
+
+      <Task name="model_archive" frequency="monthly">
+        <Purpose>Archive old models and clean up S3 storage</Purpose>
+        <Actions>
+          <Action>Move models older than 90 days to archive</Action>
+          <Action>Delete temporary training artifacts</Action>
+          <Action>Update model registry</Action>
+          <Action>Generate model performance reports</Action>
+        </Actions>
+      </Task>
+
+      <Task name="performance_review" frequency="weekly">
+        <Purpose>Review model and system performance</Purpose>
+        <Actions>
+          <Action>Analyze prediction accuracy trends</Action>
+          <Action>Review trading performance metrics</Action>
+          <Action>Check system resource usage</Action>
+          <Action>Identify potential improvements</Action>
+        </Actions>
+      </Task>
+    </RegularMaintenance>
+
+    <EmergencyProcedures>
+      <Procedure name="model_rollback">
+        <Trigger>Model performance degradation or prediction errors</Trigger>
+        <Steps>
+          <Step>Identify problematic model version</Step>
+          <Step>Load previous stable model from S3</Step>
+          <Step>Update database with rollback information</Step>
+          <Step>Notify operations team</Step>
+          <Step>Investigate root cause</Step>
+        </Steps>
+      </Procedure>
+
+      <Procedure name="database_recovery">
+        <Trigger>Database connection failures or data corruption</Trigger>
+        <Steps>
+          <Step>Switch to backup database if available</Step>
+          <Step>Restore from latest backup</Step>
+          <Step>Verify data integrity</Step>
+          <Step>Resume trading operations</Step>
+          <Step>Analyze failure cause</Step>
+        </Steps>
+      </Procedure>
+
+      <Procedure name="learning_failure">
+        <Trigger>Learning cycle failures or training errors</Trigger>
+        <Steps>
+          <Step>Stop automatic learning updates</Step>
+          <Step>Continue using last stable model</Step>
+          <Step>Diagnose training pipeline issues</Step>
+          <Step>Fix underlying problems</Step>
+          <Step>Resume learning with manual validation</Step>
+        </Steps>
+      </Procedure>
+    </EmergencyProcedures>
+
+  </MaintenanceAndOperations>
+
+  <SuccessMetrics>
+
+    <ModelPerformanceMetrics>
+      <Metric name="prediction_accuracy">
+        <Target>MAE under 2% for 1-day returns</Target>
+        <Measurement>Daily calculation on recent predictions</Measurement>
+      </Metric>
+      <Metric name="directional_accuracy">
+        <Target>60%+ correct direction prediction</Target>
+        <Measurement>Weekly calculation on trade outcomes</Measurement>
+      </Metric>
+      <Metric name="confidence_calibration">
+        <Target>95% confidence intervals contain 95% of outcomes</Target>
+        <Measurement>Monthly validation of confidence scores</Measurement>
+      </Metric>
+    </ModelPerformanceMetrics>
+
+    <TradingPerformanceMetrics>
+      <Metric name="sharpe_ratio_improvement">
+        <Target>10%+ improvement over baseline strategy</Target>
+        <Measurement>Monthly comparison with non-ML baseline</Measurement>
+      </Metric>
+      <Metric name="max_drawdown_reduction">
+        <Target>20%+ reduction in maximum drawdown</Target>
+        <Measurement>Ongoing risk-adjusted performance monitoring</Measurement>
+      </Metric>
+      <Metric name="alpha_generation">
+        <Target>Generate 2%+ annual alpha over benchmark</Target>
+        <Measurement>Quarterly performance attribution analysis</Measurement>
+      </Metric>
+    </TradingPerformanceMetrics>
+
+    <SystemPerformanceMetrics>
+      <Metric name="prediction_latency">
+        <Target>95% of predictions under 500ms</Target>
+        <Measurement>Real-time latency monitoring</Measurement>
+      </Metric>
+      <Metric name="system_uptime">
+        <Target>99.9% uptime during trading hours</Target>
+        <Measurement>Continuous system monitoring</Measurement>
+      </Metric>
+      <Metric name="learning_cycle_success">
+        <Target>95%+ successful completion of learning cycles</Target>
+        <Measurement>Daily and weekly learning cycle monitoring</Measurement>
+      </Metric>
+    </SystemPerformanceMetrics>
+
+    <LearningEffectivenessMetrics>
+      <Metric name="continuous_improvement">
+        <Target>Model performance improves monthly</Target>
+        <Measurement>Month-over-month performance comparison</Measurement>
+      </Metric>
+      <Metric name="pattern_discovery">
+        <Target>Discover 2+ new profitable patterns per month</Target>
+        <Measurement>Manual review of cybernetic learning insights</Measurement>
+      </Metric>
+      <Metric name="adaptation_speed">
+        <Target>Adapt to regime changes within 5 trading days</Target>
+        <Measurement>Performance during identified regime transitions</Measurement>
+      </Metric>
+    </LearningEffectivenessMetrics>
+
+  </SuccessMetrics>
+
+</ModelMaintenanceImplementationPlan>

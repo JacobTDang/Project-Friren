@@ -1,0 +1,170 @@
+<multiprocess_trading_system>
+ <overview>
+   Build a multiprocess trading system for EC2 t3.micro that integrates existing portfolio_manager components with new multiprocess infrastructure
+ </overview>
+
+ <existing_components>
+   <strategies>
+     <location>portfolio_manager/strategies/</location>
+     <types>momentum, mean_reversion, bollinger, volatility, pairs, pca, jump_diffusion</types>
+     <keep_as_is>true</keep_as_is>
+   </strategies>
+   <position_sizer>
+     <location>portfolio_manager/position_sizer.py</location>
+     <class>EnhancedPositionSizer</class>
+     <features>sentiment integration, regime adjustments, risk metrics</features>
+     <keep_as_is>true</keep_as_is>
+   </position_sizer>
+   <multiprocess_manager>
+     <location>portfolio_manager/multiprocess_manager.py</location>
+     <class>EnhancedMultiprocessManager</class>
+     <repurpose>wrap in new infrastructure</repurpose>
+   </multiprocess_manager>
+ </existing_components>
+
+ <architecture>
+   <infrastructure_layer>
+     <location>multiprocess_infrastructure/</location>
+     <components>
+       <base_process>Abstract base class with heartbeat, error handling</base_process>
+       <process_manager>Lifecycle management for all processes</process_manager>
+       <queue_manager>Priority queue creation and management</queue_manager>
+       <shared_state_manager>Thread-safe shared state across processes</shared_state_manager>
+       <heartbeat_monitor>Process health monitoring with auto-restart</heartbeat_monitor>
+     </components>
+   </infrastructure_layer>
+
+   <business_layer>
+     <location>trading_engine/portfolio_manager/</location>
+     <orchestrator>
+       <base>Extend existing orchestrator</base>
+       <responsibilities>
+         - Process lifecycle management
+         - WebSocket connection ownership
+         - Market hours control
+         - Shared resource initialization
+       </responsibilities>
+     </orchestrator>
+
+     <processes>
+       <strategy_analyzer>
+         <description>Runs all 7 strategies in parallel</description>
+         <uses>
+           - existing strategies from strategies/
+           - existing EnhancedMultiprocessManager
+         </uses>
+         <frequency>2-3 minutes</frequency>
+         <outputs>High-confidence signals to priority queue</outputs>
+       </strategy_analyzer>
+
+       <position_health_monitor>
+         <description>Monitors position health using position sizer</description>
+         <uses>EnhancedPositionSizer for risk metrics</uses>
+         <frequency>5-10 seconds</frequency>
+         <outputs>Health alerts to priority queue</outputs>
+       </position_health_monitor>
+
+       <combined_analyzer>
+         <description>Async process for news and regime</description>
+         <components>
+           - News sentiment analysis
+           - Market regime detection
+         </components>
+         <frequency>5-10 minutes</frequency>
+         <outputs>Updates shared state only</outputs>
+       </combined_analyzer>
+
+       <market_decision_engine>
+         <description>Central decision maker and trade executor</description>
+         <uses>
+           - EnhancedPositionSizer for final sizing
+           - All signals from priority queue
+           - Future: XGBoost for strategy selection
+         </uses>
+         <authority>ONLY process allowed to execute trades</authority>
+         <includes>Risk analyzer component</includes>
+       </market_decision_engine>
+     </processes>
+   </business_layer>
+ </architecture>
+
+ <communication>
+   <shared_state>
+     <websocket_prices>Real-time price updates from orchestrator</websocket_prices>
+     <active_positions>Current portfolio positions</active_positions>
+     <sentiment_scores>Latest sentiment analysis results</sentiment_scores>
+     <market_regime>Current market regime classification</market_regime>
+     <strategy_signals>Latest signals from each strategy</strategy_signals>
+   </shared_state>
+
+   <priority_queue>
+     <destination>market_decision_engine</destination>
+     <message_types>
+       <health_alert>Position health warnings</health_alert>
+       <strategy_signal>Trading signals from strategies</strategy_signal>
+       <regime_change>Significant regime transitions</regime_change>
+     </message_types>
+     <priority_levels>
+       1: Critical health alerts
+       2: High-confidence strategy signals
+       3: Normal updates
+     </priority_levels>
+   </priority_queue>
+ </communication>
+
+ <integration_points>
+   <xgboost_integration>
+     <location>market_decision_engine</location>
+     <purpose>Strategy selection based on market conditions</purpose>
+     <timing>Add after core system is stable</timing>
+   </xgboost_integration>
+
+   <position_sizer_usage>
+     <strategy_analyzer>Initial position sizing</strategy_analyzer>
+     <health_monitor>Risk metric calculation</health_monitor>
+     <decision_engine>Final position size determination</decision_engine>
+   </position_sizer_usage>
+ </integration_points>
+
+ <deployment>
+   <supervisor>supervisord for process management</supervisor>
+   <monitoring>Heartbeat every 30 seconds</monitoring>
+   <logging>Multiprocess-safe centralized logging</logging>
+   <restart_policy>Auto-restart failed processes with backoff</restart_policy>
+ </deployment>
+
+ <implementation_phases>
+   <phase_1>
+     <duration>Week 1</duration>
+     <tasks>
+       - Create multiprocess_infrastructure
+       - Wrap existing components in process classes
+       - Test inter-process communication
+     </tasks>
+   </phase_1>
+
+   <phase_2>
+     <duration>Week 2</duration>
+     <tasks>
+       - Integrate all strategies into strategy_analyzer
+       - Connect position_sizer to all processes
+       - Implement priority queue system
+     </tasks>
+   </phase_2>
+
+   <phase_3>
+     <duration>Week 3</duration>
+     <tasks>
+       - Add production safety features
+       - Implement comprehensive logging
+       - Test with paper trading
+     </tasks>
+   </phase_3>
+ </implementation_phases>
+
+ <constraints>
+   <instance>EC2 t3.micro (2 vCPU, 1GB RAM)</instance>
+   <max_processes>5 concurrent processes</max_processes>
+   <reuse_code>Maximize reuse of existing portfolio_manager components</reuse_code>
+ </constraints>
+</multiprocess_trading_system>

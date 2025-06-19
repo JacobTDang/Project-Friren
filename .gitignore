@@ -1,8 +1,10 @@
-﻿# ONLY ALLOW Friren_V1 DIRECTORY
+﻿# ONLY ALLOW Friren_V1 DIRECTORY AND PROMPTS
 /*
 !/Friren_V1/
+!/prompts/
 !/.gitignore
 !/README.md
+!/.env.template
 
 # Environment Variables - NEVER COMMIT
 .env

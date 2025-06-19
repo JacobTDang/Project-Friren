@@ -1,0 +1,390 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<PortfolioManagerImplementationPlan>
+ <Meta>
+   <ProjectName>Modular Portfolio Management System</ProjectName>
+   <Objective>Build orchestrated trading system with regime detection, sentiment analysis, ML decisions, and position monitoring</Objective>
+   <Architecture>Multiprocessing with inter-module communication</Architecture>
+   <Development>Incremental, module-by-module approach</Development>
+ </Meta>
+
+ <GlobalConstraints>
+   <Constraint id="no_overengineering">
+     <Rule>Implement only what is explicitly required for each module</Rule>
+     <Rule>No additional features beyond specified requirements</Rule>
+     <Rule>Keep implementations simple and focused</Rule>
+   </Constraint>
+
+   <Constraint id="logical_progression">
+     <Rule>Complete each module fully before moving to next</Rule>
+     <Rule>Test each module independently before integration</Rule>
+     <Rule>Build dependencies in correct order</Rule>
+   </Constraint>
+
+   <Constraint id="minimal_viable_implementation">
+     <Rule>Focus on core functionality first</Rule>
+     <Rule>Add optimizations only after basic version works</Rule>
+     <Rule>Prefer working code over perfect code</Rule>
+   </Constraint>
+
+   <Constraint id="existing_code_reuse">
+     <Rule>Use existing classes from user's codebase wherever possible</Rule>
+     <Rule>Do not rewrite existing functionality</Rule>
+     <Rule>Only create new code where gaps exist</Rule>
+   </Constraint>
+ </GlobalConstraints>
+
+ <Module id="1" name="MarketSentimentEngine" priority="HIGH" dependencies="none">
+   <Objective>Process real-time news and populate watchlist based on sentiment signals</Objective>
+
+   <Requirements>
+     <Requirement>Integrate existing EnhancedFinBERT class without modification</Requirement>
+     <Requirement>Create SentimentCoordinator that calls FinBERT every 30 minutes</Requirement>
+     <Requirement>Build WatchlistManager that maintains exactly 15-20 stocks</Requirement>
+     <Requirement>Filter sentiment scores - only use confidence >= 70%</Requirement>
+     <Requirement>Log all decisions with timestamp and reasoning to simple text file</Requirement>
+   </Requirements>
+
+   <ImplementationConstraints>
+     <Constraint>Do NOT modify existing FinBERT code</Constraint>
+     <Constraint>Use simple Python scheduling - no complex job schedulers</Constraint>
+     <Constraint>Store watchlist as simple Python list in memory</Constraint>
+     <Constraint>Use basic Python logging - no external logging systems</Constraint>
+   </ImplementationConstraints>
+
+   <Files>
+     <File>portfolio_manager/sentiment_coordinator.py</File>
+     <File>portfolio_manager/watchlist_manager.py</File>
+   </Files>
+
+   <SuccessCriteria>
+     <Criterion>SentimentCoordinator runs continuously for 1 hour without errors</Criterion>
+     <Criterion>Watchlist contains 15-20 stocks with strong sentiment mentions</Criterion>
+     <Criterion>All sentiment decisions logged with clear reasoning</Criterion>
+     <Criterion>Can manually verify sentiment scores match FinBERT output</Criterion>
+   </SuccessCriteria>
+
+   <TestingApproach>
+     <Test>Run sentiment engine for 1 hour, verify watchlist updates</Test>
+     <Test>Check log files contain expected sentiment reasoning</Test>
+     <Test>Manually verify sentiment scores using existing FinBERT test</Test>
+   </TestingApproach>
+ </Module>
+
+ <Module id="2" name="RegimeDetectionSystem" priority="HIGH" dependencies="none">
+   <Objective>Detect market regimes and activate chaos mode when needed</Objective>
+
+   <Requirements>
+     <Requirement>Integrate existing EnhancedRegimeDetector and EntropyRegimeDetector</Requirement>
+     <Requirement>Create RegimeCoordinator that runs detection every 15 minutes</Requirement>
+     <Requirement>Implement simple chaos mode flag (True/False)</Requirement>
+     <Requirement>Set minimum regime confidence threshold of 60%</Requirement>
+     <Requirement>Log regime changes with confidence levels</Requirement>
+   </Requirements>
+
+   <ImplementationConstraints>
+     <Constraint>Do NOT modify existing regime detector classes</Constraint>
+     <Constraint>Use simple boolean flag for chaos mode - no complex state machine</Constraint>
+     <Constraint>Store current regime as simple string variable</Constraint>
+     <Constraint>Use basic file logging for regime changes</Constraint>
+   </ImplementationConstraints>
+
+   <Files>
+     <File>portfolio_manager/regime_coordinator.py</File>
+     <File>portfolio_manager/chaos_detector.py</File>
+   </Files>
+
+   <SuccessCriteria>
+     <Criterion>RegimeCoordinator runs for 2 hours detecting regime every 15 minutes</Criterion>
+     <Criterion>Chaos mode activates when entropy detector indicates high chaos</Criterion>
+     <Criterion>Only regime changes with >= 60% confidence are accepted</Criterion>
+     <Criterion>All regime transitions logged with timestamps</Criterion>
+   </SuccessCriteria>
+
+   <TestingApproach>
+     <Test>Run regime detection on historical volatile market data</Test>
+     <Test>Verify chaos mode triggers during known chaotic periods</Test>
+     <Test>Check confidence thresholds reject low-confidence regimes</Test>
+   </TestingApproach>
+ </Module>
+
+ <Module id="3" name="XGBoostDecisionEngine" priority="HIGH" dependencies="1,2">
+   <Objective>Generate trade decisions with confidence scores and SHAP explanations</Objective>
+
+   <Requirements>
+     <Requirement>Create ModelCoordinator for XGBoost model management</Requirement>
+     <Requirement>Build FeatureEngineer that combines sentiment + regime + technical data</Requirement>
+     <Requirement>Implement confidence threshold system (65% base, adjustable by regime)</Requirement>
+     <Requirement>Create DecisionLogger that saves all decisions to CSV with SHAP values</Requirement>
+     <Requirement>Use cross-platform model loading (Windows dev, Linux prod)</Requirement>
+   </Requirements>
+
+   <ImplementationConstraints>
+     <Constraint>Start with simple XGBoost model - no complex ensembles</Constraint>
+     <Constraint>Use existing StockDataTools for technical indicators</Constraint>
+     <Constraint>Store model as simple .pkl file</Constraint>
+     <Constraint>Use pandas DataFrame for feature engineering</Constraint>
+     <Constraint>Save decisions to simple CSV file - no database yet</Constraint>
+   </ImplementationConstraints>
+
+   <Files>
+     <File>portfolio_manager/model_coordinator.py</File>
+     <File>portfolio_manager/feature_engineer.py</File>
+     <File>portfolio_manager/decision_logger.py</File>
+   </Files>
+
+   <SuccessCriteria>
+     <Criterion>ModelCoordinator loads XGBoost model successfully on both Windows and Linux</Criterion>
+     <Criterion>FeatureEngineer combines sentiment, regime, and technical data into single DataFrame</Criterion>
+     <Criterion>Only decisions with >= 65% confidence are approved</Criterion>
+     <Criterion>All decisions logged to CSV with SHAP explanations</Criterion>
+     <Criterion>Confidence thresholds adjust based on regime (chaos = 75%, trending = 60%)</Criterion>
+   </SuccessCriteria>
+
+   <TestingApproach>
+     <Test>Test model loading on sample data from both platforms</Test>
+     <Test>Verify feature engineering produces expected DataFrame structure</Test>
+     <Test>Check confidence thresholds work correctly for different regimes</Test>
+     <Test>Validate CSV logging contains all required SHAP data</Test>
+   </TestingApproach>
+ </Module>
+
+ <Module id="4" name="StrategySelectionLayer" priority="MEDIUM" dependencies="3">
+   <Objective>Dynamically select trading strategies based on regime and sentiment</Objective>
+
+   <Requirements>
+     <Requirement>Create StrategySelector that maps regime states to strategies</Requirement>
+     <Requirement>Integrate existing strategy classes (RSI, MA, Bollinger, Kalman, Pairs)</Requirement>
+     <Requirement>Implement simple strategy mapping (trending→momentum, chaos→breakout)</Requirement>
+     <Requirement>Use existing StockDataTools for signal generation</Requirement>
+     <Requirement>Log strategy selection reasoning</Requirement>
+   </Requirements>
+
+   <ImplementationConstraints>
+     <Constraint>Use simple if/else logic for strategy selection - no complex ML</Constraint>
+     <Constraint>Do NOT modify existing strategy backtest classes</Constraint>
+     <Constraint>Use existing StockDataTools methods without changes</Constraint>
+     <Constraint>Store strategy selection as simple string variable</Constraint>
+   </ImplementationConstraints>
+
+   <Files>
+     <File>portfolio_manager/strategy_selector.py</File>
+   </Files>
+
+   <SuccessCriteria>
+     <Criterion>StrategySelector correctly maps regimes to appropriate strategies</Criterion>
+     <Criterion>Strategy selection adapts when regime changes</Criterion>
+     <Criterion>Integration with existing strategy classes works without modification</Criterion>
+     <Criterion>Strategy selection reasoning logged clearly</Criterion>
+   </SuccessCriteria>
+
+   <TestingApproach>
+     <Test>Test strategy selection across different regime scenarios</Test>
+     <Test>Verify existing strategy classes work with new selector</Test>
+     <Test>Check strategy transitions when regime changes</Test>
+   </TestingApproach>
+ </Module>
+
+ <Module id="5" name="PositionExecutionMonitoring" priority="HIGH" dependencies="3,4">
+   <Objective>Execute trades via Alpaca API and monitor positions independently</Objective>
+
+   <Requirements>
+     <Requirement>Create Orchestrator as main execution coordinator</Requirement>
+     <Requirement>Build PositionMonitor class that runs as separate Process</Requirement>
+     <Requirement>Implement basic Alpaca API integration for paper trading</Requirement>
+     <Requirement>Create PositionCoordinator to prevent conflicting decisions</Requirement>
+     <Requirement>Implement 6-7% stop loss with regime-based exceptions</Requirement>
+   </Requirements>
+
+   <ImplementationConstraints>
+     <Constraint>Start with paper trading only - no real money</Constraint>
+     <Constraint>Use simple multiprocessing.Process - no complex process managers</Constraint>
+     <Constraint>Implement basic stop loss logic - no complex risk models yet</Constraint>
+     <Constraint>Use simple Python queues for inter-process communication</Constraint>
+     <Constraint>Limit to maximum 5 concurrent positions for testing</Constraint>
+   </ImplementationConstraints>
+
+   <Files>
+     <File>portfolio_manager/orchestrator.py</File>
+     <File>portfolio_manager/position_monitor.py</File>
+     <File>portfolio_manager/position_coordinator.py</File>
+     <File>portfolio_manager/alpaca_executor.py</File>
+   </Files>
+
+   <SuccessCriteria>
+     <Criterion>Orchestrator successfully places paper trades via Alpaca API</Criterion>
+     <Criterion>Each open position monitored by independent Process</Criterion>
+     <Criterion>Stop losses trigger at 6-7% unless overridden by strong signals</Criterion>
+     <Criterion>PositionCoordinator prevents conflicting decisions</Criterion>
+     <Criterion>System handles 5 concurrent positions without errors</Criterion>
+   </SuccessCriteria>
+
+   <TestingApproach>
+     <Test>Execute 3 paper trades and verify Alpaca API integration</Test>
+     <Test>Test position monitoring with simulated price movements</Test>
+     <Test>Verify stop loss triggers work correctly</Test>
+     <Test>Test coordinator prevents conflicting position decisions</Test>
+   </TestingApproach>
+ </Module>
+
+ <Module id="6" name="RiskManagementSystem" priority="MEDIUM" dependencies="5">
+   <Objective>Provide portfolio-level oversight and risk controls</Objective>
+
+   <Requirements>
+     <Requirement>Create PortfolioRiskManager for overall risk monitoring</Requirement>
+     <Requirement>Implement dynamic position sizing (3-12% base, 15% max)</Requirement>
+     <Requirement>Build simple correlation monitoring for position limits</Requirement>
+     <Requirement>Create emergency liquidation trigger (SPY -10% daily)</Requirement>
+     <Requirement>Calculate position sizes based on confidence, regime, and volatility</Requirement>
+   </Requirements>
+
+   <ImplementationConstraints>
+     <Constraint>Use simple percentage-based position sizing - no complex portfolio optimization</Constraint>
+     <Constraint>Implement basic correlation check using pandas.corr()</Constraint>
+     <Constraint>Use simple threshold-based emergency triggers</Constraint>
+     <Constraint>Store risk metrics in simple Python dictionaries</Constraint>
+   </ImplementationConstraints>
+
+   <Files>
+     <File>portfolio_manager/portfolio_risk_manager.py</File>
+     <File>portfolio_manager/position_sizer.py</File>
+     <File>portfolio_manager/emergency_handler.py</File>
+   </Files>
+
+   <SuccessCriteria>
+     <Criterion>Position sizing respects 3-15% limits in all scenarios</Criterion>
+     <Criterion>Risk manager prevents excessive correlation exposure</Criterion>
+     <Criterion>Emergency liquidation triggers when SPY drops 10%</Criterion>
+     <Criterion>Position sizes adjust based on confidence and regime</Criterion>
+   </SuccessCriteria>
+
+   <TestingApproach>
+     <Test>Test position sizing across various confidence/regime scenarios</Test>
+     <Test>Verify correlation limits prevent over-concentration</Test>
+     <Test>Test emergency liquidation with simulated market crash</Test>
+   </TestingApproach>
+ </Module>
+
+ <Module id="7" name="ModelMaintenanceLearning" priority="LOW" dependencies="3">
+   <Objective>Monitor model performance and retrain when needed</Objective>
+
+   <Requirements>
+     <Requirement>Create ModelPerformanceMonitor to track accuracy</Requirement>
+     <Requirement>Implement retraining triggers (10 trades OR 7 days OR accuracy &lt; 60%)</Requirement>
+     <Requirement>Build safe model versioning with validation</Requirement>
+     <Requirement>Create SHAP analysis for feature drift detection</Requirement>
+     <Requirement>Implement model backup and rollback capabilities</Requirement>
+   </Requirements>
+
+   <ImplementationConstraints>
+     <Constraint>Use simple accuracy tracking - no complex performance metrics</Constraint>
+     <Constraint>Implement basic model versioning with file timestamps</Constraint>
+     <Constraint>Use existing SHAP library without custom implementations</Constraint>
+     <Constraint>Store model performance in simple CSV files</Constraint>
+   </ImplementationConstraints>
+
+   <Files>
+     <File>portfolio_manager/model_performance_monitor.py</File>
+     <File>portfolio_manager/model_maintainer.py</File>
+   </Files>
+
+   <SuccessCriteria>
+     <Criterion>Performance monitor tracks model accuracy correctly</Criterion>
+     <Criterion>Retraining triggers activate based on defined thresholds</Criterion>
+     <Criterion>Model updates deploy safely without disrupting positions</Criterion>
+     <Criterion>SHAP analysis identifies feature importance changes</Criterion>
+   </SuccessCriteria>
+
+   <TestingApproach>
+     <Test>Test performance monitoring with simulated good/bad predictions</Test>
+     <Test>Verify retraining triggers activate correctly</Test>
+     <Test>Test model versioning and rollback functionality</Test>
+   </TestingApproach>
+ </Module>
+
+ <Module id="8" name="CommunicationCoordination" priority="LOW" dependencies="5,6,7">
+   <Objective>Enable reliable inter-process communication between all modules</Objective>
+
+   <Requirements>
+     <Requirement>Create MessageBroker using Python multiprocessing queues</Requirement>
+     <Requirement>Implement SharedStateManager for cross-process data</Requirement>
+     <Requirement>Build simple event system for regime changes and alerts</Requirement>
+     <Requirement>Create basic health monitoring for all processes</Requirement>
+   </Requirements>
+
+   <ImplementationConstraints>
+     <Constraint>Use only Python standard library multiprocessing - no external message brokers</Constraint>
+     <Constraint>Implement simple shared memory using multiprocessing.Manager</Constraint>
+     <Constraint>Use basic process monitoring - no complex health systems</Constraint>
+     <Constraint>Keep message format simple (Python dictionaries)</Constraint>
+   </ImplementationConstraints>
+
+   <Files>
+     <File>portfolio_manager/message_broker.py</File>
+     <File>portfolio_manager/shared_state.py</File>
+     <File>portfolio_manager/health_monitor.py</File>
+   </Files>
+
+   <SuccessCriteria>
+     <Criterion>All modules communicate reliably using message broker</Criterion>
+     <Criterion>Shared state updates propagate to all processes</Criterion>
+     <Criterion>Health monitor detects and reports process failures</Criterion>
+     <Criterion>System recovers gracefully from individual component failures</Criterion>
+   </SuccessCriteria>
+
+   <TestingApproach>
+     <Test>Test message passing between all module processes</Test>
+     <Test>Verify shared state consistency across processes</Test>
+     <Test>Test health monitoring with simulated process failures</Test>
+   </TestingApproach>
+ </Module>
+
+ <ImplementationPhases>
+   <Phase id="1" duration="2 weeks">
+     <Modules>1, 2</Modules>
+     <Goal>Build foundation with sentiment and regime detection</Goal>
+     <Constraint>Do not start Module 3 until Modules 1 and 2 are fully tested</Constraint>
+   </Phase>
+
+   <Phase id="2" duration="2 weeks">
+     <Modules>3, 4</Modules>
+     <Goal>Implement ML decision engine and strategy selection</Goal>
+     <Constraint>Do not start Module 5 until XGBoost integration is proven</Constraint>
+   </Phase>
+
+   <Phase id="3" duration="2 weeks">
+     <Modules>5</Modules>
+     <Goal>Build execution and position monitoring core</Goal>
+     <Constraint>Test thoroughly with paper trading before adding risk management</Constraint>
+   </Phase>
+
+   <Phase id="4" duration="2 weeks">
+     <Modules>6, 7</Modules>
+     <Goal>Add risk management and learning systems</Goal>
+     <Constraint>Focus on risk controls before model learning features</Constraint>
+   </Phase>
+
+   <Phase id="5" duration="2 weeks">
+     <Modules>8</Modules>
+     <Goal>Complete communication layer and full system integration</Goal>
+     <Constraint>Only integrate communication after all modules work independently</Constraint>
+   </Phase>
+ </ImplementationPhases>
+
+ <OverallConstraints>
+   <Constraint>Test each module independently before integration</Constraint>
+   <Constraint>Use existing user code wherever possible</Constraint>
+   <Constraint>Keep implementations simple and maintainable</Constraint>
+   <Constraint>Focus on working system over perfect optimization</Constraint>
+   <Constraint>Document all assumptions and design decisions</Constraint>
+   <Constraint>Validate with paper trading only - no real money</Constraint>
+ </OverallConstraints>
+
+ <SuccessMetrics>
+   <Metric>System runs continuously for 8 hours without manual intervention</Metric>
+   <Metric>Only executes trades with >= 65% confidence threshold</Metric>
+   <Metric>All trade decisions logged with complete SHAP explanations</Metric>
+   <Metric>Position monitoring handles stop losses and regime changes correctly</Metric>
+   <Metric>Risk limits never exceeded during testing period</Metric>
+   <Metric>Model performance tracking works and triggers retraining appropriately</Metric>
+ </SuccessMetrics>
+</PortfolioManagerImplementationPlan>

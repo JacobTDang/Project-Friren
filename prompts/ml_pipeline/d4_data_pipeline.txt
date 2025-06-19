@@ -1,0 +1,40 @@
+<Data_Pipeline_Prompt>
+  <Context>
+    Need to build ETL pipeline that aggregates data from existing trading system components for ML training.
+  </Context>
+
+  <DataSources>
+    <Source name="market_data">OHLCV data with technical indicators from trading_engine</Source>
+    <Source name="sentiment_data">FinBERT sentiment scores and news data</Source>
+    <Source name="regime_data">Market regime classification and transition probabilities</Source>
+    <Source name="strategy_signals">Signals from momentum, mean reversion, bollinger strategies</Source>
+    <Source name="portfolio_state">Current positions, correlations, risk metrics</Source>
+  </DataSources>
+
+  <Requirements>
+    <DataValidation>
+      <Rule>Schema validation for all incoming data</Rule>
+      <Rule>Range checks for financial data (positive prices, valid percentages)</Rule>
+      <Rule>Completeness checks (required fields present)</Rule>
+      <Rule>Statistical validation (outlier detection, distribution checks)</Rule>
+    </DataValidation>
+
+    <DataTransformation>
+      <Operation>Normalize and scale features</Operation>
+      <Operation>Handle missing values appropriately</Operation>
+      <Operation>Create feature interactions and temporal patterns</Operation>
+      <Operation>Align data from different time frequencies</Operation>
+    </DataTransformation>
+  </Requirements>
+
+  <Deliverables>
+    <Item>DataPipeline class that aggregates all sources</Item>
+    <Item>Data validation framework with financial rules</Item>
+    <Item>ETL transformations for ML-ready features</Item>
+    <Item>Error handling and data quality monitoring</Item>
+  </Deliverables>
+
+  <SuccessCriteria>
+    Can extract clean, validated feature data from all trading system components
+  </SuccessCriteria>
+</Data_Pipeline_Prompt>

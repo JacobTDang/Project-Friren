@@ -1,0 +1,39 @@
+<Infrastructure_Testing_Prompt>
+  <Context>
+    Need comprehensive testing framework for ML infrastructure components before building ML models.
+  </Context>
+
+  <TestingRequirements>
+    <UnitTests>
+      <Component>PostgreSQL handler with mocked database</Component>
+      <Component>S3 handler with mocked AWS services</Component>
+      <Component>Configuration loading with mocked environment variables</Component>
+      <Component>Data validation with synthetic test data</Component>
+    </UnitTests>
+
+    <IntegrationTests>
+      <Component>End-to-end data flow from sources to database</Component>
+      <Component>Model save/load cycle through S3</Component>
+      <Component>Configuration loading in different environments</Component>
+      <Component>Error handling and recovery scenarios</Component>
+    </IntegrationTests>
+
+    <PerformanceTests>
+      <Metric>Database query response time (&lt;100ms for feature queries)</Metric>
+      <Metric>S3 model upload/download speed</Metric>
+      <Metric>Data pipeline throughput</Metric>
+      <Metric>Connection pool utilization under load</Metric>
+    </PerformanceTests>
+  </TestingRequirements>
+
+  <Deliverables>
+    <Item>Comprehensive test suite using pytest</Item>
+    <Item>Mocking strategies for external dependencies</Item>
+    <Item>Performance benchmarks and load testing</Item>
+    <Item>CI/CD-ready test configuration</Item>
+  </Deliverables>
+
+  <SuccessCriteria>
+    All infrastructure components pass tests with &gt;90% coverage and meet performance targets
+  </SuccessCriteria>
+</Infrastructure_Testing_Prompt>

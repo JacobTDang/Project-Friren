@@ -1,0 +1,417 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<PostgreSQLAWSIntegrationPrompt>
+ <Meta>
+   <Task>Integrate PostgreSQL database with Django trading system for cross-platform deployment</Task>
+   <Environment>Development on Windows, Production on AWS EC2</Environment>
+   <Objective>Create robust database layer for portfolio management with seamless local-to-cloud transition</Objective>
+ </Meta>
+
+ <ExistingArchitecture>
+   <Django>
+     <Framework>Django 5.2.2</Framework>
+     <Project>Friren_V1</Project>
+     <Apps>
+       <App>trading_engine (backtesting, data, sentiment, regime detection)</App>
+       <App>portfolio_manager (orchestrator, strategies, risk management)</App>
+     </Apps>
+   </Django>
+
+   <CurrentSetup>
+     <Database>None currently configured</Database>
+     <DataStorage>In-memory and CSV files</DataStorage>
+     <Deployment>Local development only</Deployment>
+   </CurrentSetup>
+
+   <ExistingDataComponents>
+     <Component>StockDataFetcher (Yahoo Finance API integration)</Component>
+     <Component>EnhancedFinBERT (sentiment analysis with logging)</Component>
+     <Component>Various backtesting engines with trade logging</Component>
+     <Component>Regime detection with history tracking</Component>
+   </ExistingDataComponents>
+ </ExistingArchitecture>
+
+ <DatabaseRequirements>
+   <DataTypes>
+     <Type name="TradeData">
+       <Fields>trade_id, symbol, action, quantity, price, timestamp, strategy_used, regime_at_entry, sentiment_score, confidence_score, reasoning, shap_values</Fields>
+       <Purpose>Store all executed trades with complete audit trail</Purpose>
+     </Type>
+
+     <Type name="PortfolioPositions">
+       <Fields>position_id, symbol, quantity, entry_price, entry_date, current_value, unrealized_pnl, strategy_used, regime_at_entry, stop_loss_price, target_price</Fields>
+       <Purpose>Track current portfolio positions for monitoring</Purpose>
+     </Type>
+
+     <Type name="RegimeHistory">
+       <Fields>regime_id, timestamp, regime_type, confidence_score, indicators_used, transition_reason</Fields>
+       <Purpose>Historical record of market regime changes</Purpose>
+     </Type>
+
+     <Type name="SentimentData">
+       <Fields>sentiment_id, timestamp, symbol, news_source, headline, sentiment_score, confidence, finbert_scores</Fields>
+       <Purpose>Store sentiment analysis results and source news</Purpose>
+     </Type>
+
+     <Type name="ModelPerformance">
+       <Fields>model_id, timestamp, model_version, accuracy_score, total_trades, profitable_trades, features_used, shap_summary</Fields>
+       <Purpose>Track XGBoost model performance over time</Purpose>
+     </Type>
+
+     <Type name="SignalHistory">
+       <Fields>signal_id, timestamp, symbol, strategy_name, signal_type, confidence_score, reasoning, executed</Fields>
+       <Purpose>Log all generated signals whether executed or not</Purpose>
+     </Type>
+
+     <Type name="RiskMetrics">
+       <Fields>metric_id, timestamp, portfolio_value, total_exposure, max_position_size, correlation_risk, var_estimate</Fields>
+       <Purpose>Daily portfolio risk snapshots</Purpose>
+     </Type>
+   </DataTypes>
+
+   <Relationships>
+     <Relationship>TradeData.symbol → PortfolioPositions.symbol (one-to-many)</Relationship>
+     <Relationship>TradeData.trade_id → SignalHistory.signal_id (one-to-one)</Relationship>
+     <Relationship>RegimeHistory.timestamp → TradeData.timestamp (temporal relationship)</Relationship>
+     <Relationship>SentimentData.symbol → TradeData.symbol (many-to-many)</Relationship>
+   </Relationships>
+ </DatabaseRequirements>
+
+ <DeploymentScenarios>
+   <Scenario name="LocalDevelopment">
+     <Database>PostgreSQL on Windows (local installation)</Database>
+     <Connection>localhost:5432</Connection>
+     <Purpose>Development, testing, strategy backtesting</Purpose>
+     <DataVolume>Small to medium datasets</DataVolume>
+   </Scenario>
+
+   <Scenario name="LocalPostgreSQLRemoteAccess">
+     <Database>PostgreSQL on Windows with remote access enabled</Database>
+     <Connection>Public IP:5432 from EC2</Connection>
+     <Purpose>Temporary bridge solution</Purpose>
+     <Challenges>Dynamic IP, firewall configuration, security risks</Challenges>
+   </Scenario>
+
+   <Scenario name="CloudProduction">
+     <Database>Amazon RDS PostgreSQL or EC2-hosted PostgreSQL</Database>
+     <Connection>RDS endpoint or EC2 private IP</Connection>
+     <Purpose>Production trading system</Purpose>
+     <Benefits>High availability, automated backups, scalability</Benefits>
+   </Scenario>
+ </DeploymentScenarios>
+
+ <ImplementationRequirements>
+   <Requirement priority="CRITICAL">
+     <Rule>Create Django models for all required data types</Rule>
+     <Rule>Implement cross-platform database configuration (Windows dev, Linux prod)</Rule>
+     <Rule>Handle database connection failures gracefully</Rule>
+     <Rule>Ensure data integrity and ACID compliance for trade execution</Rule>
+   </Requirement>
+
+   <Requirement priority="HIGH">
+     <Rule>Create database migration system for schema changes</Rule>
+     <Rule>Implement database connection pooling for performance</Rule>
+     <Rule>Add comprehensive logging for all database operations</Rule>
+     <Rule>Create backup and restore procedures</Rule>
+   </Requirement>
+
+   <Requirement priority="MEDIUM">
+     <Rule>Optimize database queries for real-time trading performance</Rule>
+     <Rule>Implement database monitoring and health checks</Rule>
+     <Rule>Create data archival strategy for old records</Rule>
+     <Rule>Add database performance metrics tracking</Rule>
+   </Requirement>
+
+   <Requirement priority="LOW">
+     <Rule>Create admin interface for database management</Rule>
+     <Rule>Implement database-level security and encryption</Rule>
+     <Rule>Add automated database maintenance tasks</Rule>
+     <Rule>Create data export/import utilities</Rule>
+   </Requirement>
+ </ImplementationRequirements>
+
+ <CrossPlatformConfiguration>
+   <WindowsDevelopment>
+     <PostgreSQLInstallation>
+       <Step>Install PostgreSQL for Windows</Step>
+       <Step>Create 'trading_system' database</Step>
+       <Step>Create 'trading_user' with appropriate permissions</Step>
+       <Step>Configure local connection settings</Step>
+     </PostgreSQLInstallation>
+
+     <DjangoSettings>
+       <DatabaseConfig>
+         <Host>localhost</Host>
+         <Port>5432</Port>
+         <User>trading_user</User>
+         <Password>Environment variable</Password>
+         <SSLMode>prefer</SSLMode>
+       </DatabaseConfig>
+     </DjangoSettings>
+
+     <SecurityConfiguration>
+       <Rule>Use environment variables for database credentials</Rule>
+       <Rule>Enable SSL connections even for local development</Rule>
+       <Rule>Configure Windows Firewall if needed for remote access</Rule>
+     </SecurityConfiguration>
+   </WindowsDevelopment>
+
+   <LinuxProduction>
+     <EC2Configuration>
+       <Step>Install PostgreSQL on EC2 instance OR configure RDS connection</Step>
+       <Step>Set up database with same schema as development</Step>
+       <Step>Configure security groups for database access</Step>
+       <Step>Set production environment variables</Step>
+     </EC2Configuration>
+
+     <DjangoSettings>
+       <DatabaseConfig>
+         <Host>Environment variable (RDS endpoint or EC2 IP)</Host>
+         <Port>5432</Port>
+         <User>production_user</User>
+         <Password>Environment variable</Password>
+         <SSLMode>require</SSLMode>
+       </DatabaseConfig>
+     </DjangoSettings>
+
+     <SecurityConfiguration>
+       <Rule>Use IAM roles for RDS access where possible</Rule>
+       <Rule>Enable encryption at rest and in transit</Rule>
+       <Rule>Configure VPC security groups properly</Rule>
+       <Rule>Regular security updates and monitoring</Rule>
+     </SecurityConfiguration>
+   </LinuxProduction>
+ </CrossPlatformConfiguration>
+
+ <DataLayerIntegration>
+   <ModelManagerIntegration>
+     <Component name="TradeLogger">
+       <Purpose>Log all trades to database instead of CSV</Purpose>
+       <Integration>Replace CSV logging in backtesting engines</Integration>
+       <Methods>log_trade(), get_trade_history(), update_trade_status()</Methods>
+     </Component>
+
+     <Component name="PortfolioTracker">
+       <Purpose>Real-time portfolio position tracking</Purpose>
+       <Integration>Used by position monitoring processes</Integration>
+       <Methods>update_position(), get_current_positions(), calculate_pnl()</Methods>
+     </Component>
+
+     <Component name="RegimeLogger">
+       <Purpose>Store regime detection history</Purpose>
+       <Integration>Enhanced and Entropy regime detectors</Integration>
+       <Methods>log_regime_change(), get_regime_history(), current_regime()</Methods>
+     </Component>
+
+     <Component name="SentimentLogger">
+       <Purpose>Store FinBERT analysis results</Purpose>
+       <Integration>EnhancedFinBERT sentiment analysis</Integration>
+       <Methods>log_sentiment(), get_sentiment_history(), bulk_insert_news()</Methods>
+     </Component>
+
+     <Component name="ModelTracker">
+       <Purpose>Track XGBoost model performance</Purpose>
+       <Integration>Model maintainer and retraining pipeline</Integration>
+       <Methods>log_model_performance(), track_predictions(), get_model_metrics()</Methods>
+     </Component>
+   </ModelManagerIntegration>
+
+   <QueryOptimization>
+     <IndexStrategy>
+       <Index>timestamp columns for time-series queries</Index>
+       <Index>symbol columns for stock-specific lookups</Index>
+       <Index>composite indexes for common query patterns</Index>
+     </IndexStrategy>
+
+     <ConnectionPooling>
+       <Rule>Use Django database connection pooling</Rule>
+       <Rule>Configure appropriate pool sizes for concurrent processes</Rule>
+       <Rule>Handle connection timeouts and retries</Rule>
+     </ConnectionPooling>
+
+     <QueryPatterns>
+       <Pattern>Bulk inserts for high-frequency data (sentiment, signals)</Pattern>
+       <Pattern>Optimized portfolio position queries</Pattern>
+       <Pattern>Efficient regime and performance history retrieval</Pattern>
+     </QueryPatterns>
+   </QueryOptimization>
+ </DataLayerIntegration>
+
+ <MigrationStrategy>
+   <Phase name="Setup">
+     <Step>Create Django models for all data types</Step>
+     <Step>Set up cross-platform database configuration</Step>
+     <Step>Create initial database migrations</Step>
+     <Step>Test database connectivity on both platforms</Step>
+   </Phase>
+
+   <Phase name="Integration">
+     <Step>Replace CSV logging with database operations</Step>
+     <Step>Update backtesting engines to use database</Step>
+     <Step>Integrate sentiment and regime detection logging</Step>
+     <Step>Test data persistence and retrieval</Step>
+   </Phase>
+
+   <Phase name="Production">
+     <Step>Set up production database (RDS or EC2-hosted)</Step>
+     <Step>Migrate development data to production</Step>
+     <Step>Configure production security and monitoring</Step>
+     <Step>Implement backup and disaster recovery</Step>
+   </Phase>
+ </MigrationStrategy>
+
+ <ErrorHandling>
+   <DatabaseConnectionFailures>
+     <Rule>Implement connection retry logic with exponential backoff</Rule>
+     <Rule>Graceful degradation to in-memory storage if database unavailable</Rule>
+     <Rule>Comprehensive logging of connection issues</Rule>
+     <Rule>Automatic reconnection attempts</Rule>
+   </DatabaseConnectionFailures>
+
+   <DataIntegrityIssues>
+     <Rule>Use database transactions for critical operations</Rule>
+     <Rule>Implement data validation before database insertion</Rule>
+     <Rule>Handle duplicate key violations gracefully</Rule>
+     <Rule>Rollback mechanisms for failed trade executions</Rule>
+   </DataIntegrityIssues>
+
+   <PerformanceIssues>
+     <Rule>Query timeout handling</Rule>
+     <Rule>Bulk operation optimization</Rule>
+     <Rule>Database connection monitoring</Rule>
+     <Rule>Automatic index maintenance</Rule>
+   </PerformanceIssues>
+ </ErrorHandling>
+
+ <SecurityRequirements>
+   <ConnectionSecurity>
+     <Rule>Always use SSL/TLS for database connections</Rule>
+     <Rule>Store database credentials in environment variables only</Rule>
+     <Rule>Use principle of least privilege for database users</Rule>
+     <Rule>Regular password rotation for production</Rule>
+   </ConnectionSecurity>
+
+   <DataProtection>
+     <Rule>Encrypt sensitive data at rest</Rule>
+     <Rule>Audit logging for all database access</Rule>
+     <Rule>Regular security updates for PostgreSQL</Rule>
+     <Rule>Backup encryption and secure storage</Rule>
+   </DataProtection>
+
+   <AccessControl>
+     <Rule>Separate database users for development and production</Rule>
+     <Rule>Network-level security (VPC, security groups)</Rule>
+     <Rule>Database-level permissions and role management</Rule>
+     <Rule>Regular access review and cleanup</Rule>
+   </AccessControl>
+ </SecurityRequirements>
+
+ <MonitoringAndMaintenance>
+   <PerformanceMonitoring>
+     <Metric>Database connection pool utilization</Metric>
+     <Metric>Query execution times</Metric>
+     <Metric>Database storage usage</Metric>
+     <Metric>Transaction throughput</Metric>
+   </PerformanceMonitoring>
+
+   <HealthChecks>
+     <Check>Database connectivity verification</Check>
+     <Check>Schema integrity validation</Check>
+     <Check>Data consistency checks</Check>
+     <Check>Backup completion verification</Check>
+   </HealthChecks>
+
+   <MaintenanceTasks>
+     <Task>Regular database vacuuming and analysis</Task>
+     <Task>Index maintenance and optimization</Task>
+     <Task>Log rotation and cleanup</Task>
+     <Task>Archive old data to reduce database size</Task>
+   </MaintenanceTasks>
+ </MonitoringAndMaintenance>
+
+ <ImplementationConstraints>
+   <Constraint type="COMPATIBILITY">
+     <Rule>Database layer must work identically on Windows and Linux</Rule>
+     <Rule>No platform-specific database features</Rule>
+     <Rule>Consistent data types and constraints across platforms</Rule>
+   </Constraint>
+
+   <Constraint type="PERFORMANCE">
+     <Rule>Database operations must not significantly slow down trading execution</Rule>
+     <Rule>Bulk operations for high-frequency data insertion</Rule>
+     <Rule>Optimize queries for real-time portfolio monitoring</Rule>
+   </Constraint>
+
+   <Constraint type="RELIABILITY">
+     <Rule>Database failures must not crash the trading system</Rule>
+     <Rule>Implement fallback mechanisms for critical operations</Rule>
+     <Rule>Ensure data consistency during system failures</Rule>
+   </Constraint>
+
+   <Constraint type="MAINTAINABILITY">
+     <Rule>Use Django ORM for all database operations</Rule>
+     <Rule>Clear separation between data models and business logic</Rule>
+     <Rule>Comprehensive documentation for database schema</Rule>
+   </Constraint>
+ </ImplementationConstraints>
+
+ <DeliverableFiles>
+   <DjangoModels>
+     <File>Friren_V1/trading_engine/models.py</File>
+     <File>Friren_V1/portfolio_manager/models.py</File>
+   </DjangoModels>
+
+   <DatabaseConfiguration>
+     <File>Friren_V1/Friren_V1/settings.py (updated database settings)</File>
+     <File>Friren_V1/Friren_V1/database_config.py (cross-platform config)</File>
+   </DatabaseConfiguration>
+
+   <DataAccessLayer>
+     <File>Friren_V1/trading_engine/data/database_manager.py</File>
+     <File>Friren_V1/portfolio_manager/data_logger.py</File>
+   </DataAccessLayer>
+
+   <MigrationFiles>
+     <File>Generated Django migration files</File>
+     <File>Initial data setup scripts</File>
+   </MigrationFiles>
+
+   <Documentation>
+     <File>Database schema documentation</File>
+     <File>Deployment instructions for both platforms</File>
+     <File>Troubleshooting guide for common database issues</File>
+   </Documentation>
+ </DeliverableFiles>
+
+ <TestingRequirements>
+   <UnitTests>
+     <Test>Django model validation and constraints</Test>
+     <Test>Database connection handling</Test>
+     <Test>Data insertion and retrieval operations</Test>
+     <Test>Error handling for database failures</Test>
+   </UnitTests>
+
+   <IntegrationTests>
+     <Test>End-to-end trade logging workflow</Test>
+     <Test>Portfolio position tracking accuracy</Test>
+     <Test>Cross-platform database compatibility</Test>
+     <Test>Performance under concurrent access</Test>
+   </IntegrationTests>
+
+   <LoadTests>
+     <Test>High-frequency data insertion performance</Test>
+     <Test>Multiple concurrent database connections</Test>
+     <Test>Database response time under load</Test>
+     <Test>Memory usage during bulk operations</Test>
+   </LoadTests>
+ </TestingRequirements>
+
+ <SuccessCriteria>
+   <Criterion>Database schema supports all trading system data requirements</Criterion>
+   <Criterion>Seamless operation on both Windows development and Linux production</Criterion>
+   <Criterion>Database operations do not impact trading system performance</Criterion>
+   <Criterion>Complete audit trail for all trades and decisions</Criterion>
+   <Criterion>Robust error handling and recovery mechanisms</Criterion>
+   <Criterion>Secure and encrypted data storage and transmission</Criterion>
+   <Criterion>Easy migration path from development to production</Criterion>
+ </SuccessCriteria>
+</PostgreSQLAWSIntegrationPrompt>

@@ -1,0 +1,45 @@
+<Strategy_Evolution_Prompt>
+  <Context>
+    Build system that suggests improvements to existing trading strategies based on ML insights.
+  </Context>
+
+  <EvolutionCapabilities>
+    <Capability name="parameter_optimization">
+      <Purpose>Suggest better parameters for existing strategies</Purpose>
+      <Method>ML-guided parameter search based on performance data</Method>
+    </Capability>
+
+    <Capability name="strategy_weighting">
+      <Purpose>Dynamic allocation between strategies based on regime and performance</Purpose>
+      <Method>Multi-armed bandit approach with context</Method>
+    </Capability>
+
+    <Capability name="new_signal_discovery">
+      <Purpose>Identify potential new strategy signals</Purpose>
+      <Method>Feature importance analysis and pattern recognition</Method>
+    </Capability>
+
+    <Capability name="risk_optimization">
+      <Purpose>Suggest risk management improvements</Purpose>
+      <Method>Portfolio optimization based on predicted correlations</Method>
+    </Capability>
+  </EvolutionCapabilities>
+
+  <Implementation>
+    <Component name="strategy_analyzer">Analyze historical performance of each strategy</Component>
+    <Component name="improvement_generator">Generate specific actionable recommendations</Component>
+    <Component name="backtesting_validator">Test suggested improvements on historical data</Component>
+    <Component name="gradual_deployment">Gradually implement successful improvements</Component>
+  </Implementation>
+
+  <Deliverables>
+    <Item>StrategyEvolution class with improvement suggestions</Item>
+    <Item>Backtesting framework for testing improvements</Item>
+    <Item>Gradual deployment system for new strategies</Item>
+    <Item>Performance tracking for evolved strategies</Item>
+  </Deliverables>
+
+  <SuccessCriteria>
+    Generates actionable strategy improvements that increase portfolio Sharpe ratio by 10%+
+  </SuccessCriteria>
+</Strategy_Evolution_Prompt>
