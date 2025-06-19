@@ -1,7 +1,72 @@
-﻿.env
+﻿# Environment Variables - NEVER COMMIT
+.env
 *.env
 .env.local
+.env.production
+*.key
+*_keys.py
+api_keys.py
+
+# Test Files - DO NOT COMMIT
+test_*.py
+*_test.py
+demo_*.py
+comprehensive_*.py
+enhanced_*.py
+priority_queue_demo.py
+simple_paper_trading_test.py
+validate_test_setup.py
+final_system_status.py
+system_cycle_demo.py
+queue_based_*.py
+
+# Log Files
+*.log
+logs/
+Friren_V1/logs/
+
+# Reports and Test Outputs
+*.html
+*.json
+e2e_test_report_*
+demo_smoke_results.*
+comprehensive_test_report.json
+comprehensive_e2e_test.log
+e2e_test_runner.log
+
+# Scripts and Keys
+load_keys.ps1
+ec2_load_keys.sh
+commit_*.ps1
+emergency_cleanup.ps1
+
+# Documentation and Notes
+notes_*.txt
+directory_architecture.txt
+project_changes_summary.txt
+~bashrc
+
+# Cache and IDE
 __pycache__/
 *.pyc
-logs/
+*.pyo
+.cursor/
+.vscode/
+.idea/
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# Virtual Environment
 venv/
+env/
+
+# Prompts Directory
+prompts/
+
+# Ignore ALL root-level files except core engine
+/*
+!/Friren_V1/
+!/.gitignore
+!/README.md
