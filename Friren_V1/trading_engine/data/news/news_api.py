@@ -1,7 +1,7 @@
 """
-NewsAPI Data Collector - Simplified
+NewsAPI Data Collector - Cleaned
 
-Clean NewsAPI integration for professional financial news.
+Professional financial news from NewsAPI.
 Sources: CNBC, Reuters, Bloomberg, Financial Times, Business Insider.
 """
 
@@ -12,12 +12,16 @@ from datetime import datetime, timedelta
 from typing import List, Optional, Dict
 import logging
 
-from base import NewsDataSource, NewsArticle
-from yahoo_news import SymbolExtractor
+try:
+    from .base import NewsDataSource, NewsArticle
+    from .yahoo_news import SymbolExtractor
+except ImportError:
+    from base import NewsDataSource, NewsArticle
+    from yahoo_news import SymbolExtractor
 
 
 class NewsAPIData(NewsDataSource):
-    """Simple NewsAPI collector optimized for decision engine"""
+    """Clean NewsAPI collector optimized for trading decision engine"""
 
     def __init__(self, api_key: Optional[str] = None):
         super().__init__("NewsAPI")
@@ -32,73 +36,177 @@ class NewsAPIData(NewsDataSource):
         self.max_daily_requests = 500  # Free tier limit
         self.logger = logging.getLogger(f"{__name__}.NewsAPIData")
 
+        # Rate limiting and error tracking
+        self.rate_limited = False
+        self.rate_limit_detected_at = None
+        self.rate_limit_reset_time = None
+        self.consecutive_failures = 0
+        self.max_consecutive_failures = 3
+
         self.symbol_extractor = SymbolExtractor()
+
+        # Professional financial sources
+        self.premium_sources = "cnbc,reuters,bloomberg,financial-times,business-insider,marketwatch,wsj"
+
+    def _is_api_available(self) -> bool:
+        """Check if API is available and not rate limited"""
+        if self.rate_limited:
+            # Check if enough time has passed since rate limit was detected
+            if self.rate_limit_reset_time and datetime.now() < self.rate_limit_reset_time:
+                return False
+            else:
+                # Reset rate limit status after 1 hour
+                if self.rate_limit_detected_at and (datetime.now() - self.rate_limit_detected_at).total_seconds() > 3600:
+                    self.logger.info("Resetting NewsAPI rate limit status after 1 hour")
+                    self.rate_limited = False
+                    self.consecutive_failures = 0
+                    return True
+                return False
+
+        if self.daily_requests >= self.max_daily_requests:
+            self.logger.warning("Daily NewsAPI limit reached")
+            return False
+
+        return True
+
+    def _handle_api_error(self, response: Optional[requests.Response] = None, error: Optional[Exception] = None) -> bool:
+        """Handle API errors and rate limiting. Returns True if should stop making requests"""
+        if response is not None:
+            if response.status_code == 429:
+                self.logger.error("NewsAPI rate limit exceeded (429). Disabling API calls.")
+                self.rate_limited = True
+                self.rate_limit_detected_at = datetime.now()
+
+                # Try to get reset time from headers
+                reset_header = response.headers.get('X-RateLimit-Reset')
+                if reset_header:
+                    try:
+                        reset_timestamp = int(reset_header)
+                        self.rate_limit_reset_time = datetime.fromtimestamp(reset_timestamp)
+                        self.logger.info(f"Rate limit resets at: {self.rate_limit_reset_time}")
+                    except ValueError:
+                        # Default to 1 hour if we can't parse reset time
+                        self.rate_limit_reset_time = datetime.now() + timedelta(hours=1)
+                else:
+                    # Default to 1 hour reset time
+                    self.rate_limit_reset_time = datetime.now() + timedelta(hours=1)
+
+                return True
+
+            elif response.status_code == 401:
+                self.logger.error("NewsAPI authentication failed (401). Check API key.")
+                self.rate_limited = True
+                return True
+
+            elif response.status_code == 403:
+                self.logger.error("NewsAPI access forbidden (403). Account may be suspended.")
+                self.rate_limited = True
+                return True
+
+        # Handle consecutive failures
+        self.consecutive_failures += 1
+        if self.consecutive_failures >= self.max_consecutive_failures:
+            self.logger.error(f"NewsAPI: {self.consecutive_failures} consecutive failures. Temporarily disabling.")
+            self.rate_limited = True
+            self.rate_limit_detected_at = datetime.now()
+            return True
+
+        return False
+
+    def _make_api_request(self, url: str, params: Dict) -> Optional[Dict]:
+        """Make API request with comprehensive error handling"""
+        if not self._is_api_available():
+            return None
+
+        try:
+            response = self.session.get(url, params=params, timeout=30)
+
+            # Check for rate limiting or other errors
+            if self._handle_api_error(response=response):
+                return None
+
+            response.raise_for_status()
+            self.daily_requests += 1
+
+            # Reset consecutive failures on success
+            self.consecutive_failures = 0
+
+            data = response.json()
+            if data.get('status') != 'ok':
+                self.logger.error(f"NewsAPI error: {data.get('message', 'Unknown error')}")
+                self.consecutive_failures += 1
+                return None
+
+            return data
+
+        except requests.exceptions.HTTPError as e:
+            self.logger.error(f"NewsAPI HTTP error: {e}")
+            self._handle_api_error(response=getattr(e, 'response', None), error=e)
+            return None
+        except Exception as e:
+            self.logger.error(f"NewsAPI request failed: {e}")
+            self._handle_api_error(error=e)
+            return None
 
     def collect_news(self, hours_back: int = 24, max_articles: int = 50) -> List[NewsArticle]:
         """Collect general financial news from NewsAPI"""
-        return self._fetch_news_with_strategies(hours_back, max_articles)
+        return self._fetch_news_efficiently(hours_back, max_articles)
 
     def get_symbol_news(self, symbol: str, hours_back: int = 24, max_articles: int = 20) -> List[NewsArticle]:
-        """Get news specifically for a symbol - CRITICAL for decision engine"""
+        """Get news for a specific symbol - CRITICAL for decision engine"""
         try:
-            self.logger.info(f"Fetching NewsAPI articles for {symbol}")
+            self.logger.info(f"Fetching NewsAPI news for {symbol}")
 
-            # Search for symbol-specific news
-            symbol_articles = self._search_symbol_news(symbol, hours_back, max_articles)
+            # Try direct symbol search first
+            articles = self._search_symbol_direct(symbol, hours_back, max_articles)
 
-            # Also get general news and filter for symbol mentions
-            general_articles = self._fetch_news_with_strategies(hours_back, max_articles * 2)
+            if not articles:
+                # Fallback: filter from general financial news
+                general_articles = self._fetch_news_efficiently(hours_back, 50)
+                articles = [
+                    article for article in general_articles
+                    if (symbol.upper() in article.symbols_mentioned or
+                        symbol.lower() in article.title.lower())
+                ][:max_articles]
 
-            # Filter general articles for symbol mentions
-            symbol_filtered = [
-                article for article in general_articles
-                if (symbol.upper() in article.symbols_mentioned or
-                    symbol.lower() in article.title.lower())
-            ]
-
-            # Combine and deduplicate
-            all_articles = symbol_articles + symbol_filtered
-            unique_articles = self._remove_duplicates(all_articles)
-
-            self.logger.info(f"Found {len(unique_articles)} NewsAPI articles for {symbol}")
-            return unique_articles[:max_articles]
+            self.logger.info(f"Found {len(articles)} NewsAPI articles for {symbol}")
+            return articles
 
         except Exception as e:
             self.logger.error(f"Error getting NewsAPI news for {symbol}: {e}")
             return []
 
-    def get_watchlist_news(self, symbols: List[str], hours_back: int = 24, max_articles_per_symbol: int = 10) -> Dict[str, List[NewsArticle]]:
+    def get_watchlist_news(self, symbols: List[str], hours_back: int = 24,
+                          max_articles_per_symbol: int = 10) -> Dict[str, List[NewsArticle]]:
         """Get news for multiple symbols (watchlist) - CRITICAL for decision engine"""
-        watchlist_news = {}
+        watchlist_news = {symbol: [] for symbol in symbols}
 
-        # Get general news once and filter for all symbols
         try:
-            general_articles = self._fetch_news_with_strategies(hours_back, 100)
-            self.logger.info(f"Fetched {len(general_articles)} general NewsAPI articles for watchlist filtering")
+            self.logger.info(f"Collecting NewsAPI news for {len(symbols)} watchlist symbols")
 
+            # Strategy: Get general financial news once and distribute to symbols
+            general_articles = self._fetch_news_efficiently(hours_back, 100)
+            self.logger.info(f"Fetched {len(general_articles)} general NewsAPI articles for filtering")
+
+            # Distribute articles to relevant symbols
             for symbol in symbols:
                 try:
-                    # Filter general articles for this symbol
                     symbol_articles = [
                         article for article in general_articles
                         if (symbol.upper() in article.symbols_mentioned or
                             symbol.lower() in article.title.lower())
                     ]
 
-                    # Also try symbol-specific search if we have API calls left
-                    if self.daily_requests < self.max_daily_requests - 10:  # Leave some buffer
-                        specific_articles = self._search_symbol_news(symbol, hours_back, max_articles_per_symbol)
-                        symbol_articles.extend(specific_articles)
+                    # Add symbol to symbols_mentioned if found in title
+                    for article in symbol_articles:
+                        if symbol.upper() not in article.symbols_mentioned:
+                            article.symbols_mentioned.append(symbol.upper())
 
-                    # Deduplicate and limit
-                    unique_articles = self._remove_duplicates(symbol_articles)
-                    watchlist_news[symbol] = unique_articles[:max_articles_per_symbol]
-
-                    # Rate limiting between symbols
-                    time.sleep(0.5)
+                    # Limit per symbol
+                    watchlist_news[symbol] = symbol_articles[:max_articles_per_symbol]
 
                 except Exception as e:
-                    self.logger.error(f"Error getting NewsAPI watchlist news for {symbol}: {e}")
+                    self.logger.error(f"Error processing NewsAPI watchlist for {symbol}: {e}")
                     watchlist_news[symbol] = []
 
             total_articles = sum(len(articles) for articles in watchlist_news.values())
@@ -106,8 +214,6 @@ class NewsAPIData(NewsDataSource):
 
         except Exception as e:
             self.logger.error(f"Error in NewsAPI watchlist collection: {e}")
-            # Return empty results for all symbols
-            watchlist_news = {symbol: [] for symbol in symbols}
 
         return watchlist_news
 
@@ -130,79 +236,32 @@ class NewsAPIData(NewsDataSource):
                 return data.get('status') == 'ok'
             return False
 
-        except Exception:
+        except Exception as e:
+            self.logger.error(f"NewsAPI connection test failed: {e}")
             return False
 
-    def _fetch_news_with_strategies(self, hours_back: int, max_articles: int) -> List[NewsArticle]:
-        """Fetch news using multiple search strategies"""
-        if self.daily_requests >= self.max_daily_requests:
-            self.logger.warning("Daily NewsAPI limit reached")
+    def _fetch_news_efficiently(self, hours_back: int, max_articles: int) -> List[NewsArticle]:
+        """Fetch financial news using optimized strategy"""
+        if not self._is_api_available():
+            self.logger.warning("NewsAPI not available due to rate limiting")
             return []
 
-        # Try different search strategies
-        strategies = [
-            {"q": "stock market", "sources": None},
-            {"q": "earnings", "sources": None},
-            {"q": "*", "sources": "cnbc,reuters,bloomberg,financial-times,business-insider"},
-            {"q": "finance", "sources": None}
-        ]
-
-        all_articles = []
+        # Single optimized strategy: Premium sources with financial keywords
         cutoff_time = datetime.now() - timedelta(hours=hours_back)
 
-        for i, strategy in enumerate(strategies):
-            if self.daily_requests >= self.max_daily_requests:
-                break
-
-            try:
-                articles = self._execute_search_strategy(strategy, max_articles, cutoff_time)
-                if articles:
-                    all_articles.extend(articles)
-                    self.logger.info(f"NewsAPI strategy {i+1}: {len(articles)} articles")
-
-                    if len(all_articles) >= max_articles:
-                        break
-
-            except Exception as e:
-                self.logger.error(f"NewsAPI strategy {i+1} failed: {e}")
-                continue
-
-        # Fallback to headlines if no articles found
-        if not all_articles and self.daily_requests < self.max_daily_requests:
-            try:
-                headlines = self._get_business_headlines(max_articles, cutoff_time)
-                all_articles.extend(headlines)
-                self.logger.info(f"NewsAPI fallback headlines: {len(headlines)} articles")
-            except Exception as e:
-                self.logger.error(f"NewsAPI headlines fallback failed: {e}")
-
-        unique_articles = self._remove_duplicates(all_articles)
-        return unique_articles[:max_articles]
-
-    def _execute_search_strategy(self, strategy: Dict, max_articles: int, cutoff_time: datetime) -> List[NewsArticle]:
-        """Execute a single search strategy"""
         url = f"{self.base_url}/everything"
         params = {
+            'sources': self.premium_sources,
             'language': 'en',
             'sortBy': 'publishedAt',
-            'pageSize': min(50, max_articles),
+            'pageSize': min(100, max_articles),
             'apiKey': self.api_key,
             'from': cutoff_time.isoformat()
         }
 
-        if strategy["sources"]:
-            params['sources'] = strategy["sources"]
-        else:
-            params['q'] = strategy["q"]
-
-        response = self.session.get(url, params=params, timeout=30)
-        response.raise_for_status()
-        self.daily_requests += 1
-
-        data = response.json()
-        if data['status'] != 'ok':
-            self.logger.error(f"NewsAPI error: {data.get('message', 'Unknown error')}")
-            return []
+        data = self._make_api_request(url, params)
+        if not data:
+            return self._fallback_to_headlines(max_articles, cutoff_time)
 
         articles = []
         for article_data in data.get('articles', []):
@@ -214,51 +273,51 @@ class NewsAPIData(NewsDataSource):
                 self.logger.debug(f"Error parsing NewsAPI article: {e}")
                 continue
 
+        self.logger.info(f"NewsAPI premium sources: {len(articles)} articles")
+        return articles[:max_articles]
+
+    def _search_symbol_direct(self, symbol: str, hours_back: int, max_articles: int) -> List[NewsArticle]:
+        """Direct search for symbol-specific news"""
+        if not self._is_api_available():
+            return []
+
+        cutoff_time = datetime.now() - timedelta(hours=hours_back)
+
+        url = f"{self.base_url}/everything"
+        params = {
+            'q': f'"{symbol}" OR "{symbol.lower()}"',
+            'sources': self.premium_sources,
+            'language': 'en',
+            'sortBy': 'publishedAt',
+            'pageSize': min(50, max_articles * 2),
+            'apiKey': self.api_key,
+            'from': cutoff_time.isoformat()
+        }
+
+        data = self._make_api_request(url, params)
+        if not data:
+            return []
+
+        articles = []
+        for article_data in data.get('articles', []):
+            try:
+                article = self._parse_article(article_data)
+                if article:
+                    # Ensure symbol is in symbols_mentioned
+                    if symbol.upper() not in article.symbols_mentioned:
+                        article.symbols_mentioned.append(symbol.upper())
+                    articles.append(article)
+            except Exception:
+                continue
+
+        self.logger.info(f"NewsAPI direct search for {symbol}: {len(articles)} articles")
         return articles
 
-    def _search_symbol_news(self, symbol: str, hours_back: int, max_articles: int) -> List[NewsArticle]:
-        """Search for news specific to a symbol"""
-        if self.daily_requests >= self.max_daily_requests:
+    def _fallback_to_headlines(self, max_articles: int, cutoff_time: datetime) -> List[NewsArticle]:
+        """Fallback to business headlines if main strategy fails"""
+        if not self._is_api_available():
             return []
 
-        try:
-            cutoff_time = datetime.now() - timedelta(hours=hours_back)
-
-            url = f"{self.base_url}/everything"
-            params = {
-                'q': f'"{symbol}" OR "{symbol.lower()}"',
-                'language': 'en',
-                'sortBy': 'publishedAt',
-                'pageSize': min(30, max_articles),
-                'apiKey': self.api_key,
-                'from': cutoff_time.isoformat()
-            }
-
-            response = self.session.get(url, params=params, timeout=30)
-            response.raise_for_status()
-            self.daily_requests += 1
-
-            data = response.json()
-            if data['status'] != 'ok':
-                return []
-
-            articles = []
-            for article_data in data.get('articles', []):
-                try:
-                    article = self._parse_article(article_data)
-                    if article and symbol.upper() in article.symbols_mentioned:
-                        articles.append(article)
-                except Exception:
-                    continue
-
-            return articles
-
-        except Exception as e:
-            self.logger.error(f"Error searching NewsAPI for {symbol}: {e}")
-            return []
-
-    def _get_business_headlines(self, max_articles: int, cutoff_time: datetime) -> List[NewsArticle]:
-        """Get top business headlines as fallback"""
         url = f"{self.base_url}/top-headlines"
         params = {
             'category': 'business',
@@ -268,12 +327,8 @@ class NewsAPIData(NewsDataSource):
             'apiKey': self.api_key
         }
 
-        response = self.session.get(url, params=params, timeout=30)
-        response.raise_for_status()
-        self.daily_requests += 1
-
-        data = response.json()
-        if data['status'] != 'ok':
+        data = self._make_api_request(url, params)
+        if not data:
             return []
 
         articles = []
@@ -285,10 +340,11 @@ class NewsAPIData(NewsDataSource):
             except Exception:
                 continue
 
+        self.logger.info(f"NewsAPI headlines fallback: {len(articles)} articles")
         return articles
 
     def _parse_article(self, article_data: Dict) -> Optional[NewsArticle]:
-        """Parse NewsAPI article data into NewsArticle"""
+        """Parse NewsAPI article data into NewsArticle format"""
         title = article_data.get('title', '').strip()
 
         if not title or title == '[Removed]' or len(title) < 10:
@@ -305,7 +361,7 @@ class NewsAPIData(NewsDataSource):
 
         # Get source info
         source_info = article_data.get('source', {})
-        source_name = source_info.get('name', 'Unknown')
+        source_name = source_info.get('name', 'NewsAPI')
 
         # Get description/content
         description = article_data.get('description', '') or ''
@@ -315,7 +371,8 @@ class NewsAPIData(NewsDataSource):
         full_text = f"{title} {description}"
         symbols = self.symbol_extractor.extract_symbols(full_text)
 
-        return NewsArticle(
+        # Create article
+        article = NewsArticle(
             title=title,
             content=content,
             source=f"NewsAPI-{source_name}",
@@ -325,13 +382,21 @@ class NewsAPIData(NewsDataSource):
             author=article_data.get('author')
         )
 
+        # Note: NewsAPI-specific metadata would include:
+        # source_id, source_name, url_to_image, category
+        # But these are not stored in the base NewsArticle class
+
+        return article
+
     def _remove_duplicates(self, articles: List[NewsArticle]) -> List[NewsArticle]:
-        """Remove duplicate articles"""
+        """Remove duplicate articles based on title similarity"""
         unique_articles = []
         seen_titles = set()
 
         for article in articles:
-            title_key = article.title[:30].lower().replace(' ', '')
+            # Create a normalized title key for comparison
+            title_key = article.title[:50].lower().replace(' ', '').replace('-', '').replace('.', '')
+
             if title_key not in seen_titles:
                 seen_titles.add(title_key)
                 unique_articles.append(article)
@@ -345,3 +410,8 @@ class NewsAPIData(NewsDataSource):
             'requests_remaining': self.max_daily_requests - self.daily_requests,
             'daily_limit': self.max_daily_requests
         }
+
+    def get_trending_sources(self) -> List[str]:
+        """Get list of premium financial sources used"""
+        return self.premium_sources.split(',')
+

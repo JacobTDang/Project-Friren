@@ -37,7 +37,94 @@ class MarketauxNews(NewsDataSource):
         self.max_daily_requests = 100  # Free tier limit
         self.logger = logging.getLogger(f"{__name__}.MarketauxNews")
 
+        # Rate limiting and error tracking
+        self.rate_limited = False
+        self.rate_limit_detected_at = None
+        self.consecutive_failures = 0
+        self.max_consecutive_failures = 3
+
         self.symbol_extractor = SymbolExtractor()
+
+    def _is_api_available(self) -> bool:
+        """Check if API is available and not rate limited"""
+        if self.rate_limited:
+            # Reset rate limit status after 1 hour
+            if self.rate_limit_detected_at and (datetime.now() - self.rate_limit_detected_at).total_seconds() > 3600:
+                self.logger.info("Resetting Marketaux rate limit status after 1 hour")
+                self.rate_limited = False
+                self.consecutive_failures = 0
+                return True
+            return False
+
+        if self.daily_requests >= self.max_daily_requests:
+            self.logger.warning("Daily Marketaux limit reached")
+            return False
+
+        return True
+
+    def _handle_api_error(self, response: Optional[requests.Response] = None, error: Optional[Exception] = None) -> bool:
+        """Handle API errors and rate limiting. Returns True if should stop making requests"""
+        if response is not None:
+            if response.status_code == 429:
+                self.logger.error("Marketaux rate limit exceeded (429). Disabling API calls.")
+                self.rate_limited = True
+                self.rate_limit_detected_at = datetime.now()
+                return True
+
+            elif response.status_code == 401:
+                self.logger.error("Marketaux authentication failed (401). Check API key.")
+                self.rate_limited = True
+                return True
+
+            elif response.status_code == 402:
+                self.logger.error("Marketaux payment required (402). Account may need upgrade.")
+                self.rate_limited = True
+                return True
+
+            elif response.status_code == 403:
+                self.logger.error("Marketaux access forbidden (403). Account may be suspended.")
+                self.rate_limited = True
+                return True
+
+        # Handle consecutive failures
+        self.consecutive_failures += 1
+        if self.consecutive_failures >= self.max_consecutive_failures:
+            self.logger.error(f"Marketaux: {self.consecutive_failures} consecutive failures. Temporarily disabling.")
+            self.rate_limited = True
+            self.rate_limit_detected_at = datetime.now()
+            return True
+
+        return False
+
+    def _make_api_request(self, url: str, params: Dict) -> Optional[Dict]:
+        """Make API request with comprehensive error handling"""
+        if not self._is_api_available():
+            return None
+
+        try:
+            response = self.session.get(url, params=params, timeout=30)
+
+            # Check for rate limiting or other errors
+            if self._handle_api_error(response=response):
+                return None
+
+            response.raise_for_status()
+            self.daily_requests += 1
+
+            # Reset consecutive failures on success
+            self.consecutive_failures = 0
+
+            data = response.json()
+            return data
+
+        except requests.exceptions.HTTPError as e:
+            self.logger.error(f"Marketaux HTTP error: {e}")
+            self._handle_api_error(response=getattr(e, 'response', None), error=e)
+            return None
+        except Exception as e:
+            self.logger.error(f"Marketaux request failed: {e}")
+            self._handle_api_error(error=e)
+            return None
 
     def collect_news(self, hours_back: int = 24, max_articles: int = 50) -> List[NewsArticle]:
         """Collect general financial news from Marketaux"""
@@ -59,28 +146,26 @@ class MarketauxNews(NewsDataSource):
                 'sort': 'published_desc'
             }
 
-            response = self.session.get(url, params=params, timeout=30)
-            response.raise_for_status()
-            self.daily_requests += 1
+            data = self._make_api_request(url, params)
+            if data:
+                articles = []
 
-            data = response.json()
-            articles = []
+                for article_data in data.get('data', []):
+                    try:
+                        article = self._parse_marketaux_article(article_data)
+                        if article:
+                            articles.append(article)
+                    except Exception as e:
+                        self.logger.debug(f"Error parsing Marketaux article: {e}")
+                        continue
 
-            for article_data in data.get('data', []):
-                try:
-                    article = self._parse_marketaux_article(article_data)
-                    if article:
-                        articles.append(article)
-                except Exception as e:
-                    self.logger.debug(f"Error parsing Marketaux article: {e}")
-                    continue
-
-            self.logger.info(f"Collected {len(articles)} articles from Marketaux")
-            return articles[:max_articles]
+                self.logger.info(f"Collected {len(articles)} articles from Marketaux")
+                return articles[:max_articles]
 
         except Exception as e:
             self.logger.error(f"Error collecting Marketaux news: {e}")
-            return []
+
+        return []
 
     def get_symbol_news(self, symbol: str, hours_back: int = 24, max_articles: int = 20) -> List[NewsArticle]:
         """Get news specifically for a symbol from Marketaux - KEY for decision engine"""
@@ -103,27 +188,24 @@ class MarketauxNews(NewsDataSource):
                 'sort': 'published_desc'
             }
 
-            response = self.session.get(url, params=params, timeout=30)
-            response.raise_for_status()
-            self.daily_requests += 1
+            data = self._make_api_request(url, params)
+            if data:
+                articles = []
 
-            data = response.json()
-            articles = []
+                for article_data in data.get('data', []):
+                    try:
+                        article = self._parse_marketaux_article(article_data)
+                        if article:
+                            # Ensure the target symbol is in symbols_mentioned
+                            if symbol.upper() not in article.symbols_mentioned:
+                                article.symbols_mentioned.append(symbol.upper())
+                            articles.append(article)
+                    except Exception as e:
+                        self.logger.debug(f"Error parsing Marketaux article for {symbol}: {e}")
+                        continue
 
-            for article_data in data.get('data', []):
-                try:
-                    article = self._parse_marketaux_article(article_data)
-                    if article:
-                        # Ensure the target symbol is in symbols_mentioned
-                        if symbol.upper() not in article.symbols_mentioned:
-                            article.symbols_mentioned.append(symbol.upper())
-                        articles.append(article)
-                except Exception as e:
-                    self.logger.debug(f"Error parsing Marketaux article for {symbol}: {e}")
-                    continue
-
-            self.logger.info(f"Found {len(articles)} Marketaux articles for {symbol}")
-            return articles[:max_articles]
+                self.logger.info(f"Found {len(articles)} Marketaux articles for {symbol}")
+                return articles[:max_articles]
 
         except Exception as e:
             self.logger.error(f"Error getting Marketaux news for {symbol}: {e}")
@@ -156,40 +238,36 @@ class MarketauxNews(NewsDataSource):
                 'sort': 'published_desc'
             }
 
-            response = self.session.get(url, params=params, timeout=30)
-            response.raise_for_status()
-            self.daily_requests += 1
+            data = self._make_api_request(url, params)
+            if data:
+                # Initialize results for all symbols
+                for symbol in symbols:
+                    watchlist_news[symbol] = []
 
-            data = response.json()
+                # Parse and distribute articles
+                for article_data in data.get('data', []):
+                    try:
+                        article = self._parse_marketaux_article(article_data)
+                        if article:
+                            # Distribute article to relevant symbols
+                            for symbol in symbols:
+                                if (symbol.upper() in article.symbols_mentioned or
+                                    symbol.lower() in article.title.lower()):
 
-            # Initialize results for all symbols
-            for symbol in symbols:
-                watchlist_news[symbol] = []
+                                    # Ensure symbol is in symbols_mentioned
+                                    if symbol.upper() not in article.symbols_mentioned:
+                                        article.symbols_mentioned.append(symbol.upper())
 
-            # Parse and distribute articles
-            for article_data in data.get('data', []):
-                try:
-                    article = self._parse_marketaux_article(article_data)
-                    if article:
-                        # Distribute article to relevant symbols
-                        for symbol in symbols:
-                            if (symbol.upper() in article.symbols_mentioned or
-                                symbol.lower() in article.title.lower()):
+                                    # Add to symbol's articles if under limit
+                                    if len(watchlist_news[symbol]) < max_articles_per_symbol:
+                                        watchlist_news[symbol].append(article)
 
-                                # Ensure symbol is in symbols_mentioned
-                                if symbol.upper() not in article.symbols_mentioned:
-                                    article.symbols_mentioned.append(symbol.upper())
+                    except Exception as e:
+                        self.logger.debug(f"Error parsing Marketaux watchlist article: {e}")
+                        continue
 
-                                # Add to symbol's articles if under limit
-                                if len(watchlist_news[symbol]) < max_articles_per_symbol:
-                                    watchlist_news[symbol].append(article)
-
-                except Exception as e:
-                    self.logger.debug(f"Error parsing Marketaux watchlist article: {e}")
-                    continue
-
-            total_articles = sum(len(articles) for articles in watchlist_news.values())
-            self.logger.info(f"Marketaux watchlist complete: {total_articles} total articles for {len(symbols)} symbols")
+                total_articles = sum(len(articles) for articles in watchlist_news.values())
+                self.logger.info(f"Marketaux watchlist complete: {total_articles} total articles for {len(symbols)} symbols")
 
         except Exception as e:
             self.logger.error(f"Error in Marketaux watchlist collection: {e}")
@@ -315,30 +393,26 @@ class MarketauxNews(NewsDataSource):
                 'sort': 'published_desc'
             }
 
-            response = self.session.get(url, params=params, timeout=30)
-            response.raise_for_status()
-            self.daily_requests += 1
+            data = self._make_api_request(url, params)
+            if data:
+                # Count symbol mentions
+                symbol_counts = {}
 
-            data = response.json()
+                for article_data in data.get('data', []):
+                    entities = article_data.get('entities', [])
+                    for entity in entities:
+                        if entity.get('type') == 'equity':
+                            symbol = entity.get('symbol', '').upper()
+                            if symbol:
+                                symbol_counts[symbol] = symbol_counts.get(symbol, 0) + 1
 
-            # Count symbol mentions
-            symbol_counts = {}
+                # Sort by mention count
+                trending = [
+                    {'symbol': symbol, 'mention_count': count}
+                    for symbol, count in sorted(symbol_counts.items(), key=lambda x: x[1], reverse=True)
+                ]
 
-            for article_data in data.get('data', []):
-                entities = article_data.get('entities', [])
-                for entity in entities:
-                    if entity.get('type') == 'equity':
-                        symbol = entity.get('symbol', '').upper()
-                        if symbol:
-                            symbol_counts[symbol] = symbol_counts.get(symbol, 0) + 1
-
-            # Sort by mention count
-            trending = [
-                {'symbol': symbol, 'mention_count': count}
-                for symbol, count in sorted(symbol_counts.items(), key=lambda x: x[1], reverse=True)
-            ]
-
-            return trending[:limit]
+                return trending[:limit]
 
         except Exception as e:
             self.logger.error(f"Error getting trending symbols: {e}")

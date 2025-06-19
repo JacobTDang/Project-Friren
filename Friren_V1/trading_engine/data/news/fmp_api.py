@@ -41,7 +41,97 @@ class FMPNews(NewsDataSource):
         self.max_daily_requests = 250  # Free tier limit
         self.logger = logging.getLogger(f"{__name__}.FMPNews")
 
+        # Rate limiting and error tracking
+        self.rate_limited = False
+        self.rate_limit_detected_at = None
+        self.consecutive_failures = 0
+        self.max_consecutive_failures = 3
+
         self.symbol_extractor = SymbolExtractor()
+
+    def _is_api_available(self) -> bool:
+        """Check if API is available and not rate limited"""
+        if self.rate_limited:
+            # Reset rate limit status after 1 hour
+            if self.rate_limit_detected_at and (datetime.now() - self.rate_limit_detected_at).total_seconds() > 3600:
+                self.logger.info("Resetting FMP rate limit status after 1 hour")
+                self.rate_limited = False
+                self.consecutive_failures = 0
+                return True
+            return False
+
+        if self.daily_requests >= self.max_daily_requests:
+            self.logger.warning("Daily FMP limit reached")
+            return False
+
+        return True
+
+    def _handle_api_error(self, response: Optional[requests.Response] = None, error: Optional[Exception] = None) -> bool:
+        """Handle API errors and rate limiting. Returns True if should stop making requests"""
+        if response is not None:
+            if response.status_code == 429:
+                self.logger.error("FMP rate limit exceeded (429). Disabling API calls.")
+                self.rate_limited = True
+                self.rate_limit_detected_at = datetime.now()
+                return True
+
+            elif response.status_code == 401:
+                self.logger.error("FMP authentication failed (401). Check API key.")
+                self.rate_limited = True
+                return True
+
+            elif response.status_code == 403:
+                self.logger.error("FMP access forbidden (403). Account may be suspended.")
+                self.rate_limited = True
+                return True
+
+        # Handle consecutive failures
+        self.consecutive_failures += 1
+        if self.consecutive_failures >= self.max_consecutive_failures:
+            self.logger.error(f"FMP: {self.consecutive_failures} consecutive failures. Temporarily disabling.")
+            self.rate_limited = True
+            self.rate_limit_detected_at = datetime.now()
+            return True
+
+        return False
+
+    def _make_api_request(self, url: str, params: Dict) -> Optional[Dict]:
+        """Make API request with comprehensive error handling"""
+        if not self._is_api_available():
+            return None
+
+        try:
+            response = self.session.get(url, params=params, timeout=30)
+
+            # Check for rate limiting or other errors
+            if self._handle_api_error(response=response):
+                return None
+
+            response.raise_for_status()
+            self.daily_requests += 1
+
+            # Reset consecutive failures on success
+            self.consecutive_failures = 0
+
+            data = response.json()
+
+            # FMP returns array directly or error object
+            if isinstance(data, dict) and ('Error Message' in data or 'message' in data):
+                error_msg = data.get('Error Message', data.get('message', 'Unknown error'))
+                self.logger.error(f"FMP API error: {error_msg}")
+                self.consecutive_failures += 1
+                return None
+
+            return data
+
+        except requests.exceptions.HTTPError as e:
+            self.logger.error(f"FMP HTTP error: {e}")
+            self._handle_api_error(response=getattr(e, 'response', None), error=e)
+            return None
+        except Exception as e:
+            self.logger.error(f"FMP request failed: {e}")
+            self._handle_api_error(error=e)
+            return None
 
     def collect_news(self, hours_back: int = 24, max_articles: int = 50) -> List[NewsArticle]:
         """Collect general financial news from FMP - FREE TIER"""
@@ -56,16 +146,9 @@ class FMPNews(NewsDataSource):
                 'size': min(20, max_articles)  # Free tier limit
             }
 
-            response = self.session.get(url, params=params, timeout=30)
-            response.raise_for_status()
-            self.daily_requests += 1
+            data = self._make_api_request(url, params)
 
-            data = response.json()
-
-            # FMP returns array directly or error object
-            if isinstance(data, dict) and ('Error Message' in data or 'message' in data):
-                error_msg = data.get('Error Message', data.get('message', 'Unknown error'))
-                self.logger.error(f"FMP API error: {error_msg}")
+            if data is None:
                 return []
 
             articles = []
@@ -170,15 +253,9 @@ class FMPNews(NewsDataSource):
                 'limit': max_articles
             }
 
-            response = self.session.get(url, params=params, timeout=30)
-            response.raise_for_status()
-            self.daily_requests += 1
+            data = self._make_api_request(url, params)
 
-            data = response.json()
-
-            if isinstance(data, dict) and ('Error Message' in data or 'message' in data):
-                error_msg = data.get('Error Message', data.get('message', 'Unknown error'))
-                self.logger.debug(f"FMP press releases error: {error_msg}")
+            if data is None:
                 return []
 
             articles = []
@@ -298,7 +375,7 @@ class FMPNews(NewsDataSource):
             # Extract symbols from title and content
             symbols = self.symbol_extractor.extract_symbols(f"{title} {content}")
 
-            # Create article
+            # Create NewsArticle
             article = NewsArticle(
                 title=title,
                 content=content,
@@ -309,13 +386,8 @@ class FMPNews(NewsDataSource):
                 author=article_data.get('author', '')
             )
 
-            # Add FMP-specific metadata
-            article.additional_metadata = {
-                'article_id': article_data.get('id'),
-                'image': article_data.get('image', ''),
-                'site': article_data.get('site', ''),
-                'category': 'fmp_article'
-            }
+            # Note: FMP-specific metadata would include image, site, text
+            # But these are not stored in the base NewsArticle class
 
             return article
 
@@ -360,11 +432,8 @@ class FMPNews(NewsDataSource):
                 author="Press Release"
             )
 
-            # Add FMP-specific metadata
-            article.additional_metadata = {
-                'symbol': symbol.upper(),
-                'category': 'press_release'
-            }
+            # Note: FMP-specific metadata would include symbol, category
+            # But these are not stored in the base NewsArticle class
 
             return article
 
