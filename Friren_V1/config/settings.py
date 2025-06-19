@@ -13,18 +13,25 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 from pathlib import Path
 from dotenv import load_dotenv
 import os
+import sys
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = BASE_DIR.parent
+
+# Add the Friren_V1 directory to Python path to resolve infrastructure imports
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
 load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.getenv['SECRET_KEY']
+SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-fallback-key-change-in-production')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.getenv('DEBUG', 'False').lower() == 'true'
 
 ALLOWED_HOSTS = []
 
@@ -77,11 +84,15 @@ WSGI_APPLICATION = 'config.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': os.getenv('RDS_DBNAME'),
-        'USER': os.getenv('RDS_USERNAME'),
-        'PASSWORD': os.getenv('RDS_PASSWORD'),
-        'HOST': os.getenv('RDS_ENDPOINT'),
-        'PORT': os.getenv('RDS_PORT'),
+        'NAME': os.getenv('RDS_DBNAME', 'postgres'),
+        'USER': os.getenv('RDS_USERNAME', ''),
+        'PASSWORD': os.getenv('RDS_PASSWORD', ''),
+        'HOST': os.getenv('RDS_ENDPOINT', 'localhost'),
+        'PORT': os.getenv('RDS_PORT', '5432'),
+        'OPTIONS': {
+            'connect_timeout': 20,
+        },
+        'CONN_MAX_AGE': 0,  # Disable persistent connections for now
     }
 }
 
