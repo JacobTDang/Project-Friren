@@ -1,4 +1,10 @@
-﻿# Environment Variables - NEVER COMMIT
+﻿# ONLY ALLOW Friren_V1 DIRECTORY
+/*
+!/Friren_V1/
+!/.gitignore
+!/README.md
+
+# Environment Variables - NEVER COMMIT
 .env
 *.env
 .env.local
@@ -13,76 +19,19 @@ test_*.py
 demo_*.py
 comprehensive_*.py
 enhanced_*.py
-priority_queue_demo.py
-simple_paper_trading_test.py
-validate_test_setup.py
-final_system_status.py
-system_cycle_demo.py
-queue_based_*.py
 
-# Log Files
-*.log
-logs/
-Friren_V1/logs/
-
-# Cache and Temporary Files
+# Cache and Logs
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
-.Python
-*.so
-.coverage
-.pytest_cache/
-.tox/
-.cache/
-nosetests.xml
-coverage.xml
+*.log
+logs/
 
 # IDE Files
 .vscode/
 .idea/
 *.swp
-*.swo
-*~
 .DS_Store
 
-# Python Virtual Environments
+# Virtual Environments
 venv/
 env/
-ENV/
-.venv/
-
-# Django
-*.sqlite3
-db.sqlite3
-/media/
-/static/
-
-# Jupyter Notebooks
-.ipynb_checkpoints/
-
-# Distribution / Packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# PyInstaller
-*.manifest
-*.spec
-
-# Documentation builds
-docs/_build/
