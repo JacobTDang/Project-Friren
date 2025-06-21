@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 trading_engine/__main__.py
 
