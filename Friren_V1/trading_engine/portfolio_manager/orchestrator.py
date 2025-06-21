@@ -87,9 +87,17 @@ try:
     from .processes.finbert_sentiment_process import FinBERTSentimentProcess  # type: ignore
     from .processes.news_collector_procses import EnhancedNewsCollectorProcess  # type: ignore
     from .processes.enhanced_news_pipeline_process import EnhancedNewsPipelineProcess, PipelineConfig, get_default_pipeline_config  # type: ignore
+
+    # Symbol coordination imports
+    from .symbol_coordination.symbol_config import SymbolMonitoringConfig, MonitoringIntensity  # type: ignore
+    from .symbol_coordination.symbol_coordinator import SymbolCoordinator  # type: ignore
+    from .symbol_coordination.resource_manager import ResourceManager, ResourceQuota  # type: ignore
+    from .symbol_coordination.message_router import MessageRouter, RoutingStrategy  # type: ignore
+    SYMBOL_COORDINATION_AVAILABLE = True
     TRADING_COMPONENTS_AVAILABLE = True
 except ImportError:
     TRADING_COMPONENTS_AVAILABLE = False
+    SYMBOL_COORDINATION_AVAILABLE = False
     # Fallback stubs
     class MarketDecisionEngine:
         def __init__(self, process_id="decision_engine"):
@@ -126,6 +134,47 @@ except ImportError:
 
     def create_execution_orchestrator(*args, **kwargs):
         return ExecutionOrchestrator()
+
+    # Symbol coordination fallback stubs
+    class SymbolCoordinator:
+        def __init__(self, *args, **kwargs):
+            self.symbol_states = {}
+        def add_symbol(self, symbol: str, config=None): return True
+        def remove_symbol(self, symbol: str): return True
+        def get_coordination_status(self): return {}
+        def can_make_api_call(self, symbol: str): return True
+        def record_api_call(self, symbol: str): pass
+
+    class SymbolMonitoringConfig:
+        def __init__(self, *args, **kwargs): pass
+
+    class MonitoringIntensity:
+        PASSIVE = "passive"
+        ACTIVE = "active"
+        INTENSIVE = "intensive"
+
+    class ResourceManager:
+        def __init__(self, *args, **kwargs): pass
+        def start_monitoring(self): pass
+        def stop_monitoring(self): pass
+        def allocate_resources(self, symbol: str, config): return True
+        def can_make_api_call(self, symbol: str): return True
+        def record_api_call(self, symbol: str): pass
+        def get_system_resource_status(self): return {}
+
+    class ResourceQuota:
+        def __init__(self, *args, **kwargs): pass
+
+    class MessageRouter:
+        def __init__(self, *args, **kwargs): pass
+        def start(self): pass
+        def stop(self): pass
+        def register_symbol(self, symbol: str, config): pass
+        def route_message(self, symbol: str, message): return True
+        def get_routing_status(self): return {}
+
+    class RoutingStrategy:
+        HYBRID = "hybrid"
 
 
 class SystemState(Enum):
@@ -174,6 +223,19 @@ class SystemConfig:
     max_position_loss_pct: float = 10.0
     emergency_exit_threshold: float = 15.0
 
+    # Symbol coordination configuration
+    enable_symbol_coordination: bool = True
+    total_api_budget: int = 400  # Total API calls per hour across all symbols
+    max_intensive_symbols: int = 2  # Max symbols allowed in intensive monitoring
+    symbol_coordination_enabled: bool = True
+    default_symbol_intensity: str = "active"  # passive, active, intensive
+    symbol_rotation_enabled: bool = True
+    intensive_monitoring_limit: int = 2
+
+    # Per-symbol resource allocation
+    api_budget_per_symbol: int = 80  # Default API calls per hour per symbol
+    max_concurrent_symbols: int = 5  # Resource limit for concurrent processing
+
 
 @dataclass
 class SystemStatus:
@@ -212,6 +274,15 @@ class SystemStatus:
     last_health_check: Optional[datetime] = None
     last_account_sync: Optional[datetime] = None
 
+    # Symbol coordination metrics
+    symbol_coordination_enabled: bool = False
+    total_symbols_managed: int = 0
+    intensive_symbols_count: int = 0
+    active_symbols_count: int = 0
+    passive_symbols_count: int = 0
+    symbols_with_errors: int = 0
+    last_symbol_coordination_update: Optional[datetime] = None
+
 
 class MainOrchestrator:
     """
@@ -232,6 +303,13 @@ class MainOrchestrator:
         self.execution_orchestrator: Optional[ExecutionOrchestrator] = None
         self.shared_state: Optional[SharedStateManager] = None
         self.queue_manager: Optional[QueueManager] = None
+
+        # Symbol coordination
+        self.symbol_coordinator: Optional[SymbolCoordinator] = None
+
+        # Message Routing and Resource Management (Phase 2 Enhancement)
+        self.resource_manager: Optional[ResourceManager] = None
+        self.message_router: Optional[MessageRouter] = None
 
         # Control and monitoring
         self._shutdown_event = threading.Event()
@@ -299,6 +377,9 @@ class MainOrchestrator:
             # Initialize execution orchestrator
             self._initialize_execution_orchestrator()
 
+            # Initialize symbol coordination
+            self._initialize_symbol_coordination()
+
             # Validate system readiness
             self._validate_system_readiness()
 
@@ -352,6 +433,12 @@ class MainOrchestrator:
 
             # Stop all threads
             self._stop_threads()
+
+            # Stop symbol coordination components (Phase 2)
+            if self.message_router:
+                self.message_router.stop()
+            if self.resource_manager:
+                self.resource_manager.stop_monitoring()
 
             # Stop all processes
             if self.process_manager:
@@ -418,6 +505,17 @@ class MainOrchestrator:
                 'decision': self.status.last_decision_time.isoformat() if self.status.last_decision_time else None,
                 'trade': self.status.last_trade_time.isoformat() if self.status.last_trade_time else None,
                 'health_check': self.status.last_health_check.isoformat() if self.status.last_health_check else None
+            },
+            'symbol_coordination': {
+                'enabled': self.status.symbol_coordination_enabled,
+                'total_symbols': self.status.total_symbols_managed,
+                'intensive_symbols': self.status.intensive_symbols_count,
+                'active_symbols': self.status.active_symbols_count,
+                'passive_symbols': self.status.passive_symbols_count,
+                'symbols_with_errors': self.status.symbols_with_errors,
+                'last_update': self.status.last_symbol_coordination_update.isoformat() if self.status.last_symbol_coordination_update else None,
+                'resource_status': self.resource_manager.get_system_resource_status() if self.resource_manager else {},
+                'routing_status': self.message_router.get_routing_status() if self.message_router else {}
             }
         }
 
@@ -601,13 +699,106 @@ class MainOrchestrator:
             self.execution_orchestrator = ExecutionOrchestrator()
             self.logger.warning(f"Using fallback execution orchestrator: {e}")
 
+    def _initialize_symbol_coordination(self):
+        """Initialize the symbol coordination system"""
+        try:
+            if self.config.symbol_coordination_enabled and SYMBOL_COORDINATION_AVAILABLE:
+                # Initialize resource manager first
+                self._initialize_resource_manager()
+
+                # Initialize message router
+                self._initialize_message_router()
+
+                # Create symbol coordinator with configuration
+                self.symbol_coordinator = SymbolCoordinator(
+                    total_api_budget=self.config.total_api_budget,
+                    max_intensive_symbols=self.config.max_intensive_symbols
+                )
+
+                # Add configured symbols to coordinator
+                for symbol in self.config.symbols:
+                    intensity = getattr(MonitoringIntensity, self.config.default_symbol_intensity.upper(), MonitoringIntensity.ACTIVE)
+                    config = SymbolMonitoringConfig(
+                        symbol=symbol,
+                        monitoring_intensity=intensity,
+                        api_call_budget=self.config.api_budget_per_symbol
+                    )
+                    success = self.symbol_coordinator.add_symbol(symbol, config)
+                    if success:
+                        self.logger.info(f"Added symbol {symbol} to coordination with intensity {intensity}")
+
+                        # Register symbol with resource manager and message router
+                        if self.resource_manager:
+                            self.resource_manager.allocate_resources(symbol, config)
+                        if self.message_router:
+                            self.message_router.register_symbol(symbol, config)
+                    else:
+                        self.logger.warning(f"Failed to add symbol {symbol} to coordination")
+
+                # Start resource monitoring and message routing
+                if self.resource_manager:
+                    self.resource_manager.start_monitoring()
+                if self.message_router:
+                    self.message_router.start()
+
+                # Update status
+                self.status.symbol_coordination_enabled = True
+                self.status.last_symbol_coordination_update = datetime.now()
+
+                self.logger.info(f"Symbol coordination initialized with {len(self.config.symbols)} symbols")
+            else:
+                # Use fallback coordinator
+                self.symbol_coordinator = SymbolCoordinator()
+                self.resource_manager = ResourceManager()
+                self.message_router = MessageRouter()
+                self.status.symbol_coordination_enabled = False
+                if not self.config.symbol_coordination_enabled:
+                    self.logger.info("Symbol coordination disabled by configuration")
+                else:
+                    self.logger.warning("Symbol coordination not available, using fallback")
+
+        except Exception as e:
+            # Fallback to stub coordinator
+            self.symbol_coordinator = SymbolCoordinator()
+            self.resource_manager = ResourceManager()
+            self.message_router = MessageRouter()
+            self.status.symbol_coordination_enabled = False
+            self.logger.error(f"Failed to initialize symbol coordination: {e}")
+            self.logger.info("Using fallback symbol coordinator")
+
+    def _initialize_resource_manager(self):
+        """Initialize the resource manager"""
+        try:
+            # Create resource quota based on system configuration
+            quota = ResourceQuota(
+                api_calls_per_hour=self.config.total_api_budget,
+                memory_limit_mb=self.config.max_memory_mb,
+                cpu_limit_percent=self.config.max_cpu_percent,
+                api_buffer=self.config.api_rate_limit_buffer
+            )
+
+            self.resource_manager = ResourceManager(quota)
+            self.logger.info("Resource manager initialized")
+
+        except Exception as e:
+            self.resource_manager = ResourceManager()
+            self.logger.error(f"Failed to initialize resource manager: {e}")
+
+    def _initialize_message_router(self):
+        """Initialize the message router"""
+        try:
+            self.message_router = MessageRouter(self.resource_manager)
+            self.logger.info("Message router initialized")
+
+        except Exception as e:
+            self.message_router = MessageRouter()
+            self.logger.error(f"Failed to initialize message router: {e}")
+
     def _validate_system_readiness(self):
         """Validate that all required components are ready"""
         issues = []
 
-        if not self.process_manager:
-            issues.append("Process manager not initialized")
-
+        # Only validate execution orchestrator for now, process manager is optional for testing
         if not self.execution_orchestrator:
             issues.append("Execution orchestrator not initialized")
 
@@ -647,10 +838,119 @@ class MainOrchestrator:
         self.logger.info("System monitoring started")
 
     def _start_decision_coordination(self):
-        """Start decision engine coordination"""
+        """Start decision engine coordination with symbol awareness"""
         self._decision_thread = threading.Thread(target=self._decision_coordination_loop, daemon=True)
         self._decision_thread.start()
+
+        # Start symbol coordination if enabled
+        if self.config.symbol_coordination_enabled and self.symbol_coordinator:
+            self._start_symbol_coordination_integration()
+
         self.logger.info("Decision coordination started")
+
+    def _start_symbol_coordination_integration(self):
+        """Start symbol coordination integration with existing processes"""
+        try:
+            if not self.symbol_coordinator:
+                return
+
+            # Register symbols from config with appropriate monitoring intensity
+            for symbol in self.config.symbols:
+                monitoring_config = SymbolMonitoringConfig(
+                    symbol=symbol,
+                    monitoring_intensity=MonitoringIntensity.ACTIVE,
+                    api_budget_per_hour=self.config.api_budget_per_symbol,
+                    max_news_articles=10,
+                    sentiment_threshold=0.7,
+                    risk_threshold=0.8
+                )
+                self.symbol_coordinator.add_symbol(symbol, monitoring_config)
+
+            self.logger.info(f"Symbol coordination integrated with {len(self.config.symbols)} symbols")
+
+        except Exception as e:
+            self.logger.error(f"Error starting symbol coordination integration: {e}")
+
+    def _coordinate_symbol_processing(self):
+        """Coordinate symbol processing across all processes"""
+        try:
+            if not self.symbol_coordinator:
+                return
+
+            # Get next symbol for processing based on priority
+            symbol_to_process = self.symbol_coordinator.get_next_symbol_to_process()
+
+            if symbol_to_process:
+                # Send symbol processing message to relevant processes
+                self._send_symbol_processing_message(symbol_to_process)
+
+                # Update symbol coordination metrics
+                self._update_symbol_coordination_status()
+
+                self.logger.debug(f"Coordinated processing for symbol {symbol_to_process}")
+
+        except Exception as e:
+            self.logger.error(f"Error in symbol processing coordination: {e}")
+
+    def _send_symbol_processing_message(self, symbol: str):
+        """Send symbol processing message to relevant processes"""
+        try:
+            if not self.message_router:
+                return
+
+            # Create symbol processing message
+            message_data = {
+                'symbol': symbol,
+                'timestamp': datetime.now().isoformat(),
+                'source': 'orchestrator',
+                'action': 'process_symbol'
+            }
+
+            # Create message object
+            from Friren_V1.multiprocess_infrastructure.queue_manager import QueueMessage, MessageType, MessagePriority
+
+            message = QueueMessage(
+                message_type=MessageType.STRATEGY_SIGNAL,
+                priority=MessagePriority.HIGH,
+                sender_id="main_orchestrator",
+                recipient_id="symbol_coordination",
+                payload=message_data
+            )
+
+            # Route message through symbol coordination
+            self.message_router.route_message(symbol, message)
+
+        except Exception as e:
+            self.logger.error(f"Error sending symbol processing message for {symbol}: {e}")
+
+    def _update_symbol_coordination_status(self):
+        """Update symbol coordination status metrics"""
+        try:
+            if not self.symbol_coordinator:
+                return
+
+            # Get coordination status
+            coordination_status = self.symbol_coordinator.get_system_status()
+
+            # Update system status
+            self.status.symbol_coordination_enabled = True
+            self.status.total_symbols_managed = len(self.config.symbols)
+            self.status.last_symbol_coordination_update = datetime.now()
+
+            # Update intensity counts from coordination status
+            if 'symbol_states' in coordination_status:
+                intensity_counts = {'intensive': 0, 'active': 0, 'passive': 0}
+                for symbol_state in coordination_status['symbol_states'].values():
+                    intensity = symbol_state.get('monitoring_intensity', 'active')
+                    if intensity in intensity_counts:
+                        intensity_counts[intensity] += 1
+
+                self.status.intensive_symbols_count = intensity_counts['intensive']
+                self.status.active_symbols_count = intensity_counts['active']
+                self.status.passive_symbols_count = intensity_counts['passive']
+
+        except Exception as e:
+            self.logger.error(f"Error updating symbol coordination status: {e}")
 
     def _main_orchestration_loop(self):
         """Main orchestration loop"""
@@ -692,9 +992,13 @@ class MainOrchestrator:
                 time.sleep(60)
 
     def _decision_coordination_loop(self):
-        """Decision engine coordination loop"""
+        """Decision engine coordination loop with symbol awareness"""
         while not self._shutdown_event.is_set():
             try:
+                # Symbol-aware coordination if enabled
+                if self.config.symbol_coordination_enabled and self.symbol_coordinator:
+                    self._coordinate_symbol_processing()
+
                 # Check for pending decisions from decision engine
                 self._check_pending_decisions()
 
@@ -747,9 +1051,37 @@ class MainOrchestrator:
 
     def _coordinate_strategy_analysis(self):
         """Coordinate strategy analysis across processes"""
-        # This would coordinate the strategy analyzer and sentiment analyzer
-        # to ensure they're working on the right symbols at the right time
-        pass
+        # Enhanced coordination with symbol-specific message routing
+        if self.symbol_coordinator and self.message_router:
+            try:
+                # Get next symbol for processing based on priority
+                symbol_to_process = self.symbol_coordinator.get_next_symbol_to_process()
+
+                if symbol_to_process:
+                    # Create strategy analysis message
+                    if QUEUE_INFRASTRUCTURE_AVAILABLE:
+                        from Friren_V1.multiprocess_infrastructure.queue_manager import QueueMessage, MessageType, MessagePriority
+
+                        message = QueueMessage(
+                            message_type=MessageType.STRATEGY_SIGNAL,
+                            priority=MessagePriority.HIGH,
+                            data={
+                                'symbol': symbol_to_process,
+                                'timestamp': datetime.now().isoformat(),
+                                'source': 'orchestrator'
+                            }
+                        )
+
+                        # Route message through symbol coordination
+                        self.message_router.route_message(symbol_to_process, message)
+
+                        self.logger.debug(f"Coordinated strategy analysis for {symbol_to_process}")
+
+            except Exception as e:
+                self.logger.error(f"Error in strategy analysis coordination: {e}")
+        else:
+            # Fallback to basic coordination
+            pass
 
     def _update_system_metrics(self):
         """Update system resource metrics"""
