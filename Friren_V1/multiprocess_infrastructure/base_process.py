@@ -10,11 +10,21 @@ import time
 import signal
 import threading
 import logging
+import sys
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
 from datetime import datetime
 from dataclasses import dataclass
 from enum import Enum
+
+# Windows-specific multiprocessing configuration
+if sys.platform == "win32":
+    try:
+        if mp.get_start_method(allow_none=True) is None:
+            mp.set_start_method('spawn', force=False)
+    except RuntimeError:
+        pass
+    mp.freeze_support()
 
 
 class ProcessState(Enum):
@@ -62,8 +72,9 @@ class BaseProcess(ABC):
         self.error_count = 0
         self.restart_count = 0
 
-        # Threading components
-        self._stop_event = threading.Event()
+        # Threading components - initialize as None for Windows compatibility
+        # These will be created in _initialize_threading() after process spawn
+        self._stop_event = None
         self._heartbeat_thread = None
         self._main_thread = None
 
@@ -75,11 +86,32 @@ class BaseProcess(ABC):
         # Configure logging
         self._setup_logging()
 
-        # Setup signal handlers
-        signal.signal(signal.SIGTERM, self._signal_handler)
-        signal.signal(signal.SIGINT, self._signal_handler)
+        # Initialize threading components if not on Windows or not in spawned process
+        self._initialize_threading()
 
         self.logger.info(f"Process {self.process_id} initialized")
+
+    def _initialize_threading(self):
+        """Initialize threading components - called after process spawn on Windows"""
+        if self._stop_event is None:
+            self._stop_event = threading.Event()
+
+        # Setup signal handlers (Windows-compatible)
+        # Skip signal handling in spawned processes on Windows
+        if sys.platform != "win32":
+            try:
+                signal.signal(signal.SIGTERM, self._signal_handler)
+                signal.signal(signal.SIGINT, self._signal_handler)
+            except (ValueError, OSError):
+                # Signal handling not available in this context
+                pass
+        else:
+            # On Windows, only set up signal handlers in the main process
+            try:
+                signal.signal(signal.SIGINT, self._signal_handler)
+            except (ValueError, OSError):
+                # Signal handling not available in this context (spawned process)
+                pass
 
     def _setup_logging(self):
         """Setup process-specific logging"""
@@ -100,6 +132,9 @@ class BaseProcess(ABC):
         try:
             self.logger.info(f"Starting process {self.process_id}")
             self.state = ProcessState.RUNNING
+
+            # Ensure threading components are initialized (for Windows compatibility)
+            self._initialize_threading()
 
             # Initialize process-specific components
             self._initialize()
@@ -125,7 +160,8 @@ class BaseProcess(ABC):
         self.state = ProcessState.STOPPING
 
         # Signal threads to stop
-        self._stop_event.set()
+        if self._stop_event is not None:
+            self._stop_event.set()
 
         # Wait for main thread to finish
         if self._main_thread and self._main_thread.is_alive():
@@ -156,7 +192,8 @@ class BaseProcess(ABC):
         time.sleep(min(5 * self.restart_count, 30))  # Exponential backoff
 
         # Reset state
-        self._stop_event.clear()
+        if self._stop_event is not None:
+            self._stop_event.clear()
         self.error_count = 0
 
         # Start again
@@ -191,7 +228,7 @@ class BaseProcess(ABC):
 
     def _heartbeat_loop(self):
         """Heartbeat monitoring loop"""
-        while not self._stop_event.is_set():
+        while self._stop_event is None or not self._stop_event.is_set():
             try:
                 if self.health_queue:
                     health = self.get_health()
@@ -201,9 +238,13 @@ class BaseProcess(ABC):
 
             time.sleep(self.heartbeat_interval)
 
+            # Safety check for uninitialized stop event
+            if self._stop_event is None:
+                break
+
     def _run_main_loop(self):
         """Main processing loop with error handling"""
-        while not self._stop_event.is_set():
+        while self._stop_event is None or not self._stop_event.is_set():
             try:
                 # Call the process-specific logic
                 self._process_cycle()
@@ -220,6 +261,10 @@ class BaseProcess(ABC):
 
                 # Brief pause before retry
                 time.sleep(1)
+
+            # Safety check for uninitialized stop event
+            if self._stop_event is None:
+                break
 
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals"""

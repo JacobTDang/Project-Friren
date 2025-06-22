@@ -9,11 +9,21 @@ import multiprocessing as mp
 import queue
 import time
 import threading
+import sys
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 import logging
+
+# Windows-specific multiprocessing configuration
+if sys.platform == "win32":
+    try:
+        if mp.get_start_method(allow_none=True) is None:
+            mp.set_start_method('spawn', force=False)
+    except RuntimeError:
+        pass
+    mp.freeze_support()
 
 
 class MessagePriority(Enum):

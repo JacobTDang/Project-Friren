@@ -9,11 +9,21 @@ import multiprocessing as mp
 import threading
 import time
 import json
+import sys
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta
 from collections import defaultdict
 import logging
+
+# Windows-specific multiprocessing configuration
+if sys.platform == "win32":
+    try:
+        if mp.get_start_method(allow_none=True) is None:
+            mp.set_start_method('spawn', force=False)
+    except RuntimeError:
+        pass
+    mp.freeze_support()
 
 
 @dataclass
@@ -312,6 +322,54 @@ class SharedStateManager:
             if component:
                 return self._system_status.get(component, {})
             return self._system_status.copy()
+
+    # Generic Set/Get Methods for Compatibility
+
+    def set(self, key: str, value: Any):
+        """
+        Generic set method for compatibility with existing code
+
+        Args:
+            key: The key to set
+            value: The value to store
+        """
+        with self._lock:
+            if key == 'system_status':
+                self._system_status.update(value if isinstance(value, dict) else {'value': value})
+            elif key == 'last_update':
+                self._system_status['last_update'] = value
+            elif key == 'market_regime':
+                self._market_regime = value
+            else:
+                # Store in system_status for other generic keys
+                self._system_status[key] = value
+
+            self._write_count += 1
+            self._trigger_callbacks('generic_update', {key: value})
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """
+        Generic get method for compatibility with existing code
+
+        Args:
+            key: The key to retrieve
+            default: Default value if key not found
+
+        Returns:
+            The stored value or default
+        """
+        with self._lock:
+            self._read_count += 1
+
+            if key == 'system_status':
+                return self._system_status.copy()
+            elif key == 'last_update':
+                return self._system_status.get('last_update', default)
+            elif key == 'market_regime':
+                return self._market_regime
+            else:
+                # Check system_status for other generic keys
+                return self._system_status.get(key, default)
 
     # Snapshot and State Management
 

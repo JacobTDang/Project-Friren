@@ -9,12 +9,35 @@ import multiprocessing as mp
 import time
 import signal
 import threading
+import sys
+import os
 from typing import Dict, List, Optional, Type, Any
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
 import logging
 import psutil
+
+# Windows-specific multiprocessing configuration
+if sys.platform == "win32":
+    try:
+        # Set spawn method for Windows (only if not already set)
+        if mp.get_start_method(allow_none=True) is None:
+            mp.set_start_method('spawn', force=False)
+    except RuntimeError:
+        # Already set, ignore
+        pass
+    # Enable freeze support for Windows executables
+    mp.freeze_support()
+
+    # Import Windows process launcher
+    try:
+        from .windows_process_launcher import WindowsProcessLauncher
+        WINDOWS_LAUNCHER_AVAILABLE = True
+    except ImportError:
+        WINDOWS_LAUNCHER_AVAILABLE = False
+else:
+    WINDOWS_LAUNCHER_AVAILABLE = False
 
 from .base_process import BaseProcess, ProcessState, ProcessHealth
 from .queue_manager import QueueManager
@@ -84,6 +107,14 @@ class ProcessManager:
         self.queue_manager = QueueManager()
         self.shared_state = SharedStateManager()
 
+        # Windows launcher (if available)
+        self.windows_launcher = None
+        if sys.platform == "win32" and WINDOWS_LAUNCHER_AVAILABLE:
+            self.windows_launcher = WindowsProcessLauncher()
+            self.logger.info("WINDOWS_LAUNCHER: Windows process launcher enabled")
+        else:
+            self.logger.info("WINDOWS_LAUNCHER: Using standard multiprocessing")
+
         # Management components
         self._monitor_thread = None
         self._shutdown_event = threading.Event()
@@ -92,15 +123,45 @@ class ProcessManager:
         # Resource monitoring
         self._system_resources = self._get_system_resources()
 
-        # Setup signal handlers
-        signal.signal(signal.SIGTERM, self._signal_handler)
-        signal.signal(signal.SIGINT, self._signal_handler)
+        # Setup signal handlers (Windows-compatible)
+        if sys.platform != "win32":
+            signal.signal(signal.SIGTERM, self._signal_handler)
+        signal.signal(signal.SIGINT, self._signal_handler)  # SIGINT works on Windows
 
         self.logger.info(f"ProcessManager initialized - Max processes: {max_processes}")
         self.logger.info(f"System resources: {self._system_resources}")
 
     def register_process(self, config: ProcessConfig):
         """Register a process configuration"""
+        # DEBUG: Add detailed logging about the ProcessConfig received
+        self.logger.info(f"DEBUG: Registering ProcessConfig for {config.process_id}")
+        self.logger.info(f"DEBUG: ProcessConfig type: {type(config)}")
+        self.logger.info(f"DEBUG: ProcessConfig module: {type(config).__module__}")
+        self.logger.info(f"DEBUG: ProcessConfig has process_args: {hasattr(config, 'process_args')}")
+        self.logger.info(f"DEBUG: ProcessConfig has restart_delay_seconds: {hasattr(config, 'restart_delay_seconds')}")
+
+        # Check if it's a dataclass
+        import dataclasses
+        if dataclasses.is_dataclass(config):
+            fields = dataclasses.fields(config)
+            field_names = [f.name for f in fields]
+            self.logger.info(f"DEBUG: ProcessConfig fields: {field_names}")
+        else:
+            self.logger.error(f"ERROR DEBUG: ProcessConfig is NOT a dataclass!")
+
+        # Try to access the problematic attributes
+        try:
+            process_args = config.process_args
+            self.logger.info(f"SUCCESS DEBUG: config.process_args = {process_args}")
+        except AttributeError as e:
+            self.logger.error(f"FAILED DEBUG: config.process_args failed: {e}")
+
+        try:
+            restart_delay = config.restart_delay_seconds
+            self.logger.info(f"SUCCESS DEBUG: config.restart_delay_seconds = {restart_delay}")
+        except AttributeError as e:
+            self.logger.error(f"FAILED DEBUG: config.restart_delay_seconds failed: {e}")
+
         if len(self.process_configs) >= self.max_processes:
             raise RuntimeError(f"Cannot register more than {self.max_processes} processes")
 
@@ -119,6 +180,14 @@ class ProcessManager:
             is_healthy=False,
             last_health_check=None
         )
+
+        # Register with Windows launcher if available
+        if self.windows_launcher:
+            self.windows_launcher.register_process(
+                config.process_id,
+                config.process_class,
+                config.process_args or {}
+            )
 
         self.logger.info(f"Registered process: {config.process_id}")
 
@@ -151,6 +220,12 @@ class ProcessManager:
 
         # Signal shutdown
         self._shutdown_event.set()
+
+        # Use Windows launcher if available
+        if self.windows_launcher:
+            self.logger.info("WINDOWS_LAUNCHER: Stopping all processes via Windows launcher")
+            self.windows_launcher.stop_all_processes()
+            return
 
         # Stop monitoring first
         if self._monitor_thread and self._monitor_thread.is_alive():
@@ -239,42 +314,52 @@ class ProcessManager:
 
             self.logger.info(f"Starting process: {process_id}")
 
-            # Create process instance
-            process_args = config.process_args or {}
-            process_instance = config.process_class(
-                process_id=process_id,
-                **process_args
-            )
+            # Use Windows launcher if available
+            if self.windows_launcher:
+                self.logger.info(f"WINDOWS_LAUNCHER: Starting process {process_id} via Windows launcher")
+                success = self.windows_launcher.start_process(process_id)
 
-            # Set up shared resources
-            process_instance.shared_state = self.shared_state
-            process_instance.priority_queue = self.queue_manager.priority_queue
-            process_instance.health_queue = self.queue_manager.health_queue
+                if success:
+                    # Update status - Windows launcher manages the actual process
+                    status.process = None  # Windows launcher manages this
+                    status.last_start_time = datetime.now()
+                    status.restart_count += 1
+                    status.is_healthy = True  # Assume healthy on start
 
-            # Create and start process
-            process = mp.Process(
-                target=self._run_process_wrapper,
-                args=(process_instance,),
-                name=process_id
-            )
-
-            process.start()
-
-            # Update status
-            status.process = process
-            status.last_start_time = datetime.now()
-            status.restart_count += 1
-
-            # Wait for startup
-            startup_success = self._wait_for_process_startup(process_id, config.startup_timeout)
-
-            if startup_success:
-                self.logger.info(f"Process {process_id} started successfully")
-                return True
+                    self.logger.info(f"WINDOWS_LAUNCHER: Process {process_id} started successfully")
+                    return True
+                else:
+                    self.logger.error(f"WINDOWS_LAUNCHER: Failed to start process {process_id}")
+                    status.consecutive_failures += 1
+                    return False
             else:
-                self.logger.error(f"Process {process_id} failed to start within timeout")
-                self._stop_process(process_id)
-                return False
+                # Standard multiprocessing approach
+                process_args = config.process_args or {}
+
+                # Create and start process (pass only serializable data on Windows)
+                process = mp.Process(
+                    target=self._run_process_wrapper,
+                    args=(config.process_class, process_id, process_args),
+                    name=process_id
+                )
+
+                process.start()
+
+                # Update status
+                status.process = process
+                status.last_start_time = datetime.now()
+                status.restart_count += 1
+
+                # Wait for startup
+                startup_success = self._wait_for_process_startup(process_id, config.startup_timeout)
+
+                if startup_success:
+                    self.logger.info(f"Process {process_id} started successfully")
+                    return True
+                else:
+                    self.logger.error(f"Process {process_id} failed to start within timeout")
+                    self._stop_process(process_id)
+                    return False
 
         except Exception as e:
             self.logger.error(f"Error starting process {process_id}: {e}")
@@ -309,9 +394,28 @@ class ProcessManager:
         except Exception as e:
             self.logger.error(f"Error stopping process {process_id}: {e}")
 
-    def _run_process_wrapper(self, process_instance: BaseProcess):
+    def _run_process_wrapper(self, process_class, process_id: str, process_args: dict):
         """Wrapper to run process with error handling"""
         try:
+            # Import required modules inside the spawned process
+            from Friren_V1.multiprocess_infrastructure.shared_state_manager import SharedStateManager
+            from Friren_V1.multiprocess_infrastructure.queue_manager import QueueManager
+
+            # Create process instance inside the spawned process
+            process_instance = process_class(
+                process_id=process_id,
+                **process_args
+            )
+
+            # Create new shared resources inside the spawned process to avoid RLock serialization
+            shared_state = SharedStateManager()
+            queue_manager = QueueManager()
+
+            # Set up shared resources after spawning
+            process_instance.shared_state = shared_state
+            process_instance.priority_queue = queue_manager.priority_queue
+            process_instance.health_queue = queue_manager.health_queue
+
             process_instance.start()
 
             # Keep process alive until stopped
@@ -319,10 +423,11 @@ class ProcessManager:
                 time.sleep(1)
 
         except Exception as e:
-            logging.error(f"Process {process_instance.process_id} crashed: {e}")
+            logging.error(f"Process {process_id} crashed: {e}")
         finally:
             try:
-                process_instance.stop()
+                if 'process_instance' in locals():
+                    process_instance.stop()
             except:
                 pass
 
@@ -352,6 +457,25 @@ class ProcessManager:
         status = self.processes[process_id]
         config = self.process_configs[process_id]
 
+        # Use Windows launcher for health checking if available
+        if self.windows_launcher:
+            process_status = self.windows_launcher.get_process_status(process_id)
+
+            if process_status['status'] == 'running':
+                status.is_healthy = True
+                status.consecutive_failures = 0
+                status.last_health_check = datetime.now()
+            else:
+                status.is_healthy = False
+                status.consecutive_failures += 1
+
+                # Check if we should restart
+                if self._should_restart_process(process_id):
+                    self.logger.warning(f"Process {process_id} died, restarting...")
+                    self._restart_failed_process(process_id)
+            return
+
+        # Standard multiprocessing health check
         # Check if process is alive
         if not status.process or not status.process.is_alive():
             status.is_healthy = False
