@@ -64,10 +64,10 @@ except ImportError:
     class QueueMessage:
         message_type: MessageType
         priority: MessagePriority
-        data: Dict[str, Any] = field(default_factory=dict)
+        sender_id: str = ""
+        recipient_id: str = ""
+        payload: Dict[str, Any] = field(default_factory=dict)
         timestamp: datetime = field(default_factory=datetime.now)
-        source_process: str = ""
-        target_process: str = ""
         correlation_id: str = ""
 
 from .symbol_config import SymbolMonitoringConfig, MonitoringIntensity, SymbolState
@@ -405,17 +405,17 @@ class MessageRouter:
         # High priority messages go first
         self.routing_rules.extend([
             RoutingRule(
-                message_type=MessageType.HEALTH_CHECK,
+                message_type=MessageType.HEALTH_ALERT,
                 priority=MessagePriority.CRITICAL,
                 routing_strategy=RoutingStrategy.PRIORITY_BASED
             ),
             RoutingRule(
-                message_type=MessageType.DECISION_REQUEST,
+                message_type=MessageType.STRATEGY_SIGNAL,
                 priority=MessagePriority.HIGH,
                 routing_strategy=RoutingStrategy.RESOURCE_AWARE
             ),
             RoutingRule(
-                message_type=MessageType.MARKET_DATA_UPDATE,
+                message_type=MessageType.SYSTEM_STATUS,
                 routing_strategy=RoutingStrategy.SYMBOL_SPECIFIC
             )
         ])
@@ -425,13 +425,13 @@ class MessageRouter:
         base_priority = 100
 
         # Message type priority
-        if message.message_type == MessageType.HEALTH_CHECK:
+        if message.message_type == MessageType.HEALTH_ALERT:
             base_priority -= 50
-        elif message.message_type == MessageType.DECISION_REQUEST:
-            base_priority -= 30
         elif message.message_type == MessageType.STRATEGY_SIGNAL:
+            base_priority -= 30
+        elif message.message_type == MessageType.SENTIMENT_UPDATE:
             base_priority -= 20
-        elif message.message_type == MessageType.MARKET_DATA_UPDATE:
+        elif message.message_type == MessageType.SYSTEM_STATUS:
             base_priority -= 10
 
         # Message priority
@@ -454,7 +454,7 @@ class MessageRouter:
             return True
 
         # Check API rate limits for certain message types
-        if message.message_type in [MessageType.DECISION_REQUEST, MessageType.MARKET_DATA_UPDATE]:
+        if message.message_type in [MessageType.STRATEGY_SIGNAL, MessageType.SYSTEM_STATUS]:
             return self.resource_manager.can_make_api_call(symbol)
 
         return True
@@ -462,7 +462,7 @@ class MessageRouter:
     def _is_duplicate_message(self, symbol: str, message: QueueMessage) -> bool:
         """Check if message is a duplicate"""
         # Create message hash for deduplication
-        message_hash = f"{symbol}_{message.message_type.value}_{message.priority.value}_{hash(str(message.data))}"
+        message_hash = f"{symbol}_{message.message_type.value}_{message.priority.value}_{hash(str(message.payload))}"
 
         now = datetime.now()
 
