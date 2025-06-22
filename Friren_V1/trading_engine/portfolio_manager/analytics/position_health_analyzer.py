@@ -14,9 +14,9 @@ from enum import Enum
 import logging
 
 # Import existing analyzers
-from risk_analyzer import RiskAnalyzer, PositionRisk
-from market_analyzer import MarketAnalyzer, MarketRegimeResult
-from sentiment_analyzer import SentimentAnalyzer, SentimentReading
+from .risk_analyzer import RiskAnalyzer, PositionRisk
+from .market_analyzer import MarketAnalyzer, MarketRegimeResult
+from .sentiment_analyzer import SentimentAnalyzer, SentimentReading
 
 
 class StrategyStatus(Enum):
@@ -479,7 +479,7 @@ class OptimizedPositionHealthAnalyzer:
         """Use existing RiskAnalyzer for comprehensive risk assessment"""
         try:
             # Create a mock strategy recommendation for RiskAnalyzer
-            from .strategy_selector import StrategyRecommendation
+            from Friren_V1.trading_engine.portfolio_manager.tools.strategy_selector import StrategyRecommendation
             from ..strategies.base_strategy import StrategySignal, StrategyMetadata
 
             # Create mock signal based on current position

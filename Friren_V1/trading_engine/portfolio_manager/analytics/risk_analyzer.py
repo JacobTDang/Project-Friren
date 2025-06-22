@@ -22,7 +22,7 @@ warnings.filterwarnings('ignore')
 # Import components for integrated risk analysis
 from .market_analyzer import MarketRegimeResult
 from .sentiment_analyzer import SentimentReading, MarketSentimentSummary
-from .strategy_selector import StrategyRecommendation
+from Friren_V1.trading_engine.portfolio_manager.tools.strategy_selector import StrategyRecommendation
 
 @dataclass
 class PositionRisk:

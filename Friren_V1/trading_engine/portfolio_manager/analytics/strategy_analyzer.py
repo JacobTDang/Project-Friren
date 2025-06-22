@@ -9,9 +9,9 @@ from datetime import datetime
 import logging
 
 # Import existing components
-from ..multiprocess_manager import MultiprocessManager
-from ..strategies import discover_all_strategies, AVAILABLE_STRATEGIES
-from ...data.yahoo_price import StockDataFetcher
+from ..tools.multiprocess_manager import MultiprocessManager
+from ..tools.strategies import discover_all_strategies, AVAILABLE_STRATEGIES
+from ...data.yahoo_price import YahooFinancePriceData
 
 
 class StrategyAnalyzer:
