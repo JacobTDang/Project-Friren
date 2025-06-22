@@ -129,48 +129,39 @@ class SimpleAlpacaInterface:
     """
     Modern Alpaca Interface for Trading System
     """
-class SimpleAlpacaInterface:
-    """
-    Modern Alpaca Interface for Trading System
-
-    **Design Philosophy:**
-    - Simple, reliable connection to Alpaca paper trading
-    - Graceful fallback to simulation mode when API unavailable
-    - Clean error handling with meaningful feedback
-    - Optimized for your decision engine's needs
-
-    **Usage with Environment Variables:**
-    Set these environment variables:
-    - ALPACA_API_KEY=your_api_key
-    - ALPACA_SECRET_KEY=your_secret_key (note: fixed typo)
-    - ALPACA_EMERGENCY_CODE=your_emergency_code
-    """
-
     def __init__(self, config: Optional[AlpacaConfig] = None):
+        """
+        Initialize Alpaca interface - PRODUCTION ONLY
+
+        Args:
+            config: Alpaca configuration. If None, loads from environment variables.
+        """
         self.logger = logging.getLogger("alpaca_interface")
 
-        # Load configuration with fallback
+        # Load configuration from environment - NO FALLBACKS
         self.config = config or AlpacaConfig.from_environment()
 
-        # Initialize clients
+        # Validate configuration
+        if not self.config.api_key or not self.config.secret_key:
+            raise ValueError("PRODUCTION: Alpaca API credentials required. Set ALPACA_API_KEY and ALPACA_SECRET_KEY environment variables.")
+
+        # Production mode only - no simulation
+        self.is_simulation_mode = False
         self.trading_client = None
         self.data_client = None
-        self.is_connected = False
-        self.is_simulation_mode = not HAS_ALPACA
 
-        # Connection state
-        self.last_connection_attempt = None
-        self.connection_retry_count = 0
-        self.max_retries = 3
+        # Connection status
+        self.connected = False
+        self.last_error = None
 
-        # Performance tracking
+        # API call tracking
         self.api_call_count = 0
         self.last_api_call = None
 
-        if HAS_ALPACA and self.config.api_key and self.config.secret_key:
-            self._initialize_clients()
-        else:
-            self._setup_simulation_mode()
+        # Initialize clients
+        self._initialize_clients()
+
+        self.logger.info("Alpaca interface initialized in PRODUCTION mode")
 
     def _initialize_clients(self):
         """Initialize Alpaca trading and data clients"""
@@ -190,8 +181,7 @@ class SimpleAlpacaInterface:
 
             # Test connection by getting account info
             account = self.trading_client.get_account()
-            self.is_connected = True
-            self.connection_retry_count = 0
+            self.connected = True
 
             self.logger.info(f" Alpaca API connected successfully")
             self.logger.info(f"Account: {account.account_number[:8]}... | "
@@ -199,19 +189,7 @@ class SimpleAlpacaInterface:
 
         except Exception as e:
             self.logger.error(f" Failed to initialize Alpaca API: {e}")
-            self.connection_retry_count += 1
-
-            if self.connection_retry_count >= self.max_retries:
-                self.logger.warning("Max retries reached, switching to simulation mode")
-                self._setup_simulation_mode()
-            else:
-                self.is_connected = False
-
-    def _setup_simulation_mode(self):
-        """Setup simulation mode for development/testing"""
-        self.is_simulation_mode = True
-        self.is_connected = True  # Consider simulation as "connected"
-        self.logger.warning(" Running in SIMULATION MODE - no real trades will be executed")
+            self.connected = False
 
     def get_account_info(self) -> Optional[AlpacaAccount]:
         """
@@ -224,20 +202,6 @@ class SimpleAlpacaInterface:
         try:
             self.api_call_count += 1
             self.last_api_call = datetime.now()
-
-            if self.is_simulation_mode:
-                # Return realistic simulation data
-                return AlpacaAccount(
-                    account_id="SIM_ACCOUNT",
-                    buying_power=25000.0,
-                    cash=25000.0,
-                    portfolio_value=50000.0,
-                    day_trade_buying_power=100000.0,
-                    initial_margin=0.0,
-                    maintenance_margin=0.0,
-                    equity=50000.0,
-                    last_equity=50000.0
-                )
 
             if not self.trading_client:
                 return None
@@ -279,12 +243,6 @@ class SimpleAlpacaInterface:
             self.api_call_count += 1
             self.last_api_call = datetime.now()
 
-            if self.is_simulation_mode:
-                # Simulate order execution
-                fake_order_id = f"SIM_{symbol}_{int(time.time())}"
-                self.logger.info(f" SIMULATED ORDER: {side.upper()} {quantity} shares of {symbol}")
-                return True, fake_order_id
-
             if not self.trading_client:
                 return False, "Trading client not available"
 
@@ -317,13 +275,6 @@ class SimpleAlpacaInterface:
         try:
             self.api_call_count += 1
             self.last_api_call = datetime.now()
-
-            if self.is_simulation_mode:
-                # Generate realistic-looking fake prices
-                import hashlib
-                price_seed = int(hashlib.md5(symbol.encode()).hexdigest(), 16) % 1000
-                base_price = 50 + price_seed % 450  # $50-$500 range
-                return float(base_price)
 
             if not self.data_client:
                 return None
@@ -359,13 +310,6 @@ class SimpleAlpacaInterface:
         Used to enforce the "one position per symbol" rule and track current allocations.
         """
         try:
-            self.api_call_count += 1
-            self.last_api_call = datetime.now()
-
-            if self.is_simulation_mode:
-                # Return no position in simulation mode
-                return None
-
             if not self.trading_client:
                 return None
 
@@ -399,12 +343,6 @@ class SimpleAlpacaInterface:
         Provides complete portfolio snapshot for allocation calculations.
         """
         try:
-            self.api_call_count += 1
-            self.last_api_call = datetime.now()
-
-            if self.is_simulation_mode:
-                return []  # No positions in simulation mode
-
             if not self.trading_client:
                 return []
 
@@ -431,12 +369,6 @@ class SimpleAlpacaInterface:
     def get_recent_orders(self, limit: int = 10) -> List[AlpacaOrder]:
         """Get recent orders for monitoring and debugging"""
         try:
-            self.api_call_count += 1
-            self.last_api_call = datetime.now()
-
-            if self.is_simulation_mode:
-                return []
-
             if not self.trading_client:
                 return []
 
@@ -470,10 +402,6 @@ class SimpleAlpacaInterface:
         Used by risk manager for emergency position closure.
         """
         try:
-            if self.is_simulation_mode:
-                self.logger.info(f" SIMULATED POSITION CLOSE: {symbol}")
-                return True, f"SIM_CLOSE_{symbol}"
-
             if not self.trading_client:
                 return False, "Trading client not available"
 
@@ -496,12 +424,10 @@ class SimpleAlpacaInterface:
         Used by monitoring processes to track API health and performance.
         """
         return {
-            'is_connected': self.is_connected,
+            'is_connected': self.connected,
             'is_simulation_mode': self.is_simulation_mode,
             'api_call_count': self.api_call_count,
             'last_api_call': self.last_api_call.isoformat() if self.last_api_call else None,
-            'connection_retry_count': self.connection_retry_count,
-            'max_retries': self.max_retries,
             'has_alpaca_library': HAS_ALPACA,
             'config_loaded': bool(self.config.api_key and self.config.secret_key)
         }
@@ -514,14 +440,15 @@ class SimpleAlpacaInterface:
         Called by monitoring processes when connection issues are detected.
         """
         self.logger.info("Attempting to reconnect to Alpaca API...")
-        self.is_connected = False
-        self.connection_retry_count = 0
+        self.connected = False
 
         if HAS_ALPACA and self.config.api_key and self.config.secret_key:
             self._initialize_clients()
-            return self.is_connected
+            return self.connected
         else:
-            self._setup_simulation_mode()
+            self.is_simulation_mode = True
+            self.connected = True  # Consider simulation as "connected"
+            self.logger.warning(" Running in SIMULATION MODE - no real trades will be executed")
             return True
 
 

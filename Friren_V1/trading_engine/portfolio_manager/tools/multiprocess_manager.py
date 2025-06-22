@@ -6,6 +6,16 @@ Optimized for EC2 t3.micro constraints with resource-aware worker allocation.
 """
 
 import multiprocessing as mp
+import sys
+
+# Windows-specific multiprocessing configuration
+if sys.platform == "win32":
+    try:
+        if mp.get_start_method(allow_none=True) is None:
+            mp.set_start_method('spawn', force=False)
+    except RuntimeError:
+        pass
+    mp.freeze_support()
 import queue
 import time
 import psutil

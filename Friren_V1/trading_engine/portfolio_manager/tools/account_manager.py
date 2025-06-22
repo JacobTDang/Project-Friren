@@ -30,33 +30,13 @@ project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(o
 if project_root not in sys.path:
     sys.path.append(project_root)
 
+# Import real production classes
 try:
     from .db_manager import TradingDBManager
     from .alpaca_interface import SimpleAlpacaInterface, AlpacaAccount
 except ImportError:
-    # Fallback stubs for testing
-    class TradingDBManager:
-        def __init__(self, process_name: str = "account_manager"):
-            self.logger = logging.getLogger(f"db.{process_name}")
-        def get_transactions(self, **kwargs): return []
-        def get_holdings(self, **kwargs): return []
-        def get_portfolio_summary(self): return {}
-
-    class SimpleAlpacaInterface:
-        def get_account_info(self): return None
-
-    @dataclass
-    class AlpacaAccount:
-        account_id: str = "STUB"
-        buying_power: float = 25000.0
-        cash: float = 25000.0
-        portfolio_value: float = 50000.0
-        equity: float = 50000.0
-        day_trade_buying_power: float = 100000.0
-        initial_margin: float = 0.0
-        maintenance_margin: float = 0.0
-        last_equity: float = 50000.0
-
+    from db_manager import TradingDBManager
+    from alpaca_interface import SimpleAlpacaInterface, AlpacaAccount
 
 @dataclass
 class AccountSnapshot:
@@ -154,7 +134,7 @@ class AccountManager:
         self.logger = logging.getLogger("account_manager")
 
         # Dependencies
-        self.db_manager = db_manager or TradingDBManager("account_manager")
+        self.db_manager = db_manager or TradingDBManager()
         self.alpaca_interface = alpaca_interface or SimpleAlpacaInterface()
 
         # Cache configuration
@@ -363,25 +343,28 @@ class AccountManager:
         )
 
     def _get_alpaca_data(self) -> AlpacaAccount:
-        """Get account data from Alpaca API"""
+        """Get account data from Alpaca API - PRODUCTION ONLY, NO FALLBACKS"""
         try:
             account = self.alpaca_interface.get_account_info()
             if account:
+                self.logger.debug("Real Alpaca account data retrieved successfully")
                 return account
             else:
-                # Return fallback data
-                self.logger.warning("Alpaca API unavailable, using fallback data")
-                return AlpacaAccount()
+                # NO FALLBACK - raise error if Alpaca API is unavailable
+                raise RuntimeError("Alpaca API returned None - cannot proceed without real account data")
 
         except Exception as e:
-            self.logger.error(f"Error getting Alpaca account data: {e}")
-            return AlpacaAccount()
+            self.logger.error(f"CRITICAL: Cannot get Alpaca account data: {e}")
+            raise RuntimeError(f"Production system requires real Alpaca data: {e}")
 
     def _get_database_data(self) -> Dict[str, Any]:
-        """Get relevant data from local database"""
+        """Get relevant data from local database - ONLY when account snapshot is refreshed"""
         try:
+            # Only call database when creating fresh snapshot, not on every health check
             holdings = self.db_manager.get_holdings(active_only=True)
             portfolio_summary = self.db_manager.get_portfolio_summary()
+
+            self.logger.debug(f"Database data retrieved: {len(holdings)} holdings")
 
             return {
                 'holdings': holdings,
@@ -389,8 +372,9 @@ class AccountManager:
             }
 
         except Exception as e:
-            self.logger.error(f"Error getting database data: {e}")
-            return {'holdings': [], 'portfolio_summary': {}}
+            self.logger.error(f"Database error (production): {e}")
+            # In production, database errors should not cause fallbacks
+            raise RuntimeError(f"Database required for portfolio calculations: {e}")
 
     def _calculate_pnl_metrics(self, alpaca_account: AlpacaAccount, db_data: Dict) -> Dict[str, float]:
         """Calculate P&L metrics from available data"""

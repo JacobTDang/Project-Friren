@@ -55,6 +55,19 @@ class DatabaseConfig:
     @classmethod
     def from_env(cls):
         """Load configuration from environment variables"""
+        # Check if database is actually available
+        db_available = os.getenv("DB_AVAILABLE", "false").lower() == "true"
+
+        if not db_available:
+            # Return configuration that will gracefully fail and use fallbacks
+            return cls(
+                host="localhost",
+                port=5432,
+                database="trading_db_not_configured",
+                user="fallback_user",
+                password="fallback_password"
+            )
+
         return cls(
             host=os.getenv("DB_HOST", "localhost"),
             port=int(os.getenv("DB_PORT", "5432")),
@@ -162,6 +175,63 @@ class TradingDBManager:
         except psycopg2.Error as e:
             self.logger.error(f"Error getting holdings: {e}")
             return []
+
+    def get_holdings(self, active_only: bool = True, **kwargs) -> List[Dict]:
+        """Alias for get_current_holdings for compatibility"""
+        try:
+            if active_only:
+                return self.get_current_holdings()
+            else:
+                # Return all holdings including zero positions if active_only=False
+                query = """
+                SELECT symbol, quantity, avg_cost, current_price,
+                       last_updated, strategy_used
+                FROM current_holdings
+                ORDER BY symbol
+                """
+                return self.execute_query(query)
+        except Exception as e:
+            self.logger.error(f"Error getting holdings: {e}")
+            return []
+
+    def get_portfolio_summary(self) -> Dict[str, Any]:
+        """Get portfolio summary information"""
+        try:
+            query = """
+            SELECT
+                COUNT(*) as total_positions,
+                SUM(quantity * avg_cost) as total_invested,
+                SUM(quantity * current_price) as current_value,
+                AVG(current_price / avg_cost - 1) * 100 as avg_return_pct
+            FROM current_holdings
+            WHERE quantity > 0
+            """
+            result = self.execute_query(query)
+
+            if result:
+                summary = result[0]
+                return {
+                    'total_positions': summary.get('total_positions', 0),
+                    'total_invested': float(summary.get('total_invested', 0)),
+                    'current_value': float(summary.get('current_value', 0)),
+                    'avg_return_pct': float(summary.get('avg_return_pct', 0))
+                }
+            else:
+                return {
+                    'total_positions': 0,
+                    'total_invested': 0.0,
+                    'current_value': 0.0,
+                    'avg_return_pct': 0.0
+                }
+
+        except psycopg2.Error as e:
+            self.logger.error(f"Error getting portfolio summary: {e}")
+            return {
+                'total_positions': 0,
+                'total_invested': 0.0,
+                'current_value': 0.0,
+                'avg_return_pct': 0.0
+            }
 
     def get_holding(self, symbol: str) -> Optional[Dict]:
         """Get holding information for a specific symbol"""

@@ -9,7 +9,7 @@ warnings.filterwarnings('ignore')
 
 from .base_strategy import BaseStrategy, StrategySignal, StrategyMetadata
 from trading_engine.data.data_utils import StockDataTools
-from Friren_V1.trading_engine.data.yahoo_price import StockDataFetcher
+from Friren_V1.trading_engine.data.yahoo_price import YahooFinancePriceData
 
 class PCAAnalyzer:
     """

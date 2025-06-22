@@ -40,15 +40,10 @@ except ImportError:
     HAS_ALPACA = False
 
 try:
-    # Try the actual structure first
-    from .db_manager import TradingDBManager
-    from .position_sizer import PurePositionSizer
+    # Try absolute imports first
+    from Friren_V1.trading_engine.portfolio_manager.tools.db_manager import TradingDBManager
+    from Friren_V1.trading_engine.portfolio_manager.tools.position_sizer import PurePositionSizer
 except ImportError:
-    try:
-        # Alternative import paths
-        from Friren_V1.trading_engine.portfolio_manager.tools.db_manager import TradingDBManager
-        from Friren_V1.trading_engine.portfolio_manager.tools.position_sizer import PurePositionSizer
-    except ImportError:
         # Fallback stubs
         class TradingDBManager:
             def __init__(self, process_name: str = "order_manager"):

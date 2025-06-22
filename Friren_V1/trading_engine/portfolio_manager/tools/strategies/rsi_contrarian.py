@@ -14,7 +14,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from trading_engine.data.data_utils import StockDataTools
-from Friren_V1.trading_engine.data.yahoo_price import StockDataFetcher
+from Friren_V1.trading_engine.data.yahoo_price import YahooFinancePriceData
 
 class PositionSizer:
     """

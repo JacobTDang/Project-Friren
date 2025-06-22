@@ -27,8 +27,8 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 try:
-    from .db_manager import TradingDBManager
-    from .alpaca_interface import SimpleAlpacaInterface
+    from Friren_V1.trading_engine.portfolio_manager.tools.db_manager import TradingDBManager
+    from Friren_V1.trading_engine.portfolio_manager.tools.alpaca_interface import SimpleAlpacaInterface
 except ImportError:
     # Fallback stubs
     class TradingDBManager:
