@@ -3,7 +3,7 @@ try:
 except ImportError:
     pass
 try:
-    from .data.yahoo_price import StockDataFetcher
+    from .data.yahoo_price import YahooFinancePriceData
 except ImportError:
     pass
 try:
