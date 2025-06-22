@@ -4,6 +4,7 @@
 !/prompts/
 !/.gitignore
 !/README.md
+!/main.py
 !/.env
 
 # Environment Variables - NEVER COMMIT
