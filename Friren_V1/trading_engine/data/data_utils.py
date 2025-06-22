@@ -841,10 +841,10 @@ class StockDataTools:
 
 if __name__ == "__main__":
     # Test the data tools with sample data
-    from Friren_V1.trading_engine.data.yahoo_price import StockDataFetcher
+    from Friren_V1.trading_engine.data.yahoo_price import YahooFinancePriceData
 
     # Fetch some sample data
-    fetcher = StockDataFetcher()
+    fetcher = YahooFinancePriceData()
     sample_data = fetcher.extract_data('AAPL', period='6mo')
 
     if not sample_data.empty:

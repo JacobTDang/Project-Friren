@@ -6,7 +6,7 @@ except ImportError as e:
 
 try:
     # Check what's actually in yahoo.py
-    from .yahoo_price import StockDataFetcher
+    from .yahoo_price import YahooFinancePriceData
 except ImportError as e:
     print(f"Warning: Could not import from yahoo module: {e}")
 
