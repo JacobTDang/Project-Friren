@@ -238,8 +238,12 @@ class ExecutionOrchestrator:
         self.position_sizer = position_sizer or PurePositionSizer()
         self.db_manager = db_manager or TradingDBManager("execution_orchestrator")
         self.alpaca_interface = alpaca_interface or SimpleAlpacaInterface()
-        self.execution_engine = execution_engine or SimpleExecutionEngine()
         self.order_manager = order_manager or SimpleOrderManager()
+        self.execution_engine = execution_engine or SimpleExecutionEngine(
+            order_manager=self.order_manager,
+            alpaca_interface=self.alpaca_interface,
+            db_manager=self.db_manager
+        )
 
         # Execution tracking
         self.active_executions = {}  # execution_id -> ExecutionResult

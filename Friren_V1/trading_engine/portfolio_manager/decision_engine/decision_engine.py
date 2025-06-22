@@ -359,8 +359,8 @@ class EnhancedMarketDecisionEngineProcess(BaseProcess):
     - Clear separation between core logic and enhancements
     """
 
-    def __init__(self):
-        super().__init__("market_decision_engine")
+    def __init__(self, process_id: str = "market_decision_engine"):
+        super().__init__(process_id)
 
         # Your existing signal aggregation (unchanged)
         self.signal_buffer = defaultdict(lambda: deque(maxlen=50))
