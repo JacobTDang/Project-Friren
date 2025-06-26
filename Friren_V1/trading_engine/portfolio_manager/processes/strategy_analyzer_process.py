@@ -10,8 +10,10 @@ from typing import Dict, List, Any, Optional
 from datetime import datetime
 import logging
 
-from multiprocess_infrastructure.base_process import BaseProcess, ProcessState
-from multiprocess_infrastructure.queue_manager import QueueMessage, MessageType, MessagePriority
+from Friren_V1.multiprocess_infrastructure.redis_base_process import RedisBaseProcess, ProcessState
+from Friren_V1.multiprocess_infrastructure.trading_redis_manager import (
+    get_trading_redis_manager, create_process_message, MessagePriority, ProcessMessage
+)
 
 # Import clean components
 from ..tools.multiprocess_manager import MultiprocessManager, TaskResult
@@ -57,7 +59,7 @@ def strategy_analysis_worker(task: Dict[str, Any]) -> Dict[str, Any]:
         }
 
 
-class StrategyAnalyzerProcess(BaseProcess):
+class StrategyAnalyzerProcess(RedisBaseProcess):
     """
     Refactored Strategy Analyzer Process
 
@@ -100,9 +102,11 @@ class StrategyAnalyzerProcess(BaseProcess):
         self.signals_sent_count = 0
         self.analysis_count = 0
 
-        self.logger.info(f"StrategyAnalyzerProcess configured - interval: {analysis_interval}s, threshold: {confidence_threshold}%")
+        self._safe_log("info", f"StrategyAnalyzerProcess configured - interval: {analysis_interval}s, threshold: {confidence_threshold}%")
 
     def _initialize(self):
+        self.logger.critical("EMERGENCY: ENTERED _initialize for strategy_analyzer")
+        print("EMERGENCY: ENTERED _initialize for strategy_analyzer")
         """Initialize process-specific components"""
         self.logger.info("Initializing StrategyAnalyzerProcess...")
 
@@ -131,9 +135,13 @@ class StrategyAnalyzerProcess(BaseProcess):
             self.logger.error(f"Failed to initialize StrategyAnalyzerProcess: {e}")
             self.state = ProcessState.ERROR
             raise
+        self.logger.critical("EMERGENCY: EXITING _initialize for strategy_analyzer")
+        print("EMERGENCY: EXITING _initialize for strategy_analyzer")
 
     def _process_cycle(self):
         """Main processing cycle - orchestrates timing and communication"""
+        self.logger.critical("EMERGENCY: ENTERED MAIN LOOP for strategy_analyzer")
+        print("EMERGENCY: ENTERED MAIN LOOP for strategy_analyzer")
         try:
             # Check if it's time for analysis
             if not self._should_run_analysis():
@@ -172,6 +180,14 @@ class StrategyAnalyzerProcess(BaseProcess):
             # Log cycle completion
             cycle_time = time.time() - start_time
             self.logger.info(f"Process cycle complete - {cycle_time:.2f}s, {signals_sent} signals sent")
+
+            for symbol in self.symbols:
+                strategies = self.get_strategies_for_symbol(symbol)
+                strategy_names = ', '.join(str(s) for s in strategies) if strategies else 'None'
+                blue = '\033[94m'
+                reset = '\033[0m'
+                print(f"{blue}StrategyAnalyzer: {symbol} strategies: {strategy_names}{reset}")
+                self.logger.info(f"StrategyAnalyzer: {symbol} strategies: {strategy_names}")
 
         except Exception as e:
             self.logger.error(f"Error in strategy analyzer process cycle: {e}")
@@ -277,27 +293,28 @@ class StrategyAnalyzerProcess(BaseProcess):
     def _send_signal_to_queue(self, signal: Dict[str, Any]) -> bool:
         """Send trading signal to priority queue (Layer 1)"""
         try:
-            if not self.priority_queue:
-                self.logger.warning("No priority queue available")
+            if not self.redis_manager:
+                self.logger.warning("No Redis manager available")
                 return False
 
-            # Create queue message
-            message = QueueMessage(
-                message_type=MessageType.STRATEGY_SIGNAL,
-                priority=MessagePriority.HIGH if signal['confidence'] >= 80 else MessagePriority.NORMAL,
-                sender_id=self.process_id,
-                recipient_id="market_decision_engine",
-                payload={
+            # Create process message
+            message = create_process_message(
+                sender=self.process_id,
+                recipient="market_decision_engine",
+                message_type="STRATEGY_SIGNAL",
+                data={
                     'symbol': signal['symbol'],
                     'signal': signal,
                     'analysis_cycle': self.analysis_count
-                }
+                },
+                priority=MessagePriority.HIGH if signal['confidence'] >= 80 else MessagePriority.NORMAL
             )
 
-            # Send to queue
-            self.priority_queue.put(message, block=False)
-            self.logger.info(f"Sent {signal['action']} signal for {signal['symbol']} (confidence: {signal['confidence']:.1f}%)")
-            return True
+            # Send to Redis
+            result = self.redis_manager.send_message(message)
+            if result:
+                self.logger.info(f"Sent {signal['action']} signal for {signal['symbol']} (confidence: {signal['confidence']:.1f}%)")
+            return result
 
         except Exception as e:
             self.logger.error(f"Failed to send signal to queue: {e}")
