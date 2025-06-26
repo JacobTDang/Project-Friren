@@ -37,72 +37,17 @@ try:
 except ImportError:
     COLOR_SYSTEM_AVAILABLE = False
 
-# Import Redis-based infrastructure
-try:
-    from Friren_V1.multiprocess_infrastructure.redis_base_process import RedisBaseProcess, ProcessState
-    from Friren_V1.multiprocess_infrastructure.trading_redis_manager import (
-        get_trading_redis_manager, create_process_message, MessagePriority, ProcessMessage
-    )
-except ImportError:
-    # Create minimal stubs if infrastructure not available
-    from enum import Enum
-    from abc import ABC, abstractmethod
+# PRODUCTION: Import Redis-based infrastructure (required)
+from Friren_V1.multiprocess_infrastructure.redis_base_process import RedisBaseProcess, ProcessState
+from Friren_V1.multiprocess_infrastructure.trading_redis_manager import (
+    get_trading_redis_manager, create_process_message, MessagePriority, ProcessMessage
+)
 
-    class ProcessState(Enum):
-        INITIALIZING = "initializing"
-        RUNNING = "running"
-        STOPPED = "stopped"
-        ERROR = "error"
-
-    # Legacy stub classes no longer needed - using Redis ProcessMessage system
-
-    class BaseProcess(ABC):
-        def __init__(self, process_id: str):
-            self.process_id = process_id
-            self.state = ProcessState.INITIALIZING
-            self.logger = logging.getLogger(f"process.{process_id}")
-            self.error_count = 0
-            self.shared_state = None
-            self.priority_queue = None
-
-        @abstractmethod
-        def _initialize(self): pass
-        @abstractmethod
-        def _process_cycle(self): pass
-        @abstractmethod
-        def _cleanup(self): pass
-        @abstractmethod
-        def get_process_info(self): pass
-
-# Import the FinBERT utility tool
+# PRODUCTION: Import FinBERT utility tool (required)
 try:
     from Friren_V1.trading_engine.sentiment.finBERT_analysis import EnhancedFinBERT, BatchSentimentResult
 except ImportError:
-    try:
-        from trading_engine.sentiment.finBERT_analysis import EnhancedFinBERT, BatchSentimentResult
-    except ImportError:
-        # Create minimal stub for testing
-        from dataclasses import dataclass
-
-        @dataclass
-        class BatchSentimentResult:
-            results: List = None
-            batch_processing_time: float = 0.0
-            success_count: int = 0
-            error_count: int = 0
-            average_confidence: float = 0.0
-            sentiment_distribution: Dict = None
-
-        # NO MOCK FINBERT - Real FinBERT required or process fails
-        class FailureFinBERT:
-            def __init__(self, **kwargs):
-                self.initialized = False
-
-            def initialize(self):
-                raise RuntimeError("FinBERT not available - no mock/fallback allowed")
-
-            def analyze_batch(self, texts, article_ids):
-                raise RuntimeError("FinBERT not available - no mock/fallback allowed")
+    from trading_engine.sentiment.finBERT_analysis import EnhancedFinBERT, BatchSentimentResult
 
 
 @dataclass

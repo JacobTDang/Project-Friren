@@ -54,20 +54,7 @@ from Friren_V1.multiprocess_infrastructure.trading_redis_manager import (
 from Friren_V1.trading_engine.data.news_collector import EnhancedNewsCollector, ProcessedNewsData
 from Friren_V1.trading_engine.data.news.base import NewsArticle
 
-# Legacy compatibility stubs for news collector
-class MessageType:
-    NEWS_REQUEST = "news_request"
-    REGIME_CHANGE = "regime_change"
-    FINBERT_ANALYSIS = "finbert_analysis"
-    SENTIMENT_UPDATE = "sentiment_update"
-
-class QueueMessage:
-    def __init__(self, message_type, priority, sender_id, recipient_id, payload):
-        self.message_type = message_type
-        self.priority = priority
-        self.sender_id = sender_id
-        self.recipient_id = recipient_id
-        self.payload = payload
+# PRODUCTION: Using Redis ProcessMessage system - no legacy queue messages needed
 
 class NewsCache:
     """Memory-aware cache for news data with TTL and size limits"""

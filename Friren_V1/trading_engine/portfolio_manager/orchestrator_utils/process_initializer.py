@@ -9,29 +9,17 @@ import logging
 from typing import Optional
 from datetime import datetime
 
-# Import infrastructure components (Redis or fallback)
-# Always import fallback first
-from Friren_V1.multiprocess_infrastructure.fallback_manager import get_fallback_manager
-
+# Import infrastructure components (Redis only - production)
 try:
     from Friren_V1.trading_engine.portfolio_manager.tools.account_manager import AccountManager
     from Friren_V1.trading_engine.portfolio_manager.tools.db_manager import TradingDBManager
     from Friren_V1.trading_engine.portfolio_manager.tools.alpaca_interface import SimpleAlpacaInterface
     
-    # Try Redis 
-    try:
-        from Friren_V1.multiprocess_infrastructure.trading_redis_manager import get_trading_redis_manager, TradingRedisManager
-        from Friren_V1.multiprocess_infrastructure.redis_process_manager import RedisProcessManager, ProcessConfig, RestartPolicy
-        REDIS_AVAILABLE = True
-        print("DEBUG: Redis infrastructure available")
-    except ImportError as redis_err:
-        print(f"DEBUG: Redis not available ({redis_err}), using fallback")
-        REDIS_AVAILABLE = False
-        # Create fallback stubs when Redis not available
-        class ProcessConfig:
-            pass
-        class RestartPolicy:
-            pass
+    # PRODUCTION: Redis required
+    from Friren_V1.multiprocess_infrastructure.trading_redis_manager import get_trading_redis_manager, TradingRedisManager
+    from Friren_V1.multiprocess_infrastructure.redis_process_manager import RedisProcessManager, ProcessConfig, RestartPolicy
+    REDIS_AVAILABLE = True
+    print("DEBUG: Redis infrastructure required and available")
     
     INFRASTRUCTURE_AVAILABLE = True
     print("DEBUG: Infrastructure imports successful")
@@ -117,24 +105,18 @@ class ProcessInitializer:
         }
 
     def _initialize_shared_resources(self):
-        """Initialize shared resources (Redis or fallback)"""
+        """Initialize Redis shared resources (production only)"""
         try:
-            if REDIS_AVAILABLE:
-                # Use Redis
-                self.redis_manager = get_trading_redis_manager()
-                system_status = self.redis_manager.get_system_status()
-                self.logger.info("Redis-based shared resources initialized successfully")
-                self.logger.info(f"Redis manager: {type(self.redis_manager).__name__}")
-            else:
-                # Use fallback
-                self.redis_manager = get_fallback_manager()
-                system_status = self.redis_manager.get_system_status()
-                self.logger.info("Fallback shared resources initialized (Redis not available)")
-                self.logger.info(f"Fallback manager: {type(self.redis_manager).__name__}")
+            # PRODUCTION: Redis required
+            self.redis_manager = get_trading_redis_manager()
+            system_status = self.redis_manager.get_system_status()
+            self.logger.info("Redis-based shared resources initialized successfully")
+            self.logger.info(f"Redis manager: {type(self.redis_manager).__name__}")
 
         except Exception as e:
-            self.logger.error(f"Failed to initialize shared resources: {e}")
-            raise RuntimeError(f"Shared resource initialization failed: {e}")
+            self.logger.error(f"Failed to initialize Redis shared resources: {e}")
+            self.logger.error("PRODUCTION FAILURE: Redis is required for system operation")
+            raise RuntimeError(f"Redis initialization failed - system cannot operate: {e}")
 
     def _initialize_account_manager(self):
         """Initialize account manager - PRODUCTION ONLY"""
@@ -168,18 +150,12 @@ class ProcessInitializer:
 
         try:
             if INFRASTRUCTURE_AVAILABLE and TRADING_COMPONENTS_AVAILABLE:
-                if REDIS_AVAILABLE:
-                    # Create Redis-based ProcessManager
-                    self.logger.info("Creating Redis ProcessManager")
-                    self.process_manager = RedisProcessManager(
-                        max_processes=6  # ULTRA PARALLEL: All 6 processes enabled
-                    )
-                    self.logger.info("Redis ProcessManager created successfully")
-                else:
-                    # Fallback: Skip process manager for now
-                    self.logger.warning("Redis not available - skipping process manager (processes won't start)")
-                    self.process_manager = None
-                    return
+                # PRODUCTION: Redis-based ProcessManager required
+                self.logger.info("Creating Redis ProcessManager (production)")
+                self.process_manager = RedisProcessManager(
+                    max_processes=6  # ULTRA PARALLEL: All 6 processes enabled
+                )
+                self.logger.info("Redis ProcessManager created successfully")
 
                 # ULTRA FIX: ENABLE ALL PROCESSES with Windows deadlock fixes
                 self.logger.info("ULTRA PARALLEL MODE: Enabling ALL 6 processes with deadlock fixes")
@@ -201,10 +177,6 @@ class ProcessInitializer:
                     if process_id == 'enhanced_news_pipeline':
                         # Create enhanced pipeline with optimized configuration
                         pipeline_config = get_default_pipeline_config()
-                        if not REDIS_AVAILABLE:
-                            # Skip process registration when Redis not available
-                            self.logger.warning("Skipping process registration - Redis not available")
-                            return
                         config = ProcessConfig(
                             process_class=process_class,
                             process_id=process_id,
