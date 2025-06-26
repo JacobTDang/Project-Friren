@@ -360,7 +360,9 @@ class RedisProcessManager:
         status = self.processes[process_id]
         
         # Check if subprocess is still alive
-        if status.process and status.process.poll() is not None:
+        subprocess_running = status.process and status.process.poll() is None
+        
+        if status.process and not subprocess_running:
             # Process died
             self.logger.warning(f"Process {process_id} died (exit code: {status.process.returncode})")
             status.is_healthy = False
@@ -373,36 +375,30 @@ class RedisProcessManager:
             
             return
         
-        # Check health via Redis
+        # Use intelligent health determination
         try:
             health_data = self.redis_manager.get_process_health(process_id)
             
-            if health_data:
-                # Process is reporting health
-                last_heartbeat_str = health_data.get('last_heartbeat')
-                if last_heartbeat_str:
-                    last_heartbeat = datetime.fromisoformat(last_heartbeat_str)
-                    
-                    # Check if heartbeat is recent (within 2x heartbeat interval)
-                    config = self.process_configs[process_id]
-                    max_heartbeat_age = config.health_check_interval * 2
-                    
-                    if (datetime.now() - last_heartbeat).total_seconds() > max_heartbeat_age:
-                        # Stale heartbeat
-                        status.is_healthy = False
-                        status.consecutive_failures += 1
-                        self.logger.warning(f"Process {process_id} has stale heartbeat")
-                    else:
-                        # Healthy
-                        status.is_healthy = True
-                        status.consecutive_failures = 0
-                else:
-                    # No heartbeat data
-                    status.is_healthy = False
-            else:
-                # No health data in Redis
-                status.is_healthy = False
+            # Calculate uptime for health determination
+            uptime_seconds = 0
+            if status.last_start_time:
+                uptime_seconds = (datetime.now() - status.last_start_time).total_seconds()
             
+            # Use the new intelligent health check
+            new_health_status = self._determine_process_health(
+                process_id, health_data, subprocess_running, uptime_seconds
+            )
+            
+            # Update status
+            if new_health_status != status.is_healthy:
+                if new_health_status:
+                    self.logger.info(f"Process {process_id} became healthy")
+                    status.consecutive_failures = 0
+                else:
+                    self.logger.warning(f"Process {process_id} became unhealthy")
+                    status.consecutive_failures += 1
+            
+            status.is_healthy = new_health_status
             status.last_health_check = datetime.now()
             
         except Exception as e:
@@ -512,16 +508,23 @@ class RedisProcessManager:
         if status.last_start_time:
             uptime_seconds = (datetime.now() - status.last_start_time).total_seconds()
         
-        is_running = (
+        # Determine if subprocess is running
+        subprocess_running = (
             status.process is not None and 
-            status.process.poll() is None and
-            status.is_healthy
+            status.process.poll() is None
         )
+        
+        # Determine health status more intelligently
+        is_healthy = self._determine_process_health(process_id, health_data, subprocess_running, uptime_seconds)
+        
+        # A process is considered "running" if the subprocess is alive
+        # Health is a separate metric that considers Redis heartbeat
+        is_running = subprocess_running
         
         return {
             'process_id': process_id,
             'is_running': is_running,
-            'is_healthy': status.is_healthy,
+            'is_healthy': is_healthy,
             'uptime_seconds': uptime_seconds,
             'restart_count': status.restart_count,
             'consecutive_failures': status.consecutive_failures,
@@ -529,8 +532,68 @@ class RedisProcessManager:
             'last_stop_time': status.last_stop_time.isoformat() if status.last_stop_time else None,
             'last_health_check': status.last_health_check.isoformat() if status.last_health_check else None,
             'subprocess_pid': status.process.pid if status.process else None,
-            'redis_health_data': health_data
+            'redis_health_data': health_data,
+            'messages_processed': health_data.get('messages_processed', 0) if health_data else 0,
+            'last_activity': health_data.get('last_activity', 'Unknown') if health_data else 'Unknown'
         }
+    
+    def _determine_process_health(self, process_id: str, health_data: Dict[str, Any], 
+                                subprocess_running: bool, uptime_seconds: float) -> bool:
+        """
+        Intelligently determine process health considering startup timing and Redis connectivity
+        
+        Args:
+            process_id: The process identifier
+            health_data: Health data from Redis (may be empty)
+            subprocess_running: Whether the subprocess is currently running
+            uptime_seconds: How long the process has been running
+            
+        Returns:
+            bool: True if process is considered healthy
+        """
+        # If subprocess is not running, it's definitely not healthy
+        if not subprocess_running:
+            return False
+        
+        # If process just started (< 60 seconds), be more lenient with health checks
+        startup_grace_period = 60  # seconds
+        is_in_startup = uptime_seconds < startup_grace_period
+        
+        # If we have Redis health data, use it
+        if health_data:
+            redis_status = health_data.get('status', 'unknown')
+            
+            # Check for explicit healthy status
+            if redis_status == 'healthy':
+                return True
+            
+            # Check heartbeat recency
+            last_heartbeat_str = health_data.get('last_heartbeat')
+            if last_heartbeat_str:
+                try:
+                    last_heartbeat = datetime.fromisoformat(last_heartbeat_str)
+                    heartbeat_age = (datetime.now() - last_heartbeat).total_seconds()
+                    
+                    # During startup, be more lenient with heartbeat timing
+                    max_heartbeat_age = 120 if is_in_startup else 60
+                    
+                    if heartbeat_age <= max_heartbeat_age:
+                        return True
+                    else:
+                        self.logger.debug(f"Process {process_id} has stale heartbeat ({heartbeat_age:.1f}s old)")
+                        return False
+                except (ValueError, TypeError):
+                    self.logger.debug(f"Process {process_id} has invalid heartbeat timestamp")
+        
+        # If no Redis health data but subprocess is running
+        if is_in_startup:
+            # During startup, assume healthy if subprocess is running
+            self.logger.debug(f"Process {process_id} in startup grace period, assuming healthy")
+            return True
+        else:
+            # After startup period, require Redis health data
+            self.logger.debug(f"Process {process_id} missing Redis health data after startup period")
+            return False
     
     def get_system_health(self) -> Dict[str, Any]:
         """Get comprehensive system health report"""

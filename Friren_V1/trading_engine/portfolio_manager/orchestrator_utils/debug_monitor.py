@@ -183,7 +183,7 @@ class DetailedDebugMonitor:
         self.logger.info("--- PROCESS MONITORING ---")
 
         if not self.process_manager:
-            self.logger.warning("PROCESS MANAGER: Not initialized")
+            self.logger.warning("PROCESS MANAGER: Component not available for monitoring")
             return
 
         try:
@@ -228,7 +228,7 @@ class DetailedDebugMonitor:
         self.logger.info("--- REDIS QUEUE MONITORING ---")
 
         if not self.redis_manager:
-            self.logger.warning("REDIS MANAGER: Not initialized")
+            self.logger.warning("REDIS MANAGER: Component not available for monitoring")
             return
 
         try:
@@ -271,7 +271,7 @@ class DetailedDebugMonitor:
         self.logger.info("--- REDIS SHARED STATE MONITORING ---")
 
         if not self.redis_manager:
-            self.logger.warning("REDIS SHARED STATE: Not initialized")
+            self.logger.warning("REDIS SHARED STATE: Component not available for monitoring")
             return
 
         try:

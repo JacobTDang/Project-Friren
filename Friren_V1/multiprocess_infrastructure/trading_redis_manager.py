@@ -282,6 +282,64 @@ class TradingRedisManager:
             logger.error(f"Error getting queue size: {e}")
             return 0
     
+    def get_queue_status(self) -> Dict[str, Dict[str, Any]]:
+        """Get status of all message queues"""
+        try:
+            queue_status = {}
+            
+            # Standard queues
+            standard_queues = {
+                'priority': self.PRIORITY_QUEUE,
+                'health': self.HEALTH_QUEUE,
+                'dead_letter': self.DEAD_LETTER_QUEUE,
+                'decisions': self.DECISION_QUEUE,
+                'execution': self.EXECUTION_QUEUE
+            }
+            
+            for queue_name, queue_key in standard_queues.items():
+                size = self.redis_client.llen(queue_key)
+                
+                # Get recent messages to analyze types
+                recent_messages = self.redis_client.lrange(queue_key, 0, 9)  # Last 10 messages
+                message_types = []
+                
+                for msg_json in recent_messages:
+                    try:
+                        msg_data = json.loads(msg_json)
+                        msg_type = msg_data.get('message_type', 'unknown')
+                        if msg_type not in message_types:
+                            message_types.append(msg_type)
+                    except (json.JSONDecodeError, KeyError):
+                        pass
+                
+                queue_status[queue_name] = {
+                    'size': size,
+                    'pending_messages': size,  # For Redis lists, size == pending
+                    'messages_processed': 0,  # Would need tracking to implement
+                    'last_message_time': 'Unknown',  # Would need tracking to implement
+                    'message_types': message_types
+                }
+            
+            # Process-specific queues
+            process_queue_keys = self.redis_client.keys(f"{self.QUEUE_PREFIX}:process_*")
+            for queue_key in process_queue_keys:
+                queue_name = queue_key.split(':')[-1]  # Extract process name
+                size = self.redis_client.llen(queue_key)
+                
+                queue_status[queue_name] = {
+                    'size': size,
+                    'pending_messages': size,
+                    'messages_processed': 0,
+                    'last_message_time': 'Unknown',
+                    'message_types': []
+                }
+            
+            return queue_status
+            
+        except Exception as e:
+            logger.error(f"Error getting queue status: {e}")
+            return {}
+    
     # Shared State Management
     def set_shared_state(self, key: str, value: Any, namespace: str = "general") -> bool:
         """Set shared state value"""
@@ -336,6 +394,35 @@ class TradingRedisManager:
         except Exception as e:
             logger.error(f"Error updating shared state: {e}")
             return False
+    
+    def get_all_shared_keys(self, namespace: str = None) -> List[str]:
+        """Get all shared state keys, optionally filtered by namespace"""
+        try:
+            if namespace:
+                pattern = f"{self.STATE_PREFIX}:{namespace}:*"
+            else:
+                pattern = f"{self.STATE_PREFIX}:*"
+            
+            keys = self.redis_client.keys(pattern)
+            
+            # Strip the prefix to get just the key names
+            cleaned_keys = []
+            for key in keys:
+                # Remove the prefix and namespace to get the actual key
+                if namespace:
+                    prefix_to_remove = f"{self.STATE_PREFIX}:{namespace}:"
+                else:
+                    prefix_to_remove = f"{self.STATE_PREFIX}:"
+                
+                if key.startswith(prefix_to_remove):
+                    cleaned_key = key[len(prefix_to_remove):]
+                    cleaned_keys.append(cleaned_key)
+            
+            return cleaned_keys
+            
+        except Exception as e:
+            logger.error(f"Error getting all shared keys: {e}")
+            return []
     
     # Position Management
     def update_position(self, symbol: str, position_data: Dict[str, Any]) -> bool:
