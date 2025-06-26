@@ -83,17 +83,17 @@ class ResourceAllocation:
 
 @dataclass
 class ResourceQuota:
-    """System-wide resource quotas"""
+    """System-wide resource quotas - Loosened for better performance"""
     api_calls_per_hour: int = 400
-    memory_limit_mb: float = 800.0
-    cpu_limit_percent: float = 80.0
+    memory_limit_mb: float = 950.0  # Increased from 800MB to 950MB
+    cpu_limit_percent: float = 90.0  # Increased from 80% to 90%
     network_bandwidth_limit: float = 100.0  # Requests per minute
 
-    # Buffer percentages (don't use 100% of limits)
-    api_buffer: float = 0.8
-    memory_buffer: float = 0.85
-    cpu_buffer: float = 0.8
-    network_buffer: float = 0.9
+    # Buffer percentages (increased to use more resources)
+    api_buffer: float = 0.9  # Increased from 0.8 to 0.9
+    memory_buffer: float = 0.95  # Increased from 0.85 to 0.95
+    cpu_buffer: float = 0.9  # Increased from 0.8 to 0.9
+    network_buffer: float = 0.95  # Increased from 0.9 to 0.95
 
 
 @dataclass

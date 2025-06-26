@@ -60,7 +60,7 @@ class AlpacaConfig:
     api_key: str
     secret_key: str
     emergency_code: str
-    base_url: str = "https://paper-api.alpaca.markets"  # Paper trading URL
+    base_url: str = "https://paper-api.alpaca.markets/v2"  # Paper trading URL with v2 endpoint
 
     @classmethod
     def from_environment(cls):
@@ -170,7 +170,7 @@ class SimpleAlpacaInterface:
             self.trading_client = TradingClient(
                 api_key=self.config.api_key,
                 secret_key=self.config.secret_key,
-                paper=True  # Always use paper trading for safety
+                paper=True  # Always use paper trading for safety - automatically uses paper endpoint
             )
 
             # Create data client for market data

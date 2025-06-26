@@ -64,9 +64,9 @@ class StrategyAnalyzer:
             self.strategies = discover_all_strategies()
             self.logger.info(f"Loaded {len(self.strategies)} strategies: {list(self.strategies.keys())}")
 
-            # Initialize data fetcher
-            self.data_fetcher = StockDataFetcher()
-            self.logger.info("StockDataFetcher initialized")
+            # Initialize data fetcher (use available YahooFinancePriceData)
+            self.data_fetcher = YahooFinancePriceData()
+            self.logger.info("Yahoo Finance data fetcher initialized")
 
             # Initialize strategy performance tracking
             for strategy_name in self.strategies.keys():

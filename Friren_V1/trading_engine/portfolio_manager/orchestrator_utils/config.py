@@ -47,10 +47,10 @@ class SystemConfig:
     health_check_interval: int = 300  # seconds - increased from 10 to 300 to reduce database load (5 minutes)
     decision_cycle_interval: int = 60  # seconds
 
-    # Resource limits (for t3.micro)
-    max_memory_mb: int = 800  # Leave 200MB buffer on 1GB instance
-    max_cpu_percent: float = 80.0
-    api_rate_limit_buffer: float = 0.8  # Use 80% of API limits
+    # Resource limits (for t3.micro) - Loosened for better performance
+    max_memory_mb: int = 950  # Use 950MB of 1GB (leaving 50MB buffer)
+    max_cpu_percent: float = 90.0  # Increased from 80% to 90%
+    api_rate_limit_buffer: float = 0.9  # Increased from 0.8 to 0.9 (use 90% of API limits)
 
     # Emergency thresholds
     max_daily_loss_pct: float = 5.0

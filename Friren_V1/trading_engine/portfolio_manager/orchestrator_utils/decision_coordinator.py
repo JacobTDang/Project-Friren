@@ -140,7 +140,7 @@ class DecisionCoordinator:
         """Check for pending decisions from decision engine"""
         try:
             # Simulate decision engine queue management
-            if hasattr(self, '_last_decision_check'):
+            if self._last_decision_check is not None:
                 time_since_last = time.time() - self._last_decision_check
                 if time_since_last < 300:  # Only check every 5 minutes
                     return

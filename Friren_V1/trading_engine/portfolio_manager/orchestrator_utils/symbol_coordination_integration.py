@@ -35,6 +35,11 @@ class SymbolCoordinationIntegration:
     def initialize_symbol_coordination(self):
         """Initialize the symbol coordination system"""
         try:
+            self.logger.info(f"=== SYMBOL COORDINATION INIT DEBUG ===")
+            self.logger.info(f"symbol_coordination_enabled: {self.config.symbol_coordination_enabled}")
+            self.logger.info(f"SYMBOL_COORDINATION_AVAILABLE: {SYMBOL_COORDINATION_AVAILABLE}")
+            self.logger.info(f"config.symbols: {self.config.symbols}")
+            
             if self.config.symbol_coordination_enabled and SYMBOL_COORDINATION_AVAILABLE:
                 # Initialize resource manager first
                 self._initialize_resource_manager()
@@ -49,7 +54,9 @@ class SymbolCoordinationIntegration:
                 )
 
                 # Add configured symbols to coordinator
+                self.logger.info(f"Adding {len(self.config.symbols)} symbols to coordinator...")
                 for symbol in self.config.symbols:
+                    self.logger.info(f"Processing symbol: {symbol}")
                     intensity = getattr(MonitoringIntensity, self.config.default_symbol_intensity.upper(), MonitoringIntensity.ACTIVE)
                     config = SymbolMonitoringConfig(
                         symbol=symbol,
@@ -58,7 +65,7 @@ class SymbolCoordinationIntegration:
                     )
                     success = self.symbol_coordinator.add_symbol(symbol, config)
                     if success:
-                        self.logger.info(f"Added symbol {symbol} to coordination with intensity {intensity}")
+                        self.logger.info(f"[SUCCESS] Successfully added symbol {symbol} to coordination with intensity {intensity}")
 
                         # Register symbol with resource manager and message router
                         if self.resource_manager:
@@ -66,7 +73,13 @@ class SymbolCoordinationIntegration:
                         if self.message_router:
                             self.message_router.register_symbol(symbol, config)
                     else:
-                        self.logger.warning(f"Failed to add symbol {symbol} to coordination")
+                        self.logger.warning(f"[FAILED] Failed to add symbol {symbol} to coordination")
+                
+                # Check final status
+                status = self.symbol_coordinator.get_coordination_status()
+                self.logger.info(f"Final symbol coordinator status: {len(status['symbols'])} symbols added")
+                for sym, data in status['symbols'].items():
+                    self.logger.info(f"  {sym}: position={data.get('position', 0)}, intensity={data.get('intensity', 'unknown')}")
 
                 # Start resource monitoring and message routing
                 if self.resource_manager:
@@ -103,7 +116,12 @@ class SymbolCoordinationIntegration:
             def get_next_symbol_to_process(self):
                 return None
             def get_coordination_status(self):
-                return {'symbol_states': {}}
+                return {
+                    'symbols': {},  # Fixed: was 'symbol_states', should be 'symbols'
+                    'total_symbols': 0,
+                    'intensive_symbols': 0,
+                    'metrics': {}
+                }
 
         class FallbackResourceManager:
             def allocate_resources(self, symbol, config):

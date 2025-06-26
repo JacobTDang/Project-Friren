@@ -75,7 +75,7 @@ except ImportError:
         def size_up(self, symbol, target_pct): return SizeCalculation()
 
     class TradingDBManager:
-        def __init__(self, name): pass
+        def __init__(self, config=None): pass
         def insert_transaction(self, **kwargs): return True
         def upsert_holding(self, **kwargs): return True
         def get_holdings(self, **kwargs): return []
@@ -236,7 +236,7 @@ class ExecutionOrchestrator:
         # Tool integrations
         self.risk_manager = risk_manager or SolidRiskManager()
         self.position_sizer = position_sizer or PurePositionSizer()
-        self.db_manager = db_manager or TradingDBManager("execution_orchestrator")
+        self.db_manager = db_manager or TradingDBManager()
         self.alpaca_interface = alpaca_interface or SimpleAlpacaInterface()
         self.order_manager = order_manager or SimpleOrderManager()
         self.execution_engine = execution_engine or SimpleExecutionEngine(

@@ -346,10 +346,17 @@ class SymbolCoordinator:
                         'volatility': state.volatility
                     }
 
+                # Debug the type error
+                try:
+                    api_budget_remaining = self.total_api_budget - self.api_calls_used
+                except TypeError as e:
+                    self.logger.error(f"Type error in budget calculation: total_api_budget={type(self.total_api_budget)}:{self.total_api_budget}, api_calls_used={type(self.api_calls_used)}:{self.api_calls_used}")
+                    api_budget_remaining = 0
+
                 return {
                     'total_symbols': len(self.symbol_states),
                     'api_calls_used': self.api_calls_used,
-                    'api_budget_remaining': self.total_api_budget - self.api_calls_used,
+                    'api_budget_remaining': api_budget_remaining,
                     'intensive_symbols': len([s for s in self.symbol_states.values()
                                             if s.config.monitoring_intensity == MonitoringIntensity.INTENSIVE]),
                     'symbols': symbol_status,
@@ -515,3 +522,108 @@ class SymbolCoordinator:
 
         except Exception as e:
             self.logger.error(f"Error updating coordination metrics: {e}")
+
+    def update_symbol_position(self, symbol: str, position_data: Dict[str, Any]) -> None:
+        """
+        Update position information for a symbol.
+
+        Args:
+            symbol: Symbol to update
+            position_data: Position details including shares, value, etc.
+        """
+        try:
+            with self.coordination_lock:
+                if symbol not in self.symbol_states:
+                    self.logger.warning(f"Symbol {symbol} not in coordinator - auto-adding it")
+                    # Auto-add the missing symbol with default settings
+                    self.add_symbol(symbol)
+                    
+                    if symbol not in self.symbol_states:
+                        self.logger.error(f"Failed to auto-add symbol {symbol} to coordinator")
+                        return
+
+                state = self.symbol_states[symbol]
+
+                # Update position information
+                state.current_position = position_data.get('shares', 0.0)
+                state.position_value = position_data.get('market_value', 0.0)
+                state.unrealized_pnl = position_data.get('unrealized_pl', 0.0)
+
+                # Update last update time
+                state.last_update = datetime.now()
+
+                # Check if intensity adjustment is needed based on position size
+                self._check_intensity_adjustment(symbol, state)
+
+                # Update health status
+                state.update_health_status()
+
+                self.logger.info(f"Updated position for {symbol}: "
+                               f"shares={state.current_position}, "
+                               f"value=${state.position_value:,.2f}, "
+                               f"unrealized_pnl=${state.unrealized_pnl:+,.2f}")
+
+        except Exception as e:
+            self.logger.error(f"Error updating position for {symbol}: {e}")
+
+    def sync_positions_from_database(self, db_manager) -> None:
+        """
+        Sync all positions from database to symbol coordinator.
+
+        Args:
+            db_manager: Database manager to get holdings from
+        """
+        try:
+            self.logger.info("=== SYNC POSITIONS DEBUG START ===")
+            self.logger.info("Syncing positions from database to symbol coordinator...")
+            
+            # DEBUG: Show current symbol_states before sync
+            self.logger.info(f"BEFORE SYNC: Symbol states count = {len(self.symbol_states)}")
+            for symbol, state in self.symbol_states.items():
+                is_active = state.current_position > 0
+                self.logger.info(f"  {symbol}: position={state.current_position}, active={is_active}")
+
+            # Get all active holdings from database
+            self.logger.info("Getting holdings from database...")
+            holdings = db_manager.get_holdings(active_only=True)
+            self.logger.info(f"Retrieved {len(holdings)} holdings from database")
+
+            for holding in holdings:
+                symbol = holding['symbol']
+
+                # Handle different column name mappings
+                if 'net_quantity' in holding:
+                    shares = float(holding['net_quantity'])
+                    total_invested = float(holding['total_invested'])
+                    avg_cost_basis = float(holding['avg_cost_basis'])
+                elif 'quantity' in holding:
+                    shares = float(holding['quantity'])
+                    total_invested = float(holding['total_invested'])
+                    avg_cost_basis = float(holding['avg_cost'])
+                else:
+                    self.logger.warning(f"Unknown holding format for {symbol}: {holding}")
+                    continue
+
+                # Only update if we have shares (active position)
+                if shares != 0:
+                    position_data = {
+                        'shares': shares,
+                        'market_value': total_invested,  # Approximate market value
+                        'unrealized_pl': 0.0,  # Will be updated when we get current prices
+                        'avg_entry_price': avg_cost_basis
+                    }
+
+                    self.update_symbol_position(symbol, position_data)
+                    self.logger.info(f"Synced position for {symbol}: {shares} shares")
+                else:
+                    # Clear position if no shares
+                    self.update_symbol_position(symbol, {'shares': 0.0, 'market_value': 0.0, 'unrealized_pl': 0.0})
+
+            self.logger.info(f"Position sync completed for {len(holdings)} holdings")
+            self.logger.info("=== SYNC POSITIONS DEBUG END ===")
+
+        except Exception as e:
+            self.logger.error(f"CRITICAL ERROR in sync_positions_from_database: {e}")
+            import traceback
+            self.logger.error(f"Traceback: {traceback.format_exc()}")
+            traceback.print_exc()

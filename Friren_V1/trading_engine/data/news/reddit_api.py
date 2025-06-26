@@ -11,6 +11,7 @@ import time
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict
 import logging
+import threading
 
 try:
     from .base import NewsDataSource, NewsArticle
@@ -99,9 +100,35 @@ class RedditNews(NewsDataSource):
                 user_agent=self.user_agent
             )
 
-            # Test connection - this will fail if credentials are wrong
-            self.reddit.user.me()
-            self.logger.info("Reddit API connection successful")
+            # Test connection with timeout to prevent hanging
+            connection_result = [False]
+            connection_error = [None]
+
+            def test_connection():
+                try:
+                    # Test connection - this will fail if credentials are wrong
+                    if self.reddit is not None:
+                        self.reddit.user.me()
+                        connection_result[0] = True
+                except Exception as e:
+                    connection_error[0] = e
+
+            # Start connection test in a separate thread with timeout
+            test_thread = threading.Thread(target=test_connection)
+            test_thread.daemon = True
+            test_thread.start()
+
+            # Wait for connection test with timeout
+            test_thread.join(timeout=10)  # 10 second timeout
+
+            if test_thread.is_alive():
+                self.logger.warning("Reddit connection test timed out, API may be slow")
+                # Don't fail - just warn and continue
+            elif connection_error[0]:
+                self.logger.error(f"Reddit API connection failed: {connection_error[0]}")
+                self.reddit = None
+            else:
+                self.logger.info("Reddit API connection successful")
 
         except Exception as e:
             self.logger.error(f"Reddit API connection failed: {e}")
