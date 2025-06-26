@@ -31,16 +31,16 @@ class SystemMonitor:
         # References to other components (set by orchestrator)
         self.process_manager = None
         self.account_manager = None
-        self.shared_state = None
+        self.redis_manager = None
         self.emergency_manager = None
         self.get_system_status_func = None
 
-    def set_components(self, process_manager=None, account_manager=None, shared_state=None,
+    def set_components(self, process_manager=None, account_manager=None, redis_manager=None,
                       emergency_manager=None, get_system_status_func=None):
         """Set references to other components"""
         self.process_manager = process_manager
         self.account_manager = account_manager
-        self.shared_state = shared_state
+        self.redis_manager = redis_manager  # Redis replaces shared_state
         self.emergency_manager = emergency_manager
         self.get_system_status_func = get_system_status_func
 
@@ -107,12 +107,22 @@ class SystemMonitor:
                 memory_info = process.memory_info()
                 self.status.memory_usage_mb = memory_info.rss / 1024 / 1024
 
-                # Get CPU usage with non-blocking call (interval=None for instant reading)
-                # First call may return 0.0, subsequent calls will be accurate
+                # Get CPU usage with proper interval for accurate readings
+                # Use interval=1.0 for the first reading to establish baseline
                 try:
-                    self.status.cpu_usage_percent = process.cpu_percent(interval=None)
+                    # Get system-wide CPU usage instead of just this process for more meaningful metrics
+                    self.status.cpu_usage_percent = psutil.cpu_percent(interval=1.0)
+
+                    # Also get this process CPU for detailed monitoring
+                    process_cpu = process.cpu_percent(interval=None)
+
+                    self.logger.debug(f"System CPU: {self.status.cpu_usage_percent:.1f}%, Process CPU: {process_cpu:.1f}%")
                 except:
-                    self.status.cpu_usage_percent = 0.0
+                    # Fallback to process CPU if system CPU fails
+                    try:
+                        self.status.cpu_usage_percent = process.cpu_percent(interval=1.0)
+                    except:
+                        self.status.cpu_usage_percent = 0.0
 
                 self.logger.debug(f"System metrics updated: Memory={self.status.memory_usage_mb:.1f}MB, CPU={self.status.cpu_usage_percent:.1f}%")
 
@@ -192,9 +202,11 @@ class SystemMonitor:
 
     def update_shared_state(self):
         """Update shared state with system information"""
-        if self.shared_state and self.get_system_status_func:
-            self.shared_state.set('system_status', self.get_system_status_func())
-            self.shared_state.set('last_update', datetime.now().isoformat())
+        if self.redis_manager and self.get_system_status_func:
+            # Update Redis with system status
+            system_status = self.get_system_status_func()
+            self.redis_manager.set_shared_state('system_status', system_status)
+            self.redis_manager.set_shared_state('last_update', datetime.now().isoformat())
 
     def log_system_status(self):
         """Log periodic system status"""
