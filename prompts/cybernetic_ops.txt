@@ -1,0 +1,127 @@
+<ImplementationRules>
+  <CoreRules>
+    <Rule id="1">No emojis in code, comments, or documentation</Rule>
+    <Rule id="2">Phase-based implementation: Core -> Integration -> Automation</Rule>
+    <Rule id="3">Manual control first, automation last</Rule>
+    <Rule id="4">Database-first approach for all ML data persistence</Rule>
+    <Rule id="5">Fail-safe design with fallback mechanisms</Rule>
+    <Rule id="6">Test thoroughly at each phase boundary</Rule>
+    <Rule id="7">Notify before major changes for git add/commit/push checkpoint</Rule>
+  </CoreRules>
+
+  <VersionControlCheckpoints>
+    <Checkpoint trigger="After completing each core component">
+      <Description>ModelManager, Trainer, FeatureEngine implementations</Description>
+      <Action>Notify for git commit before moving to next component</Action>
+    </Checkpoint>
+    <Checkpoint trigger="Before phase transitions">
+      <Description>Phase 1->2, Phase 2->3 transitions</Description>
+      <Action>Notify for git commit and push before proceeding</Action>
+    </Checkpoint>
+    <Checkpoint trigger="After major refactoring">
+      <Description>Database schema changes, API modifications</Description>
+      <Action>Notify for git commit to preserve working state</Action>
+    </Checkpoint>
+    <Checkpoint trigger="Before testing integration">
+      <Description>Before connecting ML system to portfolio manager</Description>
+      <Action>Notify for git commit to save stable baseline</Action>
+    </Checkpoint>
+  </VersionControlCheckpoints>
+
+  <Phase1 name="Core ML Infrastructure" duration="Week 1">
+    <Component name="ModelManager" file="model_maintainer/core/model_manager.py">
+      <Purpose>Central XGBoost model lifecycle management</Purpose>
+      <Methods>load_active_model, save_model, validate_model, deploy_model, rollback_model</Methods>
+      <Tradeoffs>
+        <Pro>Centralized control, version safety</Pro>
+        <Con>Single point of failure, requires robust error handling</Con>
+        <Complexity>Medium - file I/O, validation logic</Complexity>
+      </Tradeoffs>
+      <FutureConsiderations>S3 integration, A/B testing, model ensembles</FutureConsiderations>
+    </Component>
+
+    <Component name="Trainer" file="model_maintainer/core/trainer.py">
+      <Purpose>XGBoost training with time-series validation</Purpose>
+      <Methods>train_initial_model, incremental_update, full_retrain, validate_training</Methods>
+      <Tradeoffs>
+        <Pro>Proper financial ML practices</Pro>
+        <Con>Computationally intensive</Con>
+        <Complexity>High - ML validation, feature engineering</Complexity>
+      </Tradeoffs>
+      <FutureConsiderations>Optuna optimization, ensemble methods, auto feature selection</FutureConsiderations>
+    </Component>
+
+    <Component name="FeatureEngine" file="model_maintainer/core/feature_engine.py">
+      <Purpose>Extract and validate features from database</Purpose>
+      <Methods>extract_features, validate_features, engineer_features, detect_drift</Methods>
+      <Tradeoffs>
+        <Pro>Clean data/ML separation</Pro>
+        <Con>Performance bottleneck</Con>
+        <Complexity>Medium - database queries, validation</Complexity>
+      </Tradeoffs>
+      <FutureConsiderations>Real-time computation, caching, automated engineering</FutureConsiderations>
+    </Component>
+  </Phase1>
+
+  <Phase2 name="Integration Testing" duration="Week 2">
+    <Component name="ModelInterface" file="portfolio_manager/model_interface.py">
+      <Purpose>Clean API between ML system and portfolio manager</Purpose>
+      <Methods>get_trade_prediction, log_trade_execution, log_trade_outcome</Methods>
+      <Tradeoffs>
+        <Pro>Decoupled architecture, testable interface</Pro>
+        <Con>Additional abstraction layer</Con>
+        <Complexity>Low - API design, error handling</Complexity>
+      </Tradeoffs>
+      <FutureConsiderations>Caching, rate limiting, batch predictions</FutureConsiderations>
+    </Component>
+
+    <Component name="Evaluator" file="model_maintainer/core/evaluator.py">
+      <Purpose>Model performance monitoring and validation</Purpose>
+      <Methods>evaluate_model, track_performance, generate_metrics</Methods>
+      <Tradeoffs>
+        <Pro>Performance transparency, model quality assurance</Pro>
+        <Con>Additional computational overhead</Con>
+        <Complexity>Medium - metrics calculation, reporting</Complexity>
+      </Tradeoffs>
+      <FutureConsiderations>Real-time monitoring, automated alerts</FutureConsiderations>
+    </Component>
+  </Phase2>
+
+  <Phase3 name="Cybernetic Automation" duration="Week 3">
+    <Component name="CyberneticCore" file="model_maintainer/core/cybernetic_core.py">
+      <Purpose>Automated learning triggers and feedback analysis</Purpose>
+      <Methods>analyze_performance, trigger_learning, detect_patterns</Methods>
+      <Tradeoffs>
+        <Pro>Autonomous improvement, pattern discovery</Pro>
+        <Con>Complex logic, potential for automated errors</Con>
+        <Complexity>High - feedback loops, pattern analysis</Complexity>
+      </Tradeoffs>
+      <FutureConsiderations>Strategy evolution, parameter optimization</FutureConsiderations>
+    </Component>
+  </Phase3>
+
+  <InfrastructureRequirements>
+    <Database>PostgreSQL with MLFeatures, TransactionHistory tables</Database>
+    <Storage>AWS S3 bucket for model versioning (setup required)</Storage>
+    <Environment>Environment variables for AWS credentials</Environment>
+    <Dependencies>xgboost, shap, joblib, boto3, optuna</Dependencies>
+  </InfrastructureRequirements>
+
+  <TestingStrategy>
+    <Phase1Testing>Manual model training/loading with synthetic data</Phase1Testing>
+    <Phase2Testing>Integration with existing portfolio manager</Phase2Testing>
+    <Phase3Testing>End-to-end automated learning cycle</Phase3Testing>
+  </TestingStrategy>
+
+  <MissingComponents>
+    <Item>S3 bucket creation and IAM role setup</Item>
+    <Item>Environment variable configuration</Item>
+    <Item>Model versioning database tables</Item>
+    <Item>Cron/scheduler for Saturday retraining</Item>
+    <Item>Monitoring and alerting system</Item>
+    <Item>Backup and recovery procedures</Item>
+  </MissingComponents>
+</ImplementationRules>
+
+
+I reccoemnt chacking my models.py I noticed some misallignments with my table inputs. The names are wrong, quantity is one of the key ones
