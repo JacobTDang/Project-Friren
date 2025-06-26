@@ -23,67 +23,56 @@ from collections import deque
 import numpy as np
 import sys
 import os
+import torch
 
 # Add project root to Python path for imports
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-# Import existing multiprocess infrastructure
+# Import color system for FinBERT analysis (dark yellow)
 try:
-    from Friren_V1.multiprocess_infrastructure.base_process import BaseProcess, ProcessState
-    from Friren_V1.multiprocess_infrastructure.queue_manager import QueueMessage, MessageType, MessagePriority
+    from terminal_color_system import print_finbert_analysis, print_error, print_warning, print_success, create_colored_logger
+    COLOR_SYSTEM_AVAILABLE = True
 except ImportError:
-    try:
-        from multiprocess_infrastructure.base_process import BaseProcess, ProcessState
-        from multiprocess_infrastructure.queue_manager import QueueMessage, MessageType, MessagePriority
-    except ImportError:
-        # Create minimal stubs if infrastructure not available
-        from enum import Enum
-        from abc import ABC, abstractmethod
+    COLOR_SYSTEM_AVAILABLE = False
 
-        class ProcessState(Enum):
-            INITIALIZING = "initializing"
-            RUNNING = "running"
-            STOPPED = "stopped"
-            ERROR = "error"
+# Import Redis-based infrastructure
+try:
+    from Friren_V1.multiprocess_infrastructure.redis_base_process import RedisBaseProcess, ProcessState
+    from Friren_V1.multiprocess_infrastructure.trading_redis_manager import (
+        get_trading_redis_manager, create_process_message, MessagePriority, ProcessMessage
+    )
+except ImportError:
+    # Create minimal stubs if infrastructure not available
+    from enum import Enum
+    from abc import ABC, abstractmethod
 
-        class MessageType(Enum):
-            NEWS_REQUEST = "news_request"
-            REGIME_CHANGE = "regime_change"
-            FINBERT_ANALYSIS = "finbert_analysis"
-            SENTIMENT_UPDATE = "sentiment_update"
+    class ProcessState(Enum):
+        INITIALIZING = "initializing"
+        RUNNING = "running"
+        STOPPED = "stopped"
+        ERROR = "error"
 
-        class MessagePriority(Enum):
-            HIGH = "high"
-            MEDIUM = "medium"
-            LOW = "low"
+    # Legacy stub classes no longer needed - using Redis ProcessMessage system
 
-        class QueueMessage:
-            def __init__(self, message_type, priority, sender_id, recipient_id, payload):
-                self.message_type = message_type
-                self.priority = priority
-                self.sender_id = sender_id
-                self.recipient_id = recipient_id
-                self.payload = payload
+    class BaseProcess(ABC):
+        def __init__(self, process_id: str):
+            self.process_id = process_id
+            self.state = ProcessState.INITIALIZING
+            self.logger = logging.getLogger(f"process.{process_id}")
+            self.error_count = 0
+            self.shared_state = None
+            self.priority_queue = None
 
-        class BaseProcess(ABC):
-            def __init__(self, process_id: str):
-                self.process_id = process_id
-                self.state = ProcessState.INITIALIZING
-                self.logger = logging.getLogger(f"process.{process_id}")
-                self.error_count = 0
-                self.shared_state = None
-                self.priority_queue = None
-
-            @abstractmethod
-            def _initialize(self): pass
-            @abstractmethod
-            def _process_cycle(self): pass
-            @abstractmethod
-            def _cleanup(self): pass
-            @abstractmethod
-            def get_process_info(self): pass
+        @abstractmethod
+        def _initialize(self): pass
+        @abstractmethod
+        def _process_cycle(self): pass
+        @abstractmethod
+        def _cleanup(self): pass
+        @abstractmethod
+        def get_process_info(self): pass
 
 # Import the FinBERT utility tool
 try:
@@ -104,24 +93,16 @@ except ImportError:
             average_confidence: float = 0.0
             sentiment_distribution: Dict = None
 
-        class EnhancedFinBERT:
+        # NO MOCK FINBERT - Real FinBERT required or process fails
+        class FailureFinBERT:
             def __init__(self, **kwargs):
                 self.initialized = False
 
             def initialize(self):
-                print("Mock FinBERT initialized")
-                return False  # Use mock mode
+                raise RuntimeError("FinBERT not available - no mock/fallback allowed")
 
             def analyze_batch(self, texts, article_ids):
-                print(f"Mock analyzing {len(texts)} texts")
-                return BatchSentimentResult(
-                    results=[],
-                    batch_processing_time=0.1,
-                    success_count=len(texts),
-                    error_count=0,
-                    average_confidence=0.75,
-                    sentiment_distribution={'POSITIVE': 1, 'NEGATIVE': 1, 'NEUTRAL': 1}
-                )
+                raise RuntimeError("FinBERT not available - no mock/fallback allowed")
 
 
 @dataclass
@@ -139,6 +120,17 @@ class SymbolSentimentSummary:
     timestamp: datetime
 
 
+# Add color constants for console output
+class Colors:
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    GREEN = '\033[92m'
+    BLUE = '\033[94m'
+    WHITE = '\033[97m'
+    BOLD = '\033[1m'
+    RESET = '\033[0m'
+
+
 def sentiment_analysis_worker(task: Dict[str, Any]) -> Dict[str, Any]:
     """
     Worker function for parallel sentiment analysis
@@ -151,14 +143,16 @@ def sentiment_analysis_worker(task: Dict[str, Any]) -> Dict[str, Any]:
         Dictionary with sentiment analysis results
     """
     try:
-        # Initialize FinBERT tool in worker process
+        # Initialize FinBERT tool in worker process - NO FALLBACK ALLOWED
         finbert_tool = EnhancedFinBERT(
             batch_size=8,  # Optimized for t3.micro
             device="cpu"   # CPU-only for t3.micro
         )
 
-        # Initialize the tool (will use mock if FinBERT not available)
+        # Initialize the tool - MUST succeed or process fails
         initialization_success = finbert_tool.initialize()
+        if not initialization_success:
+            raise RuntimeError("FinBERT initialization failed - no mock/fallback allowed")
 
         # Extract task data
         symbol = task['symbol']
@@ -231,7 +225,7 @@ def sentiment_analysis_worker(task: Dict[str, Any]) -> Dict[str, Any]:
                 'distribution': batch_result.sentiment_distribution
             },
             'success': True,
-            'model_used': 'finbert' if initialization_success else 'mock'
+            'model_used': 'finbert'
         }
 
     except Exception as e:
@@ -320,7 +314,7 @@ def _create_symbol_summary(symbol: str, batch_result: BatchSentimentResult,
     )
 
 
-class FinBERTSentimentProcess(BaseProcess):
+class FinBERTSentimentProcess(RedisBaseProcess):
     """
     FinBERT Sentiment Analysis Process - Clean Architecture
 
@@ -368,10 +362,12 @@ class FinBERTSentimentProcess(BaseProcess):
         self.error_count = 0
         self.model_status = "unknown"  # finbert, mock, or error
 
-        self.logger.info(f"FinBERT Sentiment Process configured - "
+        self._safe_log("info", f"FinBERT Sentiment Process configured - "
                         f"batch_size: {batch_size}, timeout: {processing_timeout}s")
 
     def _initialize(self):
+        self.logger.critical("EMERGENCY: ENTERED _initialize for sentiment_analyzer")
+        print("EMERGENCY: ENTERED _initialize for sentiment_analyzer")
         """Initialize process-specific components"""
         self.logger.info("Initializing FinBERT Sentiment Process...")
 
@@ -409,39 +405,87 @@ class FinBERTSentimentProcess(BaseProcess):
             self.logger.error(f"Failed to initialize FinBERT Sentiment Process: {e}")
             self.state = ProcessState.ERROR
             raise
+        self.logger.critical("EMERGENCY: EXITING _initialize for sentiment_analyzer")
+        print("EMERGENCY: EXITING _initialize for sentiment_analyzer")
 
     def _test_finbert_availability(self):
-        """Test if FinBERT model is available"""
+        """Test if FinBERT model is available with fast startup"""
         try:
-            # Try to import and initialize FinBERT
+            # PRODUCTION FIX: Fast startup - only test imports, defer model loading
+            self.logger.info("FAST STARTUP: Testing FinBERT imports only...")
+            
             try:
                 from Friren_V1.trading_engine.sentiment.finBERT_analysis import EnhancedFinBERT
             except ImportError:
                 from trading_engine.sentiment.finBERT_analysis import EnhancedFinBERT
 
-            test_tool = EnhancedFinBERT()
-            success = test_tool.initialize()
-
-            if success:
-                self.model_status = "finbert"
-                self.logger.info("FinBERT model available and loaded")
-            else:
-                self.model_status = "mock"
-                self.logger.warning("FinBERT model not available, using mock analysis")
-
+            # PRODUCTION: Don't initialize model during startup - do it lazily
+            self.model_status = "finbert_lazy"  # Will initialize on first use
+            self.logger.info("FinBERT imports successful - model will load on first use")
+            self._finbert_class = EnhancedFinBERT  # Store class for lazy loading
+            self._finbert_instance = None  # Will be created on first use
+            
+        except ImportError as ie:
+            self.model_status = "mock"
+            self.logger.warning(f"FinBERT imports failed: {ie} - using mock analysis")
         except Exception as e:
             self.model_status = "error"
             self.logger.error(f"Error testing FinBERT availability: {e}")
             self.logger.info("Will use fallback processing")
 
+    def _ensure_finbert_loaded(self):
+        """Lazy initialization of FinBERT model when actually needed"""
+        if self.model_status == "finbert_lazy" and self._finbert_instance is None:
+            self.logger.info("LAZY LOADING: Initializing FinBERT model on first use...")
+            try:
+                self._finbert_instance = self._finbert_class()
+                success = self._finbert_instance.initialize()
+                if success:
+                    self.model_status = "finbert"
+                    self.logger.info("FinBERT model successfully loaded on demand")
+                else:
+                    self.model_status = "mock"
+                    self.logger.warning("FinBERT model failed to load - using mock")
+            except Exception as e:
+                self.model_status = "error"
+                self.logger.error(f"FinBERT lazy loading failed: {e}")
+        
+        return self.model_status in ["finbert", "mock"]
+
     def _process_cycle(self):
-        """Main processing cycle - check for FinBERT analysis requests"""
+        self.logger.critical("EMERGENCY: ENTERED MAIN LOOP for sentiment_analyzer")
+        print("EMERGENCY: ENTERED MAIN LOOP for sentiment_analyzer")
+        
+        # BUSINESS LOGIC VERIFICATION: Test Redis communication immediately
         try:
-            # Check for FINBERT_ANALYSIS messages
+            self.logger.info("BUSINESS LOGIC TEST: Verifying Redis communication...")
+            test_message = create_process_message(
+                sender=self.process_id,
+                recipient="test_recipient",
+                message_type="STARTUP_TEST",
+                data={"test": "business_logic_verification", "timestamp": datetime.now().isoformat()}
+            )
+            
+            # Send test message to Redis
+            if self.redis_manager.send_message(test_message):
+                self.logger.info("✓ BUSINESS LOGIC: Redis send successful")
+                # Try to receive it back
+                received = self.redis_manager.receive_message(timeout=1)
+                if received:
+                    self.logger.info("✓ BUSINESS LOGIC: Redis receive successful")
+                else:
+                    self.logger.info("✓ BUSINESS LOGIC: No messages in queue (normal)")
+            else:
+                self.logger.error("✗ BUSINESS LOGIC: Redis send failed")
+                
+        except Exception as e:
+            self.logger.error(f"✗ BUSINESS LOGIC TEST FAILED: {e}")
+        try:
+            # Check for relevant messages
             finbert_message = self._get_finbert_message()
 
             if finbert_message:
-                self._queue_for_processing(finbert_message)
+                self._process_finbert_message(finbert_message)
 
             # Process batch if ready
             if self._should_process_batch():
@@ -455,67 +499,117 @@ class FinBERTSentimentProcess(BaseProcess):
             self.error_count += 1
             time.sleep(5)
 
-    def _get_finbert_message(self, timeout: float = 0.1) -> Optional[QueueMessage]:
-        """Get FINBERT_ANALYSIS message from priority queue"""
+    def _get_finbert_message(self, timeout: float = 0.1) -> Optional[ProcessMessage]:
+        """Get relevant messages from Redis queue"""
         try:
-            if not self.priority_queue:
+            if not self.redis_manager:
                 return None
 
-            # Non-blocking queue check
-            message = self.priority_queue.get(timeout=timeout)
+            # Non-blocking Redis message check
+            message = self.redis_manager.receive_message(timeout=timeout)
 
-            if message and message.message_type == MessageType.FINBERT_ANALYSIS:
-                return message
-            elif message:
-                # Put back if not the right type
-                self.priority_queue.put(message)
+            if message:
+                # Handle different message types
+                if message.message_type == "FINBERT_ANALYSIS":
+                    return message
+                elif message.message_type == "REGIME_CHANGE":
+                    # Handle regime change - could affect sentiment processing
+                    self.logger.info(f"Received regime change: {message.data}")
+                    print(f"Received regime change: {message.data}")
+                    # Could update processing parameters based on regime
+                    return None  # Don't queue for batch processing
+                elif message.message_type == "NEWS_REQUEST":
+                    # Handle news request - could trigger sentiment analysis
+                    self.logger.info(f"Received news request: {message.data}")
+                    print(f"Received news request: {message.data}")
+                    # Could trigger sentiment analysis for new articles
+                    return None  # Don't queue for batch processing
+                else:
+                    # Put back other message types for other processes
+                    self.redis_manager.send_message(message)
+                    return None
 
             return None
 
-        except:
+        except Exception as e:
+            self.logger.error(f"Error getting FinBERT message: {e}")
             return None
 
-    def _queue_for_processing(self, message: QueueMessage):
-        """Add message to processing queue for batching"""
+    def _process_finbert_message(self, message: ProcessMessage):
+        """Process FINBERT_ANALYSIS message and queue for batch processing"""
         try:
-            payload = message.payload
-
-            # Extract message data
-            symbol = payload.get('symbol', 'UNKNOWN')
-            articles = payload.get('articles', [])
-            request_id = payload.get('request_id', f"{symbol}_{int(time.time())}")
-            priority = payload.get('priority', False)
-
-            # Validate articles
-            if not articles:
-                self.logger.warning(f"Received empty articles list for {symbol}")
+            if message.message_type != "FINBERT_ANALYSIS":
                 return
 
-            # Create processing task
+            # Queue the task for batch processing
+            self._queue_finbert_task(message)
+
+        except Exception as e:
+            self.logger.error(f"Error processing FinBERT message: {e}")
+            self.error_count += 1
+
+    def _queue_finbert_task(self, message: ProcessMessage):
+        """Queue a FinBERT analysis task for batch processing"""
+        try:
+            payload = message.data
+            symbol = payload.get('symbol', 'UNKNOWN')
+            articles = payload.get('articles', [])
+            priority = payload.get('priority', False)
+
+            if not articles:
+                self.logger.warning(f"No articles provided for FinBERT analysis: {symbol}")
+                return
+
+            # ENHANCED LOGGING - Show what articles are being queued for analysis
+            self.logger.info(f"=== FINBERT ANALYSIS QUEUE: {symbol} ===")
+            print(f"\n=== FINBERT ANALYSIS QUEUE: {symbol} ===")
+            self.logger.info(f"ARTICLES TO ANALYZE: {len(articles)}")
+            print(f"ARTICLES TO ANALYZE: {len(articles)}")
+            self.logger.info(f"PRIORITY PROCESSING: {priority}")
+            print(f"PRIORITY PROCESSING: {priority}")
+
+            for i, article in enumerate(articles):
+                self.logger.info(f"QUEUED ARTICLE #{i+1}:")
+                print(f"QUEUED ARTICLE #{i+1}:")
+                self.logger.info(f"  TITLE: {article.get('title', 'Unknown')}")
+                print(f"  TITLE: {article.get('title', 'Unknown')}")
+                self.logger.info(f"  SOURCE: {article.get('source', 'Unknown')}")
+                print(f"  SOURCE: {article.get('source', 'Unknown')}")
+                self.logger.info(f"  PUBLISHED: {article.get('published_date', 'Unknown')}")
+                print(f"  PUBLISHED: {article.get('published_date', 'Unknown')}")
+
+                # Show content preview for sentiment analysis context
+                content = article.get('content', '')
+                if content:
+                    content_preview = content[:200].replace('\n', ' ').replace('\r', ' ')
+                    self.logger.info(f"  CONTENT FOR ANALYSIS: {content_preview}...")
+                    print(f"  CONTENT FOR ANALYSIS: {content_preview}...")
+
+                self.logger.info(f"  STATUS: READY FOR FINBERT PROCESSING")
+                print(f"  STATUS: READY FOR FINBERT PROCESSING")
+
+            # Create task for batch processing
             task = {
                 'symbol': symbol,
                 'articles': articles,
-                'request_id': request_id,
+                'request_id': payload.get('request_id', f"{symbol}_{int(time.time())}"),
                 'priority': priority,
-                'received_time': time.time(),
-                'sender_id': message.sender_id
+                'timestamp': time.time()
             }
 
-            # Add to queue (priority messages go to front)
-            if priority:
-                self.processing_queue.appendleft(task)
-                self.logger.info(f"Priority FinBERT analysis queued for {symbol}")
-            else:
-                self.processing_queue.append(task)
+            # Add to processing queue
+            self.processing_queue.append(task)
 
-            self.logger.debug(f"Queued FinBERT analysis for {symbol}: {len(articles)} articles")
+            # Log queue status
+            self.logger.info(f"FINBERT QUEUE STATUS: {len(self.processing_queue)} tasks pending")
 
-            # Process immediately if high priority or queue is full
+            # Trigger immediate processing if priority or queue is getting full
             if priority or len(self.processing_queue) >= self.batch_size:
+                self.logger.info("TRIGGERING IMMEDIATE FINBERT BATCH PROCESSING...")
                 self._process_current_batch()
 
         except Exception as e:
-            self.logger.error(f"Error queueing FinBERT message: {e}")
+            self.logger.error(f"Error queuing FinBERT task for {symbol}: {e}")
 
     def _should_process_batch(self) -> bool:
         """Check if it's time to process the current batch"""
@@ -583,47 +677,88 @@ class FinBERTSentimentProcess(BaseProcess):
             self.logger.error(f"Error processing FinBERT batch: {e}")
             self.error_count += 1
 
-    def _process_analysis_results(self, analysis_results: List[Dict[str, Any]]) -> int:
-        """
-        Process sentiment analysis results and send individual queue messages
-
-        For each successful analysis, sends a SENTIMENT_UPDATE message to the
-        decision engine in the main process for immediate processing.
-        """
-        messages_sent = 0
+    def _process_analysis_results(self, analysis_results: List[Dict]) -> int:
+        """Process FinBERT analysis results and update shared state"""
+        updates_sent = 0
 
         for result in analysis_results:
             try:
-                if not result.get('success', False):
-                    error_msg = result.get('error', 'Unknown error')
-                    symbol = result.get('symbol', 'unknown')
-                    self.logger.warning(f"Failed sentiment analysis for {symbol}: {error_msg}")
+                if not result or 'error' in result:
+                    self.logger.warning(f"Skipping failed analysis result: {result}")
                     continue
 
-                symbol = result['symbol']
-                summary = result.get('summary')
-                model_used = result.get('model_used', 'unknown')
-                detailed_results = result.get('detailed_results', [])
+                symbol = result.get('symbol', 'UNKNOWN')
+                sentiment_data = result.get('sentiment_data', {})
 
-                if summary:
-                    # Update shared state for monitoring/historical tracking
-                    self._update_shared_state_sentiment(symbol, summary, model_used)
+                if not sentiment_data:
+                    self.logger.warning(f"No sentiment data for {symbol}")
+                    continue
 
-                    # Send individual sentiment message to decision engine (MAIN PROCESS)
-                    message_sent = self._send_sentiment_to_decision_engine(
-                        symbol, summary, detailed_results, model_used
-                    )
+                # ENHANCED LOGGING - Show detailed FinBERT analysis results
+                self.logger.info(f"=== FINBERT ANALYSIS RESULTS: {symbol} ===")
+                print(f"\n=== FINBERT ANALYSIS RESULTS: {symbol} ===")
 
-                    if message_sent:
-                        messages_sent += 1
+                articles_analyzed = sentiment_data.get('articles_analyzed', [])
+                overall_sentiment = sentiment_data.get('overall_sentiment_score', 0.0)
+                confidence = sentiment_data.get('confidence', 0.0)
 
-                # Log detailed results for monitoring
-                self._log_analysis_details(result)
+                self.logger.info(f"OVERALL SENTIMENT SCORE: {overall_sentiment:.4f}")
+                print(f"OVERALL SENTIMENT SCORE: {overall_sentiment:.4f}")
+                self.logger.info(f"CONFIDENCE LEVEL: {confidence:.4f}")
+                print(f"CONFIDENCE LEVEL: {confidence:.4f}")
+                self.logger.info(f"ARTICLES ANALYZED: {len(articles_analyzed)}")
+                print(f"ARTICLES ANALYZED: {len(articles_analyzed)}")
+
+                # Show individual article sentiment analysis
+                for i, article_result in enumerate(articles_analyzed):
+                    self.logger.info(f"ARTICLE #{i+1} ANALYSIS:")
+                    print(f"ARTICLE #{i+1} ANALYSIS:")
+                    self.logger.info(f"  TITLE: {article_result.get('title', 'Unknown')[:80]}...")
+                    print(f"  TITLE: {article_result.get('title', 'Unknown')[:80]}...")
+                    self.logger.info(f"  SENTIMENT SCORE: {article_result.get('sentiment_score', 0.0):.4f}")
+                    print(f"  SENTIMENT SCORE: {article_result.get('sentiment_score', 0.0):.4f}")
+                    self.logger.info(f"  CONFIDENCE: {article_result.get('confidence', 0.0):.4f}")
+                    print(f"  CONFIDENCE: {article_result.get('confidence', 0.0):.4f}")
+                    self.logger.info(f"  SENTIMENT LABEL: {article_result.get('sentiment_label', 'Unknown')}")
+                    print(f"  SENTIMENT LABEL: {article_result.get('sentiment_label', 'Unknown')}")
+
+                    # Show the key phrases that influenced sentiment
+                    if 'key_phrases' in article_result:
+                        phrases = article_result['key_phrases'][:3]  # Show top 3 phrases
+                        self.logger.info(f"  KEY PHRASES: {', '.join(phrases)}")
+                        print(f"  KEY PHRASES: {', '.join(phrases)}")
+
+                    # Show positive/negative indicators
+                    if 'positive_score' in article_result:
+                        pos_score = article_result['positive_score']
+                        neg_score = article_result.get('negative_score', 0.0)
+                        neu_score = article_result.get('neutral_score', 0.0)
+                        self.logger.info(f"  DETAILED SCORES: Pos={pos_score:.3f}, Neg={neg_score:.3f}, Neu={neu_score:.3f}")
+                        print(f"  DETAILED SCORES: Pos={pos_score:.3f}, Neg={neg_score:.3f}, Neu={neu_score:.3f}")
+
+                # Update shared state with sentiment data
+                if self.shared_state:
+                    try:
+                        self.shared_state.update_sentiment_data(symbol, sentiment_data)
+                        updates_sent += 1
+                        self.logger.info(f"SHARED STATE UPDATED: {symbol} sentiment data sent to system")
+                        print(f"SHARED STATE UPDATED: {symbol} sentiment data sent to system")
+                    except Exception as e:
+                        self.logger.error(f"Failed to update shared state for {symbol}: {e}")
+
+                # Log summary
+                sentiment_direction = "POSITIVE" if overall_sentiment > 0.1 else "NEGATIVE" if overall_sentiment < -0.1 else "NEUTRAL"
+                self.logger.info(f"FINBERT SUMMARY: {symbol} = {sentiment_direction} ({overall_sentiment:.3f}) with {confidence:.1%} confidence")
+                print(f"FINBERT SUMMARY: {symbol} = {sentiment_direction} ({overall_sentiment:.3f}) with {confidence:.1%} confidence")
+                self.logger.info("=" * 70)
+                print("=" * 70)
 
             except Exception as e:
-                self.logger.error(f"Error processing sentiment result: {e}")
+                self.logger.error(f"Error processing analysis result: {e}")
+                continue
 
-        return messages_sent
+        self.logger.info(f"FINBERT BATCH COMPLETE: {updates_sent} sentiment updates sent to system")
+        return updates_sent
 
     def _update_shared_state_sentiment(self, symbol: str, summary: Dict[str, Any], model_used: str):
         """Update shared state with sentiment scores"""
@@ -705,17 +840,20 @@ class FinBERTSentimentProcess(BaseProcess):
                 'sequence_number': self.sentiment_updates_sent + 1
             }
 
-            # Create queue message for decision engine
-            message = QueueMessage(
-                message_type=MessageType.SENTIMENT_UPDATE,
-                priority=priority,
-                sender_id=self.process_id,
-                recipient_id="market_decision_engine",  # Main process decision engine
-                payload=sentiment_payload
+            # Create process message for decision engine
+            message = create_process_message(
+                sender=self.process_id,
+                recipient="market_decision_engine",
+                message_type="SENTIMENT_UPDATE",
+                data=sentiment_payload,
+                priority=priority
             )
 
-            # Send to priority queue
-            self.priority_queue.put(message)
+            # Send to Redis
+            result = self.redis_manager.send_message(message)
+            if not result:
+                self.logger.error(f"Failed to send sentiment message to Redis for {symbol}")
+                return False
 
             # Log the sentiment message
             self.logger.info(f"Sent sentiment to decision engine: {symbol} "
@@ -922,3 +1060,124 @@ class FinBERTSentimentProcess(BaseProcess):
             'utility_tool': 'EnhancedFinBERT',
             'optimizations': ['batch_processing', 'memory_efficient', 't3_micro_optimized']
         }
+
+    async def _analyze_sentiment(self, text: str) -> Dict[str, float]:
+        """Analyze sentiment of text using FinBERT model"""
+        try:
+            # Tokenize and get predictions
+            inputs = self.tokenizer(text, return_tensors="pt", truncation=True, max_length=512, padding=True)
+
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+                probabilities = torch.nn.functional.softmax(outputs.logits, dim=-1)
+
+            # Get scores for each sentiment class
+            scores = {
+                'positive': float(probabilities[0][0]),
+                'negative': float(probabilities[0][1]),
+                'neutral': float(probabilities[0][2])
+            }
+
+            # Determine sentiment label and confidence
+            sentiment_label = max(scores, key=scores.get)
+            confidence = scores[sentiment_label]
+
+            self.logger.debug(f"Sentiment analysis: {sentiment_label} (confidence: {confidence:.3f})")
+            print(f"{Colors.RED}Sentiment: {sentiment_label} (confidence: {confidence:.3f}) - {text[:50]}...{Colors.RESET}")
+
+            return {
+                'label': sentiment_label,
+                'confidence': confidence,
+                'scores': scores
+            }
+
+        except Exception as e:
+            self.logger.error(f"Error analyzing sentiment: {e}")
+            print(f"{Colors.RED}Error analyzing sentiment: {e}{Colors.RESET}")
+            return {
+                'label': 'neutral',
+                'confidence': 0.0,
+                'scores': {'positive': 0.0, 'negative': 0.0, 'neutral': 1.0}
+            }
+
+    async def _process_sentiment_request(self, message: ProcessMessage) -> None:
+        """Process sentiment analysis request"""
+        try:
+            self.logger.info(f"Processing sentiment analysis request for {message.data.get('symbol', 'unknown')}")
+            print(f"{Colors.RED}{Colors.BOLD}=== FINBERT SENTIMENT ANALYSIS REQUEST ==={Colors.RESET}")
+            print(f"{Colors.RED}Symbol: {message.data.get('symbol', 'unknown')}{Colors.RESET}")
+
+            # Extract data from message
+            symbol = message.data.get('symbol')
+            articles = message.data.get('articles', [])
+
+            if not articles:
+                self.logger.warning(f"No articles provided for sentiment analysis for {symbol}")
+                print(f"{Colors.RED}No articles provided for sentiment analysis for {symbol}{Colors.RESET}")
+                return
+
+            self.logger.info(f"Analyzing sentiment for {len(articles)} articles for {symbol}")
+            print(f"{Colors.RED}Analyzing sentiment for {len(articles)} articles for {symbol}{Colors.RESET}")
+
+            # Process each article
+            results = []
+            for i, article in enumerate(articles):
+                self.logger.debug(f"Processing article {i+1}/{len(articles)}: {article.get('title', 'No title')[:50]}...")
+                print(f"{Colors.RED}Processing article {i+1}/{len(articles)}: {article.get('title', 'No title')[:50]}...{Colors.RESET}")
+
+                # Analyze sentiment
+                sentiment_result = await self._analyze_sentiment(article.get('content', ''))
+
+                # Create result object
+                result = {
+                    'title': article.get('title', ''),
+                    'source': article.get('source', ''),
+                    'sentiment_label': sentiment_result['label'],
+                    'confidence': sentiment_result['confidence'],
+                    'positive_score': sentiment_result['scores']['positive'],
+                    'negative_score': sentiment_result['scores']['negative'],
+                    'neutral_score': sentiment_result['scores']['neutral'],
+                    'timestamp': datetime.now().isoformat()
+                }
+
+                results.append(result)
+
+                # Log detailed result
+                self.logger.info(f"Article {i+1} sentiment: {result['sentiment_label']} (confidence: {result['confidence']:.3f})")
+                print(f"{Colors.RED}  Result: {result['sentiment_label']} (confidence: {result['confidence']:.3f}){Colors.RESET}")
+                print(f"{Colors.RED}    Positive: {result['positive_score']:.3f} | Negative: {result['negative_score']:.3f} | Neutral: {result['neutral_score']:.3f}{Colors.RESET}")
+
+            # Send results back
+            response_message = create_process_message(
+                sender=self.process_id,
+                recipient=message.sender,
+                message_type="SENTIMENT_RESULT",
+                data={
+                    'symbol': symbol,
+                    'results': results,
+                    'timestamp': datetime.now().isoformat()
+                },
+                priority=MessagePriority.HIGH
+            )
+
+            self.logger.info(f"Sentiment analysis complete for {symbol}: {len(results)} results")
+            print(f"{Colors.RED}{Colors.BOLD}Sentiment analysis complete for {symbol}: {len(results)} results{Colors.RESET}")
+
+            # Send response
+            await self.queue_manager.send_message(response_message)
+
+        except Exception as e:
+            self.logger.error(f"Error processing sentiment request: {e}")
+            print(f"{Colors.RED}Error processing sentiment request: {e}{Colors.RESET}")
+            # Send error response
+            error_message = create_process_message(
+                sender=self.process_id,
+                recipient=message.sender,
+                message_type="ERROR",
+                data={
+                    'error': str(e),
+                    'original_message': message.data
+                },
+                priority=MessagePriority.HIGH
+            )
+            await self.queue_manager.send_message(error_message)
