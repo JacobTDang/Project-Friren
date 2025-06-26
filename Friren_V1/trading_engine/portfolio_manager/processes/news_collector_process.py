@@ -244,16 +244,16 @@ class EnhancedNewsCollectorProcess(RedisBaseProcess):
             self.error_count += 1
             time.sleep(10)  # Longer sleep on error
 
-    def _check_regime_alerts(self) -> Optional[QueueMessage]:
+    def _check_regime_alerts(self) -> Optional[ProcessMessage]:
         """Check for regime change alerts (highest priority)"""
         try:
             # Check for regime change messages with timeout
-            message = self._get_priority_message(MessageType.REGIME_CHANGE, timeout=0.1)
+            message = self._get_priority_message("REGIME_CHANGE", timeout=0.1)
             return message
         except:
             return None
 
-    def _check_news_requests(self) -> Optional[QueueMessage]:
+    def _check_news_requests(self) -> Optional[ProcessMessage]:
         """Check for NEWS_REQUEST messages"""
         try:
             if not self.priority_queue:
@@ -262,20 +262,20 @@ class EnhancedNewsCollectorProcess(RedisBaseProcess):
             # Check for any relevant messages
             message = self.priority_queue.get(timeout=0.1)
             if message:
-                self.logger.info(f"Received message: {message.message_type.value}")
-                print(f"Received message: {message.message_type.value}")
+                self.logger.info(f"Received message: {message.message_type}")
+                print(f"Received message: {message.message_type}")
 
                 # Handle different message types
-                if message.message_type == MessageType.NEWS_REQUEST:
+                if message.message_type == "NEWS_REQUEST":
                     return message
-                elif message.message_type == MessageType.REGIME_CHANGE:
+                elif message.message_type == "REGIME_CHANGE":
                     # Handle regime change
                     self._handle_regime_change(message)
                     return None
-                elif message.message_type == MessageType.SENTIMENT_UPDATE:
+                elif message.message_type == "SENTIMENT_UPDATE":
                     # Handle sentiment updates - could trigger news collection
-                    self.logger.info(f"Received sentiment update: {message.payload}")
-                    print(f"Received sentiment update: {message.payload}")
+                    self.logger.info(f"Received sentiment update: {message.data}")
+                    print(f"Received sentiment update: {message.data}")
                     # Could trigger news collection for symbols with sentiment changes
                     return None
                 else:
@@ -288,14 +288,14 @@ class EnhancedNewsCollectorProcess(RedisBaseProcess):
         except:
             return None
 
-    def _handle_regime_change(self, message: QueueMessage):
+    def _handle_regime_change(self, message: ProcessMessage):
         """Handle regime change alert - immediate news processing"""
         try:
             self.logger.info("Processing regime change alert")
 
-            payload = message.payload
-            affected_symbols = payload.get('symbols', self.watchlist_symbols)
-            regime_type = payload.get('new_regime', 'UNKNOWN')
+            data = message.data
+            affected_symbols = data.get('symbols', self.watchlist_symbols)
+            regime_type = data.get('new_regime', 'UNKNOWN')
 
             self.logger.info(f"Regime change to {regime_type}, updating news for {len(affected_symbols)} symbols")
 
@@ -329,12 +329,12 @@ class EnhancedNewsCollectorProcess(RedisBaseProcess):
         except Exception as e:
             self.logger.error(f"Error handling regime change: {e}")
 
-    def _handle_news_request(self, message: QueueMessage):
+    def _handle_news_request(self, message: ProcessMessage):
         """Handle specific news request from decision engine or strategy analyzer"""
         try:
-            payload = message.payload
-            symbol = payload.get('symbol')
-            force_refresh = payload.get('force_refresh', False)
+            data = message.data
+            symbol = data.get('symbol')
+            force_refresh = data.get('force_refresh', False)
 
             if not symbol:
                 self.logger.warning("Received news request without symbol")
@@ -594,19 +594,19 @@ class EnhancedNewsCollectorProcess(RedisBaseProcess):
                     'author': article.author
                 })
 
-            # Create message for FinBERT
-            finbert_message = QueueMessage(
-                message_type=MessageType.FINBERT_ANALYSIS,
-                priority=MessagePriority.HIGH if priority else MessagePriority.MEDIUM,
+            # Create message for FinBERT using Redis ProcessMessage
+            finbert_message = create_process_message(
+                message_type="FINBERT_ANALYSIS",
                 sender_id=self.process_id,
                 recipient_id="finbert_sentiment",
-                payload={
+                data={
                     'symbol': symbol,
                     'articles': articles_for_sentiment,
                     'request_id': f"{symbol}_{int(time.time())}",
                     'priority': priority,
                     'batch_processing': False
-                }
+                },
+                priority=MessagePriority.HIGH if priority else MessagePriority.MEDIUM
             )
 
             # Send to FinBERT queue
@@ -653,7 +653,7 @@ class EnhancedNewsCollectorProcess(RedisBaseProcess):
         # News sentiment is valuable even outside market hours for preparation
         return True
 
-    def _get_priority_message(self, message_type: MessageType, timeout: float = 0.1) -> Optional[QueueMessage]:
+    def _get_priority_message(self, message_type: str, timeout: float = 0.1) -> Optional[ProcessMessage]:
         """Get message of specific type from priority queue"""
         try:
             if not self.priority_queue:

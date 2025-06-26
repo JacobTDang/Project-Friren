@@ -82,10 +82,9 @@ class DetailedDebugMonitor:
         self.shutdown_event = threading.Event()
         self.monitor_interval = 2.0  # 2 second detailed monitoring
 
-        # Component references
+        # Component references (Redis-based)
         self.process_manager = None
-        self.queue_manager = None
-        self.shared_state = None
+        self.redis_manager = None  # Replaces queue_manager and shared_state
         self.account_manager = None
         self.execution_orchestrator = None
         self.symbol_coordinator = None
@@ -578,25 +577,25 @@ class DetailedDebugMonitor:
             else:
                 self.logger.warning("PORTFOLIO STATUS: Alpaca interface not available")
 
-                # Try to get portfolio info from shared state
-                if hasattr(self, 'shared_state') and self.shared_state:
+                # Try to get portfolio info from Redis shared state
+                if hasattr(self, 'redis_manager') and self.redis_manager:
                     try:
-                        # Look for portfolio keys in shared state
-                        all_keys = self.shared_state.get_all_keys() if hasattr(self.shared_state, 'get_all_keys') else []
+                        # Look for portfolio keys in Redis shared state
+                        all_keys = self.redis_manager.get_all_shared_keys() if hasattr(self.redis_manager, 'get_all_shared_keys') else []
                         portfolio_keys = [k for k in all_keys if 'portfolio' in k.lower() or 'position' in k.lower()]
 
                         if portfolio_keys:
-                            self.logger.info(f"PORTFOLIO DATA FROM SHARED STATE: {len(portfolio_keys)} keys")
+                            self.logger.info(f"PORTFOLIO DATA FROM REDIS STATE: {len(portfolio_keys)} keys")
                             for key in portfolio_keys[:5]:  # Show first 5 portfolio keys
                                 try:
-                                    value = self.shared_state.get(key)
+                                    value = self.redis_manager.get_shared_state(key)
                                     self.logger.info(f"  {key}: {value}")
                                 except Exception as e:
                                     self.logger.info(f"  {key}: Error reading - {e}")
                         else:
-                            self.logger.info("NO PORTFOLIO DATA: No portfolio information found in shared state")
+                            self.logger.info("NO PORTFOLIO DATA: No portfolio information found in Redis state")
                     except Exception as e:
-                        self.logger.error(f"Error reading portfolio from shared state: {e}")
+                        self.logger.error(f"Error reading portfolio from Redis state: {e}")
 
         except Exception as e:
             self.logger.error(f"PORTFOLIO MONITORING ERROR: {e}")
