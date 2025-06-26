@@ -458,6 +458,17 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
 
         self.logger.info("Tool connections established")
 
+    def _safe_log(self, level: str, message: str):
+        """Safe logging method for decision engine"""
+        if hasattr(self, 'logger') and self.logger:
+            getattr(self.logger, level)(message)
+        else:
+            print(f"[{level.upper()}] {message}")
+
+    def _execute(self):
+        """Execute main process logic (required by RedisBaseProcess)"""
+        self._process_cycle()
+
     def _process_cycle(self):
         self.logger.critical("EMERGENCY: ENTERED MAIN LOOP for decision_engine")
         print("EMERGENCY: ENTERED MAIN LOOP for decision_engine")

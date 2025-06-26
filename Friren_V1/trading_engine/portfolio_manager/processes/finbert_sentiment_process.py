@@ -397,6 +397,17 @@ class FinBERTSentimentProcess(RedisBaseProcess):
         
         return self.model_status in ["finbert", "mock"]
 
+    def _safe_log(self, level: str, message: str):
+        """Safe logging method for FinBERT process"""
+        if hasattr(self, 'logger') and self.logger:
+            getattr(self.logger, level)(message)
+        else:
+            print(f"[{level.upper()}] {message}")
+
+    def _execute(self):
+        """Execute main process logic (required by RedisBaseProcess)"""
+        self._process_cycle()
+
     def _process_cycle(self):
         self.logger.critical("EMERGENCY: ENTERED MAIN LOOP for sentiment_analyzer")
         print("EMERGENCY: ENTERED MAIN LOOP for sentiment_analyzer")

@@ -325,6 +325,10 @@ class PositionHealthMonitor(RedisBaseProcess):
         }
         self.logger.info("Strategy management message handlers setup complete")
 
+    def _execute(self):
+        """Execute main process logic (required by RedisBaseProcess)"""
+        self._process_cycle()
+
     def _process_cycle(self):
         self.logger.critical("EMERGENCY: ENTERED MAIN LOOP for position_health_monitor")
         print("EMERGENCY: ENTERED MAIN LOOP for position_health_monitor")

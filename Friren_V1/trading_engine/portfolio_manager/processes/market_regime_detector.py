@@ -85,6 +85,10 @@ class MarketRegimeDetector(RedisBaseProcess):
         self.logger.critical("EMERGENCY: EXITING _initialize for market_regime_detector")
         print("EMERGENCY: EXITING _initialize for market_regime_detector")
 
+    def _execute(self):
+        """Execute main process logic (required by RedisBaseProcess)"""
+        self._process_cycle()
+
     def _process_cycle(self):
         self.logger.critical("EMERGENCY: Market regime detector main loop running - attempting to analyze and update regime")
         print("EMERGENCY: Market regime detector main loop running - attempting to analyze and update regime")

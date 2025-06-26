@@ -587,6 +587,10 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
         self.logger.critical("EMERGENCY: EXITING _initialize for enhanced_news_pipeline")
         print("EMERGENCY: EXITING _initialize for enhanced_news_pipeline")
 
+    def _execute(self):
+        """Execute main process logic (required by RedisBaseProcess)"""
+        self._process_cycle()
+
     def _process_cycle(self):
         self.logger.critical("EMERGENCY: News pipeline main loop running - attempting to collect/process news")
         print("EMERGENCY: News pipeline main loop running - attempting to collect/process news")

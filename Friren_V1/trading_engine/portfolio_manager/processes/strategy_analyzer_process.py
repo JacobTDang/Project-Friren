@@ -138,6 +138,17 @@ class StrategyAnalyzerProcess(RedisBaseProcess):
         self.logger.critical("EMERGENCY: EXITING _initialize for strategy_analyzer")
         print("EMERGENCY: EXITING _initialize for strategy_analyzer")
 
+    def _safe_log(self, level: str, message: str):
+        """Safe logging method for strategy analyzer process"""
+        if hasattr(self, 'logger') and self.logger:
+            getattr(self.logger, level)(message)
+        else:
+            print(f"[{level.upper()}] {message}")
+
+    def _execute(self):
+        """Execute main process logic (required by RedisBaseProcess)"""
+        self._process_cycle()
+
     def _process_cycle(self):
         """Main processing cycle - orchestrates timing and communication"""
         self.logger.critical("EMERGENCY: ENTERED MAIN LOOP for strategy_analyzer")
