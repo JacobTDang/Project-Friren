@@ -255,6 +255,32 @@ def check_system_requirements():
     logger.info("=== SYSTEM REQUIREMENTS CHECK ===")
 
     requirements_met = True
+    
+    # Check Redis server availability
+    logger.info("Checking Redis server connection...")
+    try:
+        # For WSL/Linux environment, check Redis directly
+        import subprocess
+        import sys
+        import os
+        
+        # Check if we can ping Redis
+        if sys.platform == "win32":
+            # Windows - skip Redis check for now (will be handled by Redis manager)
+            logger.info("Redis server: SKIPPED (Windows - will be checked by Redis manager)")
+        else:
+            # Linux/WSL - check with redis-cli
+            result = subprocess.run(['redis-cli', 'ping'], capture_output=True, text=True, timeout=5)
+            if result.returncode == 0 and 'PONG' in result.stdout:
+                logger.info("Redis server: CONNECTED")
+            else:
+                logger.error("Redis server: NOT RESPONDING")
+                logger.error("CRITICAL: Start Redis server with: sudo service redis-server start")
+                requirements_met = False
+    except Exception as e:
+        logger.error(f"Redis server: NOT AVAILABLE - {e}")
+        logger.error("CRITICAL: Start Redis server with: sudo service redis-server start")
+        requirements_met = False
 
     # Check Python version
     python_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
@@ -646,11 +672,19 @@ def run_trading_system():
 
         shutdown_orchestrator()
 
-        # FIXED: Emergency timeout to prevent hanging
+        # FIXED: Emergency timeout to prevent hanging - INCREASED from 10s to 60s
         if shutdown_timeout_start:
             shutdown_duration = time.time() - shutdown_timeout_start
-            if shutdown_duration > 10:  # 10 second timeout
+            if shutdown_duration > 60:  # 60 second timeout (was 10)
                 logger.warning(f"EMERGENCY: Shutdown took {shutdown_duration:.1f}s - forcing exit")
+                
+                # Before force exit, try cleanup script one more time
+                try:
+                    logger.critical("EMERGENCY: Running cleanup script before force exit...")
+                    subprocess.run([sys.executable, "cleanup_processes.py", "--force"], timeout=10)
+                except Exception as e:
+                    logger.error(f"Emergency cleanup failed: {e}")
+                
                 os._exit(1)
 
         logger.info("=== TRADING SYSTEM SHUTDOWN COMPLETE ===")
