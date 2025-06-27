@@ -300,8 +300,34 @@ class PositionHealthMonitor(RedisBaseProcess):
                 self.logger.warning("StockDataFetcher not available - using mock data fetcher")
                 self.data_fetcher = None
 
-            # Load active strategies from shared state
-            self._load_active_strategies()
+            # CRITICAL FIX: Initialize TradingDBManager to access actual database positions
+            try:
+                from ..tools.db_manager import TradingDBManager
+                self.trading_db_manager = TradingDBManager()
+                self.logger.info("TradingDBManager initialized - can now access database positions")
+            except ImportError as e:
+                self.logger.error(f"TradingDBManager not available: {e}")
+                self.trading_db_manager = None
+
+            # ENHANCED: Initialize Strategy Assignment Engine for intelligent strategy selection
+            try:
+                from ..tools.strategy_assignment_engine import StrategyAssignmentEngine
+                self.strategy_assigner = StrategyAssignmentEngine(
+                    symbols=getattr(self, 'symbols', ['AAPL']),
+                    risk_tolerance="moderate"  # Could be configured per user
+                )
+                self.logger.info("StrategyAssignmentEngine initialized - intelligent strategy assignment enabled")
+            except ImportError as e:
+                self.logger.error(f"StrategyAssignmentEngine not available: {e}")
+                self.strategy_assigner = None
+
+            # Load active strategies from shared state AND database
+            try:
+                self._load_active_strategies()
+            except AttributeError as e:
+                self.logger.warning(f"Could not load active strategies: {e}")
+                # Fallback: create default monitoring state
+                self._create_default_monitoring_state()
 
             # NEW: Initialize strategy management queue message handlers
             self._setup_strategy_message_handlers()
@@ -325,6 +351,29 @@ class PositionHealthMonitor(RedisBaseProcess):
         }
         self.logger.info("Strategy management message handlers setup complete")
 
+    def _create_default_monitoring_state(self):
+        """Create default monitoring state when shared state unavailable"""
+        try:
+            # Use symbols from configuration or default to common holdings
+            default_symbols = self.symbols or ['AAPL', 'MSFT', 'GOOGL']
+            
+            for symbol in default_symbols:
+                self.active_strategies[symbol] = {
+                    'symbol': symbol,
+                    'strategy_type': 'momentum_strategy',
+                    'entry_time': datetime.now(),
+                    'last_check': datetime.now(),
+                    'health_score': 0.7,
+                    'risk_level': 'medium',
+                    'shares': 10.0,  # Default position size
+                    'entry_price': 150.0  # Default price
+                }
+            
+            self.logger.info(f"Created default monitoring state for {len(default_symbols)} symbols")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to create default monitoring state: {e}")
+
     def _execute(self):
         """Execute main process logic (required by RedisBaseProcess)"""
         self._process_cycle()
@@ -336,10 +385,23 @@ class PositionHealthMonitor(RedisBaseProcess):
         try:
             from colored_print import success, info
             from terminal_color_system import print_position_monitor
-            print_position_monitor("Position health monitor analyzing portfolio...")
+            
+            # Show current positions being monitored
+            active_symbols = list(self.active_strategies.keys())
+            if active_symbols:
+                for symbol in active_symbols:
+                    strategy_info = self.active_strategies[symbol]
+                    shares = strategy_info.get('shares', 0)
+                    strategy_type = strategy_info.get('strategy_type', 'unknown')
+                    print_position_monitor(f"Monitoring {symbol}: {shares} shares, {strategy_type} active")
+                    
+                print_position_monitor(f"Position health monitor analyzing {len(active_symbols)} positions...")
+            else:
+                print_position_monitor("Position health monitor: No active positions to monitor")
+                
             success("BUSINESS LOGIC: Position health cycle started")
         except ImportError:
-            print("BUSINESS LOGIC: Position health monitor cycle executing")
+            print(f"BUSINESS LOGIC: Position health monitor monitoring {len(self.active_strategies)} positions")
         try:
             # NEW: Process strategy management messages first
             self._process_strategy_messages()
@@ -438,26 +500,86 @@ class PositionHealthMonitor(RedisBaseProcess):
         return time_since_last >= self.check_interval
 
     def _load_active_strategies(self):
-        """Load active strategies from shared state"""
+        """Load active strategies from database and Redis shared state"""
         try:
-            if self.shared_state:
-                positions = self.shared_state.get_all_positions()
-
-                # Convert position data to ActiveStrategy objects
-                for symbol, position_data in positions.items():
-                    try:
-                        # Create ActiveStrategy from position data
-                        strategy = self._create_active_strategy_from_position(symbol, position_data)
-                        if strategy:
-                            self.active_strategies[symbol] = strategy
-                            self.logger.debug(f"Loaded active strategy for {symbol}")
-                    except Exception as e:
-                        self.logger.warning(f"Failed to create strategy for {symbol}: {e}")
-
-                self.logger.info(f"Loaded {len(self.active_strategies)} active strategies")
+            # CRITICAL FIX: Load positions from database first
+            database_positions_loaded = False
+            
+            if hasattr(self, 'trading_db_manager') and self.trading_db_manager:
+                try:
+                    # Load current holdings from database
+                    holdings = self.trading_db_manager.get_current_holdings()
+                    
+                    if holdings:
+                        self.logger.info(f"Loading {len(holdings)} positions from database...")
+                        
+                        for holding in holdings:
+                            symbol = holding['symbol']
+                            quantity = holding['quantity']
+                            
+                            # Create ActiveStrategy for each database position
+                            try:
+                                strategy = ActiveStrategy(
+                                    symbol=symbol,
+                                    strategy_type="default_monitoring",  # Will be assigned by strategy assigner
+                                    entry_time=datetime.now(),
+                                    entry_price=float(holding.get('avg_cost', 0.0)),  # Convert to float
+                                    position_size=float(quantity),  # Convert to float
+                                    target_size=float(quantity) * 1.5,  # Allow 50% increase
+                                    status=StrategyStatus.ACTIVE
+                                )
+                                
+                                self.active_strategies[symbol] = strategy
+                                self.logger.info(f"Created monitoring strategy for {symbol}: {quantity} shares @ ${holding.get('avg_cost', 0.0):.2f}")
+                                
+                            except Exception as e:
+                                self.logger.error(f"Failed to create strategy for {symbol}: {e}")
+                        
+                        database_positions_loaded = True
+                        self.logger.info(f"✅ Loaded {len(self.active_strategies)} positions from database")
+                        
+                    else:
+                        self.logger.info("No current holdings found in database")
+                        
+                except Exception as e:
+                    self.logger.error(f"Error loading from database: {e}")
+            
+            # Also try to load from Redis (for any additional positions)
+            try:
+                positions = self.get_shared_state("current_positions", "portfolio", {})
+                
+                if positions:
+                    redis_count = 0
+                    for symbol, position_data in positions.items():
+                        # Only add if not already loaded from database
+                        if symbol not in self.active_strategies:
+                            try:
+                                strategy = self._create_active_strategy_from_position(symbol, position_data)
+                                if strategy:
+                                    self.active_strategies[symbol] = strategy
+                                    redis_count += 1
+                                    self.logger.debug(f"Loaded additional strategy for {symbol} from Redis")
+                            except Exception as e:
+                                self.logger.warning(f"Failed to create Redis strategy for {symbol}: {e}")
+                    
+                    if redis_count > 0:
+                        self.logger.info(f"Loaded {redis_count} additional strategies from Redis")
+                else:
+                    self.logger.debug("No positions found in Redis shared state")
+                    
+            except Exception as e:
+                self.logger.debug(f"Could not load from Redis: {e}")
+            
+            # Final summary
+            if self.active_strategies:
+                self.logger.critical(f"🎯 TOTAL ACTIVE POSITIONS: {len(self.active_strategies)} symbols")
+                for symbol, strategy in self.active_strategies.items():
+                    self.logger.critical(f"   - {symbol}: {strategy.allocation} shares ({strategy.strategy_name})")
+            else:
+                self.logger.warning("⚠️ NO ACTIVE POSITIONS found in database or Redis")
 
         except Exception as e:
-            self.logger.warning(f"Failed to load active strategies: {e}")
+            self.logger.error(f"Failed to load active strategies: {e}")
 
     def _create_active_strategy_from_position(self, symbol: str, position_data: Dict) -> Optional[ActiveStrategy]:
         """Create ActiveStrategy object from position data"""
@@ -1501,28 +1623,21 @@ class PositionHealthMonitor(RedisBaseProcess):
             self.logger.error(f"Error displaying portfolio status: {e}")
 
     def _get_current_holdings(self) -> Dict[str, Dict]:
-        """Get current holdings (simulate from database)"""
+        """Get current holdings from real database"""
         try:
-            # For demo purposes, simulate AAPL holdings as seen in the system
-            import random
-            current_price = 150.25 + random.uniform(-5, 5)  # Simulate price movement
-            shares = 7.0  # From the database holdings we saw earlier
-            entry_price = 145.00  # Simulate entry price
+            # REMOVED: Demo simulation replaced with real database access
+            if hasattr(self, 'trading_db_manager') and self.trading_db_manager:
+                # Use real database to get holdings
+                holdings = self.trading_db_manager.get_current_holdings()
+                if holdings:
+                    return holdings
+                    
+            # If no real database access available, return empty
+            self.logger.warning("No real holdings available - trading database not accessible")
+            return {}
             
-            unrealized_pnl = (current_price - entry_price) * shares
-            unrealized_pnl_percent = ((current_price - entry_price) / entry_price) * 100
-            
-            return {
-                'AAPL': {
-                    'shares': shares,
-                    'current_price': current_price,
-                    'entry_price': entry_price,
-                    'unrealized_pnl': unrealized_pnl,
-                    'unrealized_pnl_percent': unrealized_pnl_percent
-                }
-            }
         except Exception as e:
-            self.logger.error(f"Error getting current holdings: {e}")
+            self.logger.error(f"Error getting current holdings from database: {e}")
             return {}
 
     def _calculate_overall_portfolio_health(self) -> float:

@@ -26,19 +26,28 @@ import sys
 import os
 
 # Import Redis-based infrastructure
-from Friren_V1.multiprocess_infrastructure.redis_base_process import RedisBaseProcess
+from Friren_V1.multiprocess_infrastructure.redis_base_process import RedisBaseProcess, ProcessState
 from Friren_V1.multiprocess_infrastructure.trading_redis_manager import (
     get_trading_redis_manager, create_process_message, MessagePriority, ProcessMessage
 )
 
-# Import color system for terminal output - FAIL FAST: No fallback allowed
-# Add project root to path for color system import
-project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
-if project_root not in sys.path:
-    sys.path.append(project_root)
-
-from terminal_color_system import print_decision_engine, print_communication, print_success, print_warning, print_error
-COLOR_SYSTEM_AVAILABLE = True
+# Import color system for terminal output with safe fallback
+try:
+    # Add project root to path for color system import
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
+    if project_root not in sys.path:
+        sys.path.append(project_root)
+    
+    from terminal_color_system import print_decision_engine, print_communication, print_success, print_warning, print_error
+    COLOR_SYSTEM_AVAILABLE = True
+except ImportError as e:
+    # Safe fallback functions if color system unavailable
+    def print_decision_engine(msg): print(f"[DECISION ENGINE] {msg}")
+    def print_communication(msg): print(f"[COMMUNICATION] {msg}")
+    def print_success(msg): print(f"[SUCCESS] {msg}")
+    def print_warning(msg): print(f"[WARNING] {msg}")
+    def print_error(msg): print(f"[ERROR] {msg}")
+    COLOR_SYSTEM_AVAILABLE = False
 
 # NEW: Strategy Management Enums (from implementation_rules.xml)
 class MonitoringStrategyStatus(Enum):
@@ -302,7 +311,7 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
             self.logger.info("LIFECYCLE_DEBUG: SolidRiskManager initialized.")
 
             self.logger.info("LIFECYCLE_DEBUG: Initializing ParameterAdapter...")
-            self.parameter_adapter = ParameterAdapter(level="decision_engine")
+            self.parameter_adapter = ParameterAdapter()
             self.logger.info("LIFECYCLE_DEBUG: ParameterAdapter initialized.")
 
             self.logger.info("LIFECYCLE_DEBUG: Initializing ExecutionOrchestrator...")
@@ -333,7 +342,7 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
         """Initialize enhanced trading components with Redis-based infrastructure"""
         # Initialize proper enhanced components
         self.risk_manager = SolidRiskManager()
-        self.parameter_adapter = ParameterAdapter(level="decision_engine")
+        self.parameter_adapter = ParameterAdapter()
         self.execution_orchestrator = ExecutionOrchestrator()
         self.conflict_resolver = ConflictResolver()
         self.enhanced_init_status = {'done': True, 'error': None}
@@ -928,6 +937,20 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
         """NEW: Execute using execution orchestrator"""
         try:
             if self.execution_orchestrator and getattr(risk_validation, 'should_execute', False):
+                # Show decision being made (business logic output)
+                try:
+                    from colored_print import success, info
+                    from terminal_color_system import print_decision_engine
+                    
+                    symbol = getattr(risk_validation.original_decision, 'symbol', 'UNKNOWN')
+                    action = getattr(risk_validation.original_decision, 'action', 'UNKNOWN')
+                    confidence = getattr(risk_validation.original_decision, 'final_confidence', 0.0)
+                    
+                    print_decision_engine(f"Decision: {action} {symbol} - strategy: {strategy_name}, confidence: {confidence:.2f}")
+                    
+                except ImportError:
+                    print(f"BUSINESS LOGIC: Decision engine executing {strategy_name} decision")
+                
                 result = self.execution_orchestrator.execute_approved_decision(
                     risk_validation=risk_validation,
                     strategy_name=strategy_name,
@@ -943,14 +966,15 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
 
                 return result
             else:
-                # Fallback: simulate execution
+                # No execution orchestrator available - cannot execute real trades
+                self.logger.error("Cannot execute trade: No execution orchestrator available")
                 return type('ExecutionResult', (), {
-                    'was_successful': True,
-                    'execution_summary': f"Simulated execution for {getattr(risk_validation, 'symbol', 'UNKNOWN')}",
+                    'was_successful': False,
+                    'execution_summary': f"Execution failed: No real execution system available for {getattr(risk_validation, 'symbol', 'UNKNOWN')}",
                     'symbol': getattr(risk_validation, 'symbol', 'UNKNOWN'),
-                    'error_message': None,
-                    'execution_slippage': 0.001,
-                    'executed_amount': 100.0
+                    'error_message': 'No execution orchestrator configured',
+                    'execution_slippage': 0.0,
+                    'executed_amount': 0.0
                 })()
 
         except Exception as e:

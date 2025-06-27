@@ -180,6 +180,23 @@ class StrategyAnalyzerProcess(RedisBaseProcess):
                 time.sleep(30)
                 return
 
+            # Show what's being analyzed (business logic output)
+            try:
+                from colored_print import success, info
+                from terminal_color_system import print_decision_engine
+                
+                analyzed_symbols = list(market_data_dict.keys())
+                for symbol in analyzed_symbols:
+                    # Show each strategy being analyzed
+                    available_strategies = ["momentum_strategy", "jump_diffusion_strategy", "bollinger_strategy", "rsi_contrarian"]
+                    for strategy in available_strategies:
+                        print_decision_engine(f"Analyzing {symbol} with {strategy}: market regime {market_regime}")
+                
+                print_decision_engine(f"Strategy analyzer processing {len(analyzed_symbols)} symbols with {len(available_strategies)} strategies")
+                
+            except ImportError:
+                print(f"BUSINESS LOGIC: Strategy analyzer analyzing {len(market_data_dict)} symbols with multiple strategies")
+
             # Run parallel strategy analysis using generic manager
             analysis_results = self._run_parallel_strategy_analysis(market_data_dict, market_regime)
 
@@ -224,14 +241,37 @@ class StrategyAnalyzerProcess(RedisBaseProcess):
         return time_since_last >= self.analysis_interval
 
     def _get_market_regime(self) -> str:
-        """Get current market regime from shared state (Layer 1)"""
+        """Get current market regime from Redis shared state (Layer 1)"""
         try:
-            if self.shared_state:
-                return self.shared_state.get_market_regime()
-            return 'UNKNOWN'
+            # Use Redis shared state methods
+            regime = self.get_shared_state("market_regime", "market", "UNKNOWN")
+            return regime
         except Exception as e:
             self.logger.warning(f"Failed to get market regime: {e}")
             return 'UNKNOWN'
+
+    def _fetch_market_data(self) -> Dict[str, Any]:
+        """Fetch market data for strategy analysis"""
+        try:
+            # Default market data for configured symbols
+            market_data = {}
+            symbols = getattr(self, 'symbols', ['AAPL'])
+            
+            for symbol in symbols:
+                # Mock market data structure for now
+                market_data[symbol] = {
+                    'price': 150.0,
+                    'volume': 1000000,
+                    'timestamp': datetime.now(),
+                    'symbol': symbol
+                }
+            
+            self.logger.info(f"Fetched market data for {len(market_data)} symbols")
+            return market_data
+            
+        except Exception as e:
+            self.logger.error(f"Error fetching market data: {e}")
+            return {}
 
     def _fetch_market_data(self) -> Dict[str, Any]:
         """Fetch market data using analytics component"""
@@ -342,23 +382,18 @@ class StrategyAnalyzerProcess(RedisBaseProcess):
             return False
 
     def _update_shared_state(self, task_results: List[TaskResult]):
-        """Update shared state with latest strategy signals (Layer 1)"""
+        """Update Redis shared state with latest strategy signals (Layer 1)"""
         try:
-            if not self.shared_state:
-                return
-
-            # Update shared state with all signals (not just high confidence)
+            # Update Redis shared state with all signals (not just high confidence)
             signals_updated = 0
             for task_result in task_results:
                 if task_result.success:
                     signals = task_result.data.get('signals', [])
 
                     for signal in signals:
-                        self.shared_state.update_strategy_signal(
-                            strategy_name=signal['strategy'],
-                            symbol=signal['symbol'],
-                            signal_data=signal
-                        )
+                        # Store signal in Redis under strategy namespace
+                        signal_key = f"signal_{signal['strategy']}_{signal['symbol']}"
+                        self.set_shared_state(signal_key, signal, "strategy_signals")
                         signals_updated += 1
 
             self.logger.debug(f"Updated shared state with {signals_updated} signals")

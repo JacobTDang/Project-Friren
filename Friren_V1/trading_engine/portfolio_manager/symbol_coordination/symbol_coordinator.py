@@ -569,6 +569,7 @@ class SymbolCoordinator:
     def sync_positions_from_database(self, db_manager) -> None:
         """
         Sync all positions from database to symbol coordinator.
+        If no database holdings exist, ensure configured symbols are still added for monitoring.
 
         Args:
             db_manager: Database manager to get holdings from
@@ -585,9 +586,12 @@ class SymbolCoordinator:
 
             # Get all active holdings from database
             self.logger.info("Getting holdings from database...")
-            holdings = db_manager.get_holdings(active_only=True)
+            holdings = db_manager.get_holdings(active_only=True) if hasattr(db_manager, 'get_holdings') else []
             self.logger.info(f"Retrieved {len(holdings)} holdings from database")
 
+            synced_symbols = set()
+
+            # Process database holdings
             for holding in holdings:
                 symbol = holding['symbol']
 
@@ -615,11 +619,55 @@ class SymbolCoordinator:
 
                     self.update_symbol_position(symbol, position_data)
                     self.logger.info(f"Synced position for {symbol}: {shares} shares")
+                    synced_symbols.add(symbol)
                 else:
                     # Clear position if no shares
                     self.update_symbol_position(symbol, {'shares': 0.0, 'market_value': 0.0, 'unrealized_pl': 0.0})
+                    synced_symbols.add(symbol)
 
-            self.logger.info(f"Position sync completed for {len(holdings)} holdings")
+            # CRITICAL FIX: If no database holdings, ensure configured symbols are still added as monitoring candidates
+            if len(holdings) == 0:
+                self.logger.warning("NO DATABASE HOLDINGS FOUND - Adding configured symbols for monitoring")
+                
+                # Add symbols that are already in symbol_states but not synced from database
+                for symbol in self.symbol_states.keys():
+                    if symbol not in synced_symbols:
+                        # Add as monitoring candidate with zero position but ACTIVE intensity
+                        position_data = {
+                            'shares': 0.0,
+                            'market_value': 0.0,
+                            'unrealized_pl': 0.0,
+                            'avg_entry_price': 0.0
+                        }
+                        self.update_symbol_position(symbol, position_data)
+                        
+                        # IMPORTANT: Set as ACTIVE intensity for monitoring even without position
+                        if symbol in self.symbol_states:
+                            self.symbol_states[symbol].config.monitoring_intensity = MonitoringIntensity.ACTIVE
+                            self.logger.info(f"FIXED: {symbol} set to ACTIVE monitoring (no position but configured for trading)")
+                        
+                        synced_symbols.add(symbol)
+
+            self.logger.info(f"Position sync completed - {len(holdings)} holdings from DB, {len(synced_symbols)} total symbols synced")
+            
+            # FINAL STATUS DEBUG: Show what the debug monitor will see
+            final_active_count = 0
+            for symbol, state in self.symbol_states.items():
+                position = state.current_position
+                intensity = state.config.monitoring_intensity.value
+                if position > 0:
+                    final_active_count += 1
+                    self.logger.info(f"ACTIVE SYMBOL: {symbol} - position={position}, intensity={intensity}")
+                else:
+                    self.logger.info(f"MONITORING SYMBOL: {symbol} - position={position}, intensity={intensity}")
+            
+            if final_active_count == 0:
+                self.logger.warning("ISSUE: Still no active symbols with positions > 0")
+                self.logger.info("NOTE: Debug monitor shows 'Active=0' because no symbols have actual stock positions")
+                self.logger.info("SOLUTION: Either seed the database with test positions or modify activity definition")
+            else:
+                self.logger.info(f"SUCCESS: {final_active_count} symbols now have active positions")
+            
             self.logger.info("=== SYNC POSITIONS DEBUG END ===")
 
         except Exception as e:

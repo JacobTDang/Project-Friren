@@ -102,22 +102,22 @@ class MarketRegimeDetector(RedisBaseProcess):
             if self.redis_manager:
                 test_data = {"regime_test": "market_regime_detector_active", "timestamp": datetime.now().isoformat()}
                 self.redis_manager.set_shared_state("regime_detector_status", test_data)
-                self.logger.info("✓ BUSINESS LOGIC: Redis state update successful")
+                self.logger.info("[SUCCESS] BUSINESS LOGIC: Redis state update successful")
             
             # Test 2: Data fetcher availability
             if hasattr(self, 'data_fetcher') and self.data_fetcher:
-                self.logger.info("✓ BUSINESS LOGIC: Data fetcher available")
+                self.logger.info("[SUCCESS] BUSINESS LOGIC: Data fetcher available")
             else:
-                self.logger.error("✗ BUSINESS LOGIC: Data fetcher not available")
+                self.logger.error("[ERROR] BUSINESS LOGIC: Data fetcher not available")
             
             # Test 3: Market analyzer availability
             if hasattr(self, 'market_analyzer') and self.market_analyzer:
-                self.logger.info("✓ BUSINESS LOGIC: Market analyzer available")
+                self.logger.info("[SUCCESS] BUSINESS LOGIC: Market analyzer available")
             else:
-                self.logger.error("✗ BUSINESS LOGIC: Market analyzer not available")
+                self.logger.error("[ERROR] BUSINESS LOGIC: Market analyzer not available")
                 
         except Exception as e:
-            self.logger.error(f"✗ BUSINESS LOGIC TEST FAILED: {e}")
+            self.logger.error(f"[ERROR] BUSINESS LOGIC TEST FAILED: {e}")
         
         try:
             # Check if it's time for regime analysis
@@ -254,9 +254,9 @@ class MarketRegimeDetector(RedisBaseProcess):
                 # BUSINESS LOGIC VERIFICATION: Confirm Redis update worked
                 verification = self.redis_manager.get_shared_state('market_regime')
                 if verification and verification.get('regime') == regime_result.primary_regime:
-                    self.logger.info("✓ BUSINESS LOGIC: Market regime Redis update verified successfully")
+                    self.logger.info("[SUCCESS] BUSINESS LOGIC: Market regime Redis update verified successfully")
                 else:
-                    self.logger.error("✗ BUSINESS LOGIC: Market regime Redis update verification failed")
+                    self.logger.error("[ERROR] BUSINESS LOGIC: Market regime Redis update verification failed")
 
         except Exception as e:
             self.logger.error(f"Error updating Redis shared state: {e}")

@@ -1,7 +1,23 @@
 import pandas as pd
 import numpy as np
 from .base_strategy import BaseStrategy, StrategySignal, StrategyMetadata
-from trading_engine.data.data_utils import StockDataTools
+
+# LAZY LOADING: Only import StockDataTools when actually needed to avoid memory issues
+def _lazy_import_stock_data_tools():
+    """Lazy import StockDataTools to avoid memory issues during startup"""
+    try:
+        from trading_engine.data.data_utils import StockDataTools
+        return StockDataTools
+    except ImportError as e:
+        print(f"Warning: Could not import StockDataTools: {e}")
+        return None
+    except (MemoryError, SystemError) as e:
+        print(f"Warning: Could not import StockDataTools due to system constraints: {e}")
+        return None
+
+def get_stock_data_tools():
+    """Get StockDataTools with lazy loading"""
+    return _lazy_import_stock_data_tools()
 
 class MomentumStrategy(BaseStrategy):
     """
@@ -18,7 +34,8 @@ class MomentumStrategy(BaseStrategy):
     def __init__(self, short_ma: int = 10, long_ma: int = 20):
         self.short_ma = short_ma
         self.long_ma = long_ma
-        self.data_tools = StockDataTools()
+        stock_data_tools_class = get_stock_data_tools()
+        self.data_tools = stock_data_tools_class() if stock_data_tools_class else None
         super().__init__()
 
     def generate_signal(self, df: pd.DataFrame, sentiment: float = 0.0,
@@ -120,11 +137,16 @@ class MomentumStrategy(BaseStrategy):
         missing_mas = [ma for ma in ma_list if ma not in existing_mas]
 
         if missing_mas:
-            df_copy = self.data_tools.add_moving_averages(
-                df_copy,
-                ma_list=missing_mas,
-                ma_types=['SMA']
-            )
+            if self.data_tools:
+                df_copy = self.data_tools.add_moving_averages(
+                    df_copy,
+                    ma_list=missing_mas,
+                    ma_types=['SMA']
+                )
+            else:
+                # Fallback: Calculate SMAs manually using pandas
+                for ma_period in missing_mas:
+                    df_copy[f'SMA_{ma_period}'] = df_copy['Close'].rolling(window=ma_period).mean()
 
         return df_copy
 

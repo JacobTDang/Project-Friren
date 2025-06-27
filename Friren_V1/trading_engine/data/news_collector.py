@@ -113,6 +113,18 @@ class EnhancedNewsCollector:
         self.news_sources = {}
         self._sources_initialized = False
 
+        # Initialize source weights for sentiment calculation
+        self.source_weights = {
+            'alpha_vantage': 0.30,    # Market-moving news with sentiment
+            'fmp': 0.25,              # Earnings, analyst actions
+            'reddit': 0.20,           # Social sentiment
+            'newsapi': 0.15,          # Professional business news
+            'marketaux': 0.10         # Supporting market news
+        }
+
+        # Quality thresholds
+        self.min_articles_for_confidence = 3
+
         # Initialize basic components immediately
         self.logger.info("EnhancedNewsCollector: Basic initialization complete")
         self.logger.info("EnhancedNewsCollector: News sources will be initialized on first use")
@@ -223,40 +235,76 @@ class EnhancedNewsCollector:
         return filtered_stocks
 
     def _collect_news_original(self, symbols: List[str], max_articles_per_symbol: int = 10) -> Dict[str, List[NewsArticle]]:
-        """Original collect_news implementation"""
-        # Source weights for sentiment calculation
-        source_weights = {
-            'alpha_vantage': 0.30,    # Market-moving news with sentiment
-            'fmp': 0.25,              # Earnings, analyst actions
-            'reddit': 0.20,           # Social sentiment
-            'newsapi': 0.15,          # Professional business news
-            'marketaux': 0.10         # Supporting market news
-        }
-
+        """Original collect_news implementation - REAL NEWS COLLECTION"""
+        self.logger.info(f"Collecting real news for {len(symbols)} symbols: {symbols}")
+        
         # Quality thresholds
-        min_articles_for_confidence = 3
         max_article_age_hours = 6
-
-        # Rest of the original implementation...
-        # (This would be the existing collect_news logic)
-        return {}
+        
+        # Results storage
+        all_symbol_news = {}
+        
+        # Collect from each available source
+        for symbol in symbols:
+            symbol_articles = []
+            
+            # Collect from all available sources
+            for source_name, news_source in self.news_sources.items():
+                try:
+                    self.logger.debug(f"Collecting from {source_name} for {symbol}")
+                    
+                    # Get articles from this source
+                    if hasattr(news_source, 'get_symbol_news'):
+                        articles = news_source.get_symbol_news(
+                            symbol=symbol,
+                            hours_back=max_article_age_hours,
+                            max_articles=max_articles_per_symbol
+                        )
+                        
+                        if articles:
+                            symbol_articles.extend(articles)
+                            self.logger.info(f"Got {len(articles)} articles from {source_name} for {symbol}")
+                        else:
+                            self.logger.debug(f"No articles from {source_name} for {symbol}")
+                    else:
+                        self.logger.warning(f"Source {source_name} doesn't have get_symbol_news method")
+                        
+                except Exception as e:
+                    self.logger.warning(f"Error collecting from {source_name} for {symbol}: {e}")
+                    continue
+            
+            # Deduplicate articles for this symbol
+            if symbol_articles:
+                unique_articles = self.deduplicate_articles(symbol_articles)
+                all_symbol_news[symbol] = unique_articles
+                self.logger.info(f"REAL NEWS: {symbol} - {len(unique_articles)} unique articles after deduplication")
+            else:
+                self.logger.info(f"REAL NEWS: {symbol} - No articles found from any source")
+                all_symbol_news[symbol] = []
+        
+        # Log summary
+        total_articles = sum(len(articles) for articles in all_symbol_news.values())
+        symbols_with_news = len([s for s, articles in all_symbol_news.items() if articles])
+        
+        self.logger.info(f"REAL NEWS COLLECTION COMPLETE: {total_articles} articles for {symbols_with_news}/{len(symbols)} symbols")
+        
+        return all_symbol_news
 
     def _initialize_news_sources(self):
         """Initialize all available news sources with error handling and timeout protection"""
         import threading
         import time
 
-        # Simplified source list - only initialize the most reliable sources
+        # Full source list - try all sources with graceful fallback
         source_classes = {
             'alpha_vantage': AlphaVantageNews,
             'fmp': FMPNews,
-            # Skip problematic sources for now
-            # 'reddit': RedditNews,
-            # 'newsapi': NewsAPIData,
-            # 'marketaux': MarketauxNews
+            'reddit': RedditNews,
+            'newsapi': NewsAPIData,
+            'marketaux': MarketauxNews
         }
 
-        self.logger.info(f"Initializing simplified news sources: {list(source_classes.keys())}")
+        self.logger.info(f"Initializing all available news sources: {list(source_classes.keys())}")
 
         for source_name, source_class in source_classes.items():
             try:

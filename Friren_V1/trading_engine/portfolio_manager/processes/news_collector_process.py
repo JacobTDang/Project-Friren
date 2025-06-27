@@ -219,6 +219,10 @@ class EnhancedNewsCollectorProcess(RedisBaseProcess):
             self.state = ProcessState.ERROR
             raise
 
+    def _execute(self):
+        """Execute main process logic (required by RedisBaseProcess)"""
+        self._process_cycle()
+
     def _process_cycle(self):
         """Main processing cycle - optimized for FinBERT separation"""
         try:

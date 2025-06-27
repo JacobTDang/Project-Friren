@@ -53,6 +53,14 @@ class EnhancedRegimeDetector:
     def __init__(self, config: Optional[RegimeConfig] = None):
         self.config = config or RegimeConfig()
         self.SDT = StockDataTools()
+        
+        # Add real data fetcher for VIX and other market data
+        try:
+            from Friren_V1.trading_engine.data.yahoo_price import YahooFinancePriceData
+            self.data_fetcher = YahooFinancePriceData()
+        except ImportError:
+            self.data_fetcher = None
+            
         self.regime_history = []
 
     def add_enhanced_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -390,8 +398,11 @@ class EnhancedRegimeDetector:
         Get VIX-based regime signal for cross-market confirmation
         """
         try:
-            # Fetch VIX data
-            vix_data = self.SDT.extract_data("^VIX", period="1y", interval="1d")
+            # Fetch VIX data using proper data fetcher
+            if not self.data_fetcher:
+                return 'NEUTRAL'  # No data fetcher available
+                
+            vix_data = self.data_fetcher.extract_data("^VIX", period="1y", interval="1d")
 
             if len(vix_data) < 50:
                 return 'NEUTRAL'

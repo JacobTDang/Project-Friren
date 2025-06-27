@@ -346,8 +346,9 @@ class DetailedDebugMonitor:
                 else:
                     self.logger.warning("DEBUG: Symbol coordinator status is empty!")
 
-                # Count active symbols (symbols with positions > 0)
-                active_symbols = []
+                # Count active symbols (symbols with positions > 0) and monitoring symbols
+                active_symbols = []  # Symbols with actual positions > 0
+                monitoring_symbols = []  # Symbols being monitored regardless of position
                 pending_decisions = 0
 
                 if 'symbols' in coord_status:
@@ -356,11 +357,16 @@ class DetailedDebugMonitor:
                         intensity = symbol_data.get('intensity', 'unknown')
                         self.logger.info(f"DEBUG: Symbol {symbol}: position={position}, intensity={intensity}")
                         
+                        # Add to monitoring if has active/intensive intensity (regardless of position)
+                        if intensity in ['active', 'intensive']:
+                            monitoring_symbols.append(symbol)
+                        
+                        # Add to active only if has actual position
                         if position > 0:
                             active_symbols.append(symbol)
                             self.logger.info(f"DEBUG: {symbol} counted as ACTIVE (position={position})")
                         else:
-                            self.logger.info(f"DEBUG: {symbol} NOT active (position={position})")
+                            self.logger.info(f"DEBUG: {symbol} monitoring but no position (position={position})")
 
                 # Count pending decisions from symbol states
                 if 'symbols' in coord_status:
@@ -371,12 +377,17 @@ class DetailedDebugMonitor:
                         if intensity == 'intensive':
                             pending_decisions += 1
 
-                self.logger.info(f"DEBUG: Calculated - Active symbols: {active_symbols}, Pending decisions: {pending_decisions}")
-                self.logger.info(f"SYMBOL COORDINATOR: Active={len(active_symbols)} | Pending={pending_decisions}")
+                self.logger.info(f"DEBUG: Calculated - Active symbols: {active_symbols}, Monitoring symbols: {monitoring_symbols}, Pending decisions: {pending_decisions}")
+                self.logger.info(f"SYMBOL COORDINATOR: Active={len(active_symbols)} | Monitoring={len(monitoring_symbols)} | Pending={pending_decisions}")
                 if active_symbols:
-                    self.logger.info(f"  -> Active Symbols: {', '.join(active_symbols)}")
+                    self.logger.info(f"  -> Active Symbols (with positions): {', '.join(active_symbols)}")
                 else:
                     self.logger.info(f"  -> No active symbols with positions")
+                
+                if monitoring_symbols:
+                    self.logger.info(f"  -> Monitoring Symbols (ready for trading): {', '.join(monitoring_symbols)}")
+                else:
+                    self.logger.info(f"  -> No symbols being monitored for trading opportunities")
 
                 # Show coordination metrics
                 if 'metrics' in coord_status:

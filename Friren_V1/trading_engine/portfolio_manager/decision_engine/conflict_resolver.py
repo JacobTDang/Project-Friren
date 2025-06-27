@@ -35,12 +35,29 @@ except ImportError:
     HAS_XGBOOST = False
     logging.warning("XGBoost not available, using rule-based fallback only")
 
-try:
-    import shap
-    HAS_SHAP = True
-except ImportError:
-    HAS_SHAP = False
-    logging.warning("SHAP not available, explainability will be limited")
+# LAZY LOADING: Only import SHAP when actually needed to avoid memory issues
+def _lazy_import_shap():
+    """Lazy import SHAP to avoid memory issues during startup"""
+    try:
+        import shap
+        return shap, True
+    except ImportError:
+        logging.warning("SHAP not available, explainability will be limited")
+        return None, False
+    except MemoryError:
+        logging.warning("SHAP import failed due to memory constraints, explainability will be limited")
+        return None, False
+
+# Global variables for lazy loading
+_shap_module = None
+HAS_SHAP = None
+
+def get_shap():
+    """Get SHAP module with lazy loading"""
+    global _shap_module, HAS_SHAP
+    if HAS_SHAP is None:
+        _shap_module, HAS_SHAP = _lazy_import_shap()
+    return _shap_module if HAS_SHAP else None
 
 # Import from your signal aggregator
 from .signal_aggregator import AggregatedSignal, SignalType
@@ -709,9 +726,12 @@ class ConflictResolver:
                 with open(feature_names_path, 'rb') as f:
                     self.feature_names = pickle.load(f)
 
-            # Setup SHAP explainer
-            if HAS_SHAP:
-                self.shap_explainer = shap.TreeExplainer(self.xgb_model)
+            # Setup SHAP explainer with lazy loading
+            shap_module = get_shap()
+            if shap_module:
+                self.shap_explainer = shap_module.TreeExplainer(self.xgb_model)
+            else:
+                self.shap_explainer = None
 
             self.logger.info(f"Loaded XGBoost model from {model_path}")
 

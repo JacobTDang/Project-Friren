@@ -147,30 +147,9 @@ class DecisionCoordinator:
 
             self._last_decision_check = time.time()
 
-            # Simulate adding work to decision engine queue
-            if random.random() < 0.4:  # 40% chance of new analysis needed
-                symbol = random.choice(self.config.symbols)
-                decision_task = {
-                    'symbol': symbol,
-                    'task_type': 'market_analysis',
-                    'timestamp': datetime.now().isoformat(),
-                    'priority': random.choice(['HIGH', 'MEDIUM', 'LOW']),
-                    'data_sources': ['price', 'volume', 'sentiment', 'news']
-                }
-
-                # Add to decision engine queue
-                if hasattr(self.process_manager, 'decision_queue'):
-                    self.process_manager.decision_queue.append(decision_task)
-                    self.logger.info(f"DECISION TASK QUEUED: {symbol} analysis ({len(self.process_manager.decision_queue)} in queue)")
-
-                    # Try to start decision engine if needed
-                    if hasattr(self.process_manager, 'start_decision_engine_if_needed'):
-                        if self.process_manager.start_decision_engine_if_needed():
-                            self.logger.info("Decision engine started to process queued tasks")
-                else:
-                    # Fallback: simulate decision directly
-                    decision_data = self._simulate_decision(symbol)
-                    self._process_decision(symbol, decision_data)
+            # REMOVED: Random task generation and simulation
+            # Real trading decisions should only come from actual market signals and analysis
+            # No random decision tasks will be generated
 
             # Simulate decision engine processing (consume queue)
             if (hasattr(self.process_manager, 'decision_queue') and
@@ -193,15 +172,19 @@ class DecisionCoordinator:
             self.logger.error(f"Error checking pending decisions: {e}")
 
     def _simulate_decision(self, symbol: str) -> Dict[str, Any]:
-        """Simulate a trading decision"""
+        """REMOVED: Was generating random trading decisions - EXTREMELY DANGEROUS"""
+        # This method previously generated random BUY/SELL/HOLD decisions
+        # which could have executed real trades. Now returns error state.
+        self.logger.error(f"CRITICAL: _simulate_decision called for {symbol} - this method has been disabled for safety")
         return {
             'symbol': symbol,
-            'action': random.choice(['BUY', 'SELL', 'HOLD']),
-            'confidence': round(random.uniform(0.6, 0.95), 2),
+            'action': 'ERROR',
+            'confidence': 0.0,
             'timestamp': datetime.now().isoformat(),
-            'reason': f"Simulated analysis for {symbol}",
-            'quantity': random.randint(1, 10),
-            'price_target': round(random.uniform(100, 300), 2)
+            'reason': f"ERROR: Random decision simulation disabled for safety",
+            'quantity': 0,
+            'price_target': 0.0,
+            'error': 'Random trading decisions disabled - use real analysis only'
         }
 
     def _process_decision(self, symbol: str, decision_data: Dict[str, Any]):

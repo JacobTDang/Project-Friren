@@ -12,6 +12,13 @@ from datetime import datetime, timedelta
 from typing import List, Optional, Dict
 import logging
 
+# Load environment variables
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # dotenv not available, rely on system environment
+
 try:
     from .base import NewsDataSource, NewsArticle
     from .yahoo_news import SymbolExtractor

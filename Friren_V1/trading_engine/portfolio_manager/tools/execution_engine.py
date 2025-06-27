@@ -43,15 +43,10 @@ except ImportError:
         BUY = "buy"
         SELL = "sell"
 
-    class SimpleOrderManager:
-        def create_order(self, *args, **kwargs): return True, None
-        def submit_order(self, *args, **kwargs): return True
-    class SimpleAlpacaInterface:
-        def get_current_price(self, symbol): return 100.0
-        def submit_order(self, *args, **kwargs): return True, "fake_id"
-        def get_position(self, symbol): return None
-    class TradingDBManager:
-        def upsert_holding(self, *args, **kwargs): return True
+    # REMOVED: Dangerous fake trading interfaces
+    # These stub classes were returning fake success responses which could mask
+    # real trading failures. Only real trading interfaces should be used.
+    # If real interfaces are not available, the system should fail safely.
 
 
 class ExecutionType(Enum):
