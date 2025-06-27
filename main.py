@@ -30,6 +30,14 @@ project_root = Path(__file__).parent
 if str(project_root) not in sys.path:
     sys.path.append(str(project_root))
 
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+    print("Environment variables loaded from .env file")
+except ImportError:
+    print("Warning: python-dotenv not available, relying on system environment variables")
+
 # Windows-specific multiprocessing setup
 if sys.platform == "win32":
     import multiprocessing as mp
@@ -57,7 +65,7 @@ def setup_enhanced_logging():
     # Create custom colored formatter
     class ColoredFormatter(logging.Formatter):
         """Custom formatter with colors for different log levels"""
-        
+
         def __init__(self, use_colors=True):
             super().__init__()
             self.use_colors = use_colors
@@ -83,16 +91,16 @@ def setup_enhanced_logging():
                 # Color the entire message
                 color = self.colors[record.levelname]
                 reset = self.colors.get('RESET', '')
-                
+
                 # Format the message with colors
                 timestamp = time.strftime('%H:%M:%S', time.localtime(record.created))
-                
+
                 # Color different parts
                 colored_level = f"{color}[{record.levelname}]{reset}"
                 from colorama import Fore
                 colored_name = f"{Fore.BLUE}{record.name}{reset}" if self.use_colors else record.name
                 colored_msg = f"{color}{record.getMessage()}{reset}"
-                
+
                 return f"{timestamp} {colored_level} {colored_name}: {colored_msg}"
             else:
                 # Fallback to plain format
@@ -144,22 +152,31 @@ def signal_handler(signum, frame):
     global shutdown_requested, global_orchestrator
 
     logger = logging.getLogger("main")
-    logger.critical(f"SIGNAL RECEIVED: {signum} - Initiating graceful shutdown")
+    logger.critical(f"SIGNAL RECEIVED: {signum} - IMMEDIATE SHUTDOWN INITIATED")
 
     # Set shutdown flag IMMEDIATELY - this is critical
     shutdown_requested = True
 
-    logger.info("SHUTDOWN: Shutdown flag set - main loop will handle graceful shutdown")
-
-    # FIXED: Also try to stop the orchestrator directly if available
+    # FORCE stop the orchestrator immediately
     if global_orchestrator:
         try:
-            logger.info("SIGNAL: Attempting direct orchestrator shutdown...")
+            logger.critical("SIGNAL: Force stopping orchestrator and all subprocesses...")
             global_orchestrator.stop_system()
+            logger.critical("SIGNAL: Orchestrator stopped")
         except Exception as e:
-            logger.warning(f"SIGNAL: Direct orchestrator shutdown failed: {e}")
+            logger.error(f"SIGNAL: Orchestrator shutdown failed: {e}")
 
-    # Don't force exit here - let the main loop handle it gracefully
+    # Give a brief moment for graceful shutdown, then force exit
+    logger.critical("SIGNAL: Waiting 3 seconds for graceful shutdown...")
+
+    def force_exit():
+        time.sleep(3)
+        logger.critical("SIGNAL: FORCE EXIT - System did not shut down gracefully")
+        os._exit(1)  # Force exit bypassing cleanup
+
+    # Start force exit timer
+    force_exit_thread = threading.Thread(target=force_exit, daemon=True)
+    force_exit_thread.start()
 
 def load_dynamic_watchlist(logger):
     """
@@ -356,6 +373,7 @@ def run_trading_system():
     # Import colored print functions for this thread
     try:
         from colored_print import header, success, error, warning, info, progress
+        from terminal_color_system import print_communication
     except ImportError:
         # Fallback functions if colored_print not available
         def header(msg): print(f"=== {msg} ===")
@@ -364,13 +382,63 @@ def run_trading_system():
         def warning(msg): print(f"[WARNING] {msg}")
         def info(msg): print(f"[INFO] {msg}")
         def progress(msg): print(f"[PROGRESS] {msg}")
+        def print_communication(msg): print(f"[COMM] {msg}")
 
     logger = logging.getLogger("main")
     orchestrator = None
+    bridge = None
+
+    # MEMORY MONITORING: Initialize system-wide memory monitoring
+    main_memory_monitor = None
+    system_cleanup_manager = None
 
     try:
         logger.info("=== STARTING ENHANCED TRADING SYSTEM ===")
         logger.info("Features: Real-time monitoring, Queue debugging, CPU tracking, 24/7 news collection")
+
+        # MEMORY MONITORING: Setup system-wide memory monitoring
+        logger.info("=== INITIALIZING SYSTEM MEMORY MONITORING ===")
+        from Friren_V1.multiprocess_infrastructure.memory_monitor import get_memory_monitor, cleanup_all_monitors
+        from Friren_V1.multiprocess_infrastructure.memory_cleanup_manager import get_cleanup_manager
+
+        # Initialize main process memory monitoring (4GB limit for main process)
+        main_memory_monitor = get_memory_monitor(
+            process_id="main_process",
+            memory_limit_mb=4096,  # 4GB limit for main process
+            auto_start=True
+        )
+
+        # Setup cleanup manager for main process
+        system_cleanup_manager = get_cleanup_manager("main_process", main_memory_monitor)
+
+        # Add emergency callback for system-wide memory issues
+        def emergency_memory_callback(snapshot, stats):
+            logger.critical(f"EMERGENCY: Main process memory critical - {snapshot.memory_mb:.1f}MB")
+            logger.critical("Initiating emergency system shutdown to prevent OOM crash")
+            global shutdown_requested
+            shutdown_requested = True
+
+        main_memory_monitor.add_emergency_callback(emergency_memory_callback)
+
+        # Add alert callback for memory warnings
+        def memory_alert_callback(snapshot, stats, alert_level):
+            if alert_level.value in ['high', 'critical']:
+                logger.warning(f"MEMORY ALERT [{alert_level.value.upper()}]: Main process using {snapshot.memory_mb:.1f}MB")
+                # Trigger cleanup
+                freed = system_cleanup_manager.perform_cleanup()
+                logger.info(f"Emergency cleanup freed {freed:.1f}MB")
+
+        main_memory_monitor.add_alert_callback(memory_alert_callback)
+
+        logger.info(f"System memory monitoring initialized - Main process limit: 4GB")
+        success("Memory monitoring and leak prevention active")
+
+        # Start the terminal bridge for subprocess communication
+        from main_terminal_bridge import MainTerminalBridge
+        bridge = MainTerminalBridge()
+        bridge.start_monitoring()
+        print_communication("Terminal bridge started - monitoring subprocess output")
+        info("Watch for colored business execution messages below:")
 
         # Initialize the trading system
         orchestrator = initialize_trading_system()
@@ -380,29 +448,10 @@ def run_trading_system():
 
         global global_orchestrator
         global_orchestrator = orchestrator
-        
-        # CRITICAL FIX: Apply direct Symbol Coordinator fix
-        progress("Applying direct Symbol Coordinator fix...")
-        try:
-            from symbol_coordinator_direct_fix import apply_direct_fix_to_main
-            
-            # Create working Symbol Coordinator
-            direct_fix = apply_direct_fix_to_main()
-            
-            if direct_fix:
-                # Inject into orchestrator
-                if direct_fix.inject_into_orchestrator(orchestrator):
-                    success("Direct Symbol Coordinator fix applied successfully!")
-                    info("System should now generate trading messages and collect news")
-                else:
-                    error("Failed to inject Symbol Coordinator fix")
-            else:
-                error("Direct Symbol Coordinator fix creation failed")
-                
-        except Exception as e:
-            error(f"Direct Symbol Coordinator fix error: {e}")
-            import traceback
-            traceback.print_exc()
+
+        # REMOVED: Direct Symbol Coordinator band-aid fix
+        # Core initialization should handle Symbol Coordinator properly
+        progress("Symbol Coordinator will be initialized through proper channels...")
 
         # REMOVED: Colorized news monitoring simulation
         # NO SIMULATION - Real processes will handle news collection output
@@ -424,17 +473,17 @@ def run_trading_system():
         except Exception as e:
             logger.error(f"Error testing CPU monitoring: {e}")
 
-        # Test queue monitoring
+        # Test queue monitoring - FIXED: Use Redis manager instead of queue_manager
         try:
-            if hasattr(orchestrator, 'queue_manager') and orchestrator.queue_manager:
-                queue_status = orchestrator.queue_manager.get_queue_status()
-                logger.info("=== FIXED QUEUE MONITORING ===")
+            if hasattr(orchestrator, 'redis_manager') and orchestrator.redis_manager:
+                queue_status = orchestrator.redis_manager.get_queue_status()
+                logger.info("=== FIXED QUEUE MONITORING (Redis-based) ===")
                 for queue_name, queue_info in queue_status.items():
                     logger.info(f"{queue_name.upper()}: Size={queue_info['size']} (should show actual counts)")
-                    if queue_info.get('recent_messages'):
-                        logger.info(f"  Recent messages: {queue_info['recent_messages']}")
+                    if queue_info.get('message_types'):
+                        logger.info(f"  Message types: {queue_info['message_types']}")
             else:
-                logger.warning("Queue manager not available for queue testing")
+                logger.warning("Redis manager not available for queue testing")
         except Exception as e:
             logger.error(f"Error testing queue monitoring: {e}")
 
@@ -463,60 +512,12 @@ def run_trading_system():
         # FIXED: Add timeout mechanism for shutdown
         shutdown_timeout_start = None
 
-        # Inject test events if requested (only once, after orchestrator is started)
-        injected_test_events = False
-
         while not shutdown_requested and execution_count < max_executions:
             try:
                 execution_count += 1
-                logger.info(f"=== EXECUTION CYCLE {execution_count} ===")
+                logger.info(f"""=== EXECUTION CYCLE {execution_count} ===""")
 
-                # Inject test events after orchestrator is started (cycle 1)
-                if not injected_test_events and os.getenv("INJECT_TEST_EVENTS", "0") == "1":
-                    # Wait for orchestrator to be fully started
-                    if hasattr(orchestrator, 'queue_manager') and orchestrator.queue_manager is not None and \
-                       hasattr(orchestrator, 'execution_orchestrator') and orchestrator.execution_orchestrator is not None:
-                        try:
-                            logger.info("[TEST] INJECT_TEST_EVENTS=1 detected. Injecting NEWS_REQUEST and buy order for AAPL.")
-                            from Friren_V1.multiprocess_infrastructure.queue_manager import QueueMessage, MessageType, MessagePriority
-                            news_msg = QueueMessage(
-                                message_type=MessageType.NEWS_REQUEST,
-                                priority=MessagePriority.HIGH,
-                                sender_id="main_test_injector",
-                                recipient_id="enhanced_news_pipeline",
-                                payload={
-                                    "symbol": "AAPL",
-                                    "force_refresh": True,
-                                    "timestamp": datetime.now().isoformat()
-                                }
-                            )
-                            orchestrator.queue_manager.send_message(news_msg)
-                            logger.info("[TEST] NEWS_REQUEST for AAPL injected into priority_queue.")
-
-                            from types import SimpleNamespace
-                            risk_validation = SimpleNamespace(
-                                symbol="AAPL",
-                                is_approved=True,
-                                should_execute=True,
-                                size_calculation=SimpleNamespace(
-                                    needs_trade=True,
-                                    shares_to_trade=1,
-                                    is_buy=True,
-                                    current_price=200.0
-                                ),
-                                original_decision=SimpleNamespace(final_direction=1)
-                            )
-                            result = orchestrator.execution_orchestrator.execute_approved_decision(
-                                risk_validation=risk_validation,
-                                strategy_name="test_injector",
-                                strategy_confidence=1.0
-                            )
-                            logger.info(f"[TEST] Buy order for 1 AAPL submitted to execution orchestrator. Result: {getattr(result, 'execution_summary', result)}")
-                            injected_test_events = True
-                        except Exception as e:
-                            logger.error(f"[TEST] Error injecting test events: {e}")
-                    else:
-                        logger.debug("[TEST] Waiting for orchestrator to be fully started before injecting test events...")
+                # Test event injection logic removed to use real data
 
                 # Check shutdown flag before executing cycle
                 if shutdown_requested:
@@ -574,9 +575,9 @@ def run_trading_system():
                         cpu_usage = orchestrator.system_monitor.status.cpu_usage_percent
                         logger.info(f"CURRENT CPU USAGE: {cpu_usage:.1f}%")
 
-                    # Check queue sizes
-                    if hasattr(orchestrator, 'queue_manager') and orchestrator.queue_manager:
-                        queue_status = orchestrator.queue_manager.get_queue_status()
+                    # Check queue sizes - FIXED: Use Redis manager
+                    if hasattr(orchestrator, 'redis_manager') and orchestrator.redis_manager:
+                        queue_status = orchestrator.redis_manager.get_queue_status()
                         for queue_name, queue_info in queue_status.items():
                             if queue_info['size'] > 0:
                                 logger.info(f"ACTIVE QUEUE {queue_name}: {queue_info['size']} messages")
@@ -634,6 +635,12 @@ def run_trading_system():
                 if orchestrator:
                     orchestrator.stop_system()
                     logger.info("Orchestrator stopped successfully")
+
+                # Stop terminal bridge
+                if bridge:
+                    bridge.stop_monitoring()
+                    logger.info("Terminal bridge stopped successfully")
+
             except Exception as e:
                 logger.error(f"Error during orchestrator shutdown: {e}")
 
@@ -659,6 +666,13 @@ def run_trading_system():
             except:
                 pass
 
+        # Stop terminal bridge
+        if bridge:
+            try:
+                bridge.stop_monitoring()
+            except:
+                pass
+
         raise
 
 def development_timeout_handler():
@@ -676,7 +690,7 @@ def main():
     try:
         # Import colored print functions
         from colored_print import header, success, error, warning, info, progress
-        
+
         header("FRIREN TRADING SYSTEM STARTUP")
         progress("Initializing trading system...")
 
@@ -689,6 +703,11 @@ def main():
         setup_enhanced_logging()
         logger = logging.getLogger('main')
         logger.info("=== TRADING SYSTEM STARTUP ===")
+
+        # CRITICAL: Check system requirements before proceeding
+        if not check_system_requirements():
+            error("System requirements not met - aborting startup")
+            sys.exit(1)
 
         # Run the trading system with keyboard interrupt protection
         system_thread = threading.Thread(target=run_trading_system, daemon=True)
