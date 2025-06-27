@@ -85,25 +85,43 @@ def create_redis_compatible_process(original_class, process_id: str, process_arg
                 self._initialize_business_attributes()
 
         def _import_business_methods(self):
-            """Import business methods from the original class"""
+            """Import ALL business methods from the original class dynamically"""
             try:
-                # Get the _process_cycle method from the business class
-                if hasattr(self.business_class, '_process_cycle'):
-                    # Create a bound method by getting the unbound method and binding it to self
-                    unbound_method = getattr(self.business_class, '_process_cycle')
-                    self._business_process_cycle = unbound_method.__get__(self, self.__class__)
+                imported_methods = []
+                
+                # Get ALL methods from the business class (not just hardcoded ones)
+                for attr_name in dir(self.business_class):
+                    if attr_name.startswith('_') and callable(getattr(self.business_class, attr_name)):
+                        try:
+                            # Skip special/magic methods 
+                            if attr_name.startswith('__'):
+                                continue
+                                
+                            # Get the unbound method and bind it to self
+                            unbound_method = getattr(self.business_class, attr_name)
+                            if hasattr(unbound_method, '__get__'):  # Ensure it's a proper method
+                                # Bind the method to this wrapper instance
+                                bound_method = unbound_method.__get__(self, self.__class__)
+                                setattr(self, attr_name, bound_method)
+                                imported_methods.append(attr_name)
+                                
+                                # Special handling for key methods
+                                if attr_name == '_process_cycle':
+                                    self._business_process_cycle = bound_method
+                                elif attr_name == '_initialize':
+                                    self._business_initialize = bound_method
+                                    
+                        except Exception as e:
+                            self.logger.debug(f"Could not bind method {attr_name}: {e}")
+                            continue
+
+                self.logger.info(f"[SUCCESS] Imported {len(imported_methods)} business methods: {imported_methods[:10]}{'...' if len(imported_methods) > 10 else ''}")
+                
+                # Verify critical methods are available
+                if hasattr(self, '_process_cycle'):
                     self.logger.info(f"[SUCCESS] Imported _process_cycle from {self.business_class.__name__}")
-
-                # Import other essential methods
-                if hasattr(self.business_class, '_should_run_pipeline'):
-                    unbound_method = getattr(self.business_class, '_should_run_pipeline')
-                    self._should_run_pipeline = unbound_method.__get__(self, self.__class__)
-
-                if hasattr(self.business_class, '_run_full_pipeline'):
-                    unbound_method = getattr(self.business_class, '_run_full_pipeline')
-                    self._run_full_pipeline = unbound_method.__get__(self, self.__class__)
-
-                self.logger.info(f"[SUCCESS] Business methods imported successfully")
+                else:
+                    self.logger.warning(f"[WARNING] _process_cycle not found in {self.business_class.__name__}")
 
             except Exception as e:
                 self.logger.error(f"❌ Failed to import business methods: {e}")
@@ -116,8 +134,6 @@ def create_redis_compatible_process(original_class, process_id: str, process_arg
                     self.watchlist_symbols = self.process_args['watchlist_symbols']
                 elif 'symbols' in self.process_args:
                     self.symbols = self.process_args['symbols']
-                else:
-                    self.symbols = ['AAPL']  # Default symbol
 
                 # Add any process-specific attributes based on class name
                 class_name = self.original_class.__name__
@@ -139,6 +155,11 @@ def create_redis_compatible_process(original_class, process_id: str, process_arg
                 self.analysis_interval = self.process_args.get('analysis_interval', 300)  # 5 minutes
                 self.check_interval = self.process_args.get('check_interval', 60)  # 1 minute
 
+                # Set all process_args as attributes for business class compatibility
+                for key, value in self.process_args.items():
+                    if not hasattr(self, key) and value is not None:
+                        setattr(self, key, value)
+
                 if 'PositionHealthMonitor' in class_name:
                     self.check_interval = self.process_args.get('check_interval', 5)
                     self.active_strategies = {}
@@ -152,7 +173,8 @@ def create_redis_compatible_process(original_class, process_id: str, process_arg
                     self.last_daily_reset = datetime.now().date()
 
                 elif 'StrategyAnalyzer' in class_name:
-                    self.analysis_interval = self.process_args.get('analysis_interval', 300)
+                    self.analysis_interval = self.process_args.get('analysis_interval', 150)
+                    self.confidence_threshold = self.process_args.get('confidence_threshold', 70.0)
                     self.last_analysis_time = None
                     self.analysis_count = 0
                     self.signals_sent_count = 0
@@ -164,6 +186,33 @@ def create_redis_compatible_process(original_class, process_id: str, process_arg
 
                 # Initialize Redis manager reference that business logic expects
                 self.redis_manager = get_trading_redis_manager()
+
+                # Initialize config attribute that business logic expects - completely dynamic
+                config_dict = {}
+                
+                # Only add values that are actually provided
+                if hasattr(self, 'watchlist_symbols'):
+                    config_dict['watchlist_symbols'] = self.watchlist_symbols
+                if hasattr(self, 'symbols'):
+                    config_dict['symbols'] = self.symbols
+                if hasattr(self, 'analysis_interval'):
+                    config_dict['analysis_interval'] = self.analysis_interval
+                if hasattr(self, 'check_interval'):
+                    config_dict['check_interval'] = self.check_interval
+                
+                # Add any additional config from process_args
+                for key, value in self.process_args.items():
+                    if key not in config_dict and value is not None:
+                        config_dict[key] = value
+                
+                # Add common config parameters that business logic expects
+                if 'hours_back' not in config_dict:
+                    config_dict['hours_back'] = self.process_args.get('hours_back', 24)
+                
+                self.config = type('Config', (), config_dict)()
+
+                # Note: Business objects like news_collector, pipeline_metrics, performance_tracker
+                # should be initialized by the actual business class, not created as placeholders here
 
                 self.logger.info(f"Business attributes initialized for {class_name}")
 
@@ -222,6 +271,12 @@ def create_redis_compatible_process(original_class, process_id: str, process_arg
         def _initialize(self):
             """Initialize the wrapped process"""
             try:
+                # Call the business class's initialize method if available
+                if hasattr(self, '_business_initialize'):
+                    self.logger.info(f"Calling business class initialization for {self.process_id}")
+                    self._business_initialize()
+                    self.logger.info(f"Business class initialization completed for {self.process_id}")
+                
                 self.logger.info(f"Process {self.process_id} initialized successfully")
             except Exception as e:
                 self.logger.error(f"Error initializing process: {e}")
@@ -271,7 +326,7 @@ def create_redis_compatible_process(original_class, process_id: str, process_arg
                 time.sleep(1)
 
         def _cleanup(self):
-            """Cleanup the wrapped process"""
+            """Cleanup the wrapped process with proper Redis disconnection"""
             try:
                 # Call original process cleanup if available
                 if hasattr(self.original_process, '_cleanup'):
@@ -280,6 +335,20 @@ def create_redis_compatible_process(original_class, process_id: str, process_arg
                     self.original_process.cleanup()
                 elif hasattr(self.original_process, 'stop'):
                     self.original_process.stop()
+
+                # CRITICAL: Ensure Redis disconnection for business processes
+                if hasattr(self.original_process, 'redis_manager') and self.original_process.redis_manager:
+                    try:
+                        redis_mgr = self.original_process.redis_manager
+                        if hasattr(redis_mgr, 'disconnect'):
+                            redis_mgr.disconnect()
+                        elif hasattr(redis_mgr, 'close'):
+                            redis_mgr.close()
+                        elif hasattr(redis_mgr, 'cleanup'):
+                            redis_mgr.cleanup()
+                        self.logger.info(f"Business process Redis connections closed for {self.process_id}")
+                    except Exception as e:
+                        self.logger.warning(f"Could not close business process Redis connections: {e}")
 
                 super()._cleanup()
                 self.logger.info(f"Process {self.process_id} cleanup completed")

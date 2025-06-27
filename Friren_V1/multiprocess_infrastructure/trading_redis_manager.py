@@ -428,6 +428,44 @@ class TradingRedisManager:
             logger.error(f"Error getting all shared keys: {e}")
             return []
 
+    def set_data(self, key: str, value: Any, namespace: str = "general", ttl: int = None) -> bool:
+        """Set data (alias for set_shared_state for compatibility)"""
+        result = self.set_shared_state(key, value, namespace)
+        if result and ttl:
+            state_key = f"{self.STATE_PREFIX}:{namespace}:{key}"
+            self.redis_client.expire(state_key, ttl)
+        return result
+
+    def hset(self, key: str, field: str = None, value: str = None, mapping: dict = None, **kwargs) -> int:
+        """Redis hash set operation (compatibility method)"""
+        try:
+            if field and value:
+                # Ensure value is string serializable
+                if isinstance(value, (dict, list)):
+                    value = json.dumps(value, default=str)
+                return self.redis_client.hset(key, field, str(value))
+            elif mapping:
+                # Serialize dict/list values to JSON strings
+                serialized_mapping = {}
+                for k, v in mapping.items():
+                    if isinstance(v, (dict, list)):
+                        serialized_mapping[k] = json.dumps(v, default=str)
+                    else:
+                        serialized_mapping[k] = str(v)
+                return self.redis_client.hset(key, mapping=serialized_mapping)
+            else:
+                # Serialize kwargs values
+                serialized_kwargs = {}
+                for k, v in kwargs.items():
+                    if isinstance(v, (dict, list)):
+                        serialized_kwargs[k] = json.dumps(v, default=str)
+                    else:
+                        serialized_kwargs[k] = str(v)
+                return self.redis_client.hset(key, mapping=serialized_kwargs)
+        except Exception as e:
+            logger.error(f"Error in hset operation: {e}")
+            return 0
+
     # Position Management
     def update_position(self, symbol: str, position_data: Dict[str, Any]) -> bool:
         """Update position data for a symbol"""
@@ -643,10 +681,21 @@ class TradingRedisManager:
             logger.error(f"Error cleaning up Redis data: {e}")
             return False
 
+    def close(self):
+        """Close Redis connections and cleanup threads"""
+        try:
+            logger.info("Closing TradingRedisManager...")
+            self.stop_cleanup_thread()
+            if hasattr(self.redis_client, 'close'):
+                self.redis_client.close()
+            logger.info("TradingRedisManager closed successfully")
+        except Exception as e:
+            logger.error(f"Error closing TradingRedisManager: {e}")
+
     def __del__(self):
         """Cleanup when manager is destroyed"""
         try:
-            self.stop_cleanup_thread()
+            self.close()
         except:
             pass
 

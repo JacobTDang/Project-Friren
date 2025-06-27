@@ -630,7 +630,7 @@ class RedisBaseProcess(ABC):
             self.disable_queue_mode()
 
     def _cleanup(self):
-        """Process cleanup logic - enhanced with memory cleanup"""
+        """Process cleanup logic - enhanced with memory cleanup and Redis disconnection"""
         try:
             # Process-specific cleanup (to be overridden)
             self._process_cleanup()
@@ -639,6 +639,32 @@ class RedisBaseProcess(ABC):
             if self.memory_monitor:
                 self.memory_monitor.cleanup_memory(force=True)
                 self.memory_monitor.stop_monitoring()
+
+            # CRITICAL: Explicitly disconnect from Redis to prevent connection leaks
+            if self.redis_manager:
+                try:
+                    # Send final shutdown message if possible
+                    shutdown_message = create_process_message(
+                        sender=self.process_id,
+                        recipient="orchestrator",
+                        message_type="process_shutdown",
+                        data={"reason": "cleanup", "final_message": True}
+                    )
+                    self.redis_manager.send_message(shutdown_message, "orchestrator_queue", timeout=2)
+                except Exception as e:
+                    self.logger.debug(f"Could not send final shutdown message: {e}")
+                
+                # Disconnect Redis connections
+                try:
+                    if hasattr(self.redis_manager, 'disconnect'):
+                        self.redis_manager.disconnect()
+                    elif hasattr(self.redis_manager, 'close'):
+                        self.redis_manager.close()
+                    elif hasattr(self.redis_manager, 'cleanup'):
+                        self.redis_manager.cleanup()
+                    self.logger.info(f"Redis connections closed for {self.process_id}")
+                except Exception as e:
+                    self.logger.warning(f"Could not properly close Redis connections: {e}")
 
             self.logger.info(f"Cleanup completed for {self.process_id}")
 

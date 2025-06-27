@@ -82,7 +82,7 @@ class RedisProcessManager:
     - Graceful shutdown handling
     """
 
-    def __init__(self, max_processes: int = 5, enable_queue_rotation: bool = False, cycle_time_seconds: float = 30.0):
+    def __init__(self, max_processes: int = 3, enable_queue_rotation: bool = True, cycle_time_seconds: float = 60.0):
         self.max_processes = max_processes
         self.enable_queue_rotation = enable_queue_rotation
         self.cycle_time_seconds = cycle_time_seconds
@@ -95,12 +95,20 @@ class RedisProcessManager:
         # Redis manager
         self.redis_manager = get_trading_redis_manager()
 
-        # Queue rotation manager (optional)
+        # Enhanced queue rotation manager with priority system
         self.queue_manager = None
         if enable_queue_rotation:
             from .process_queue_manager import ProcessQueueManager
-            self.queue_manager = ProcessQueueManager(self, cycle_time_seconds)
-            self.logger.info(f"Queue rotation enabled with cycle time {cycle_time_seconds}s")
+            self.queue_manager = ProcessQueueManager(
+                redis_process_manager=self, 
+                cycle_time_seconds=cycle_time_seconds,
+                max_concurrent_processes=max_processes,
+                target_memory_mb=800  # Target 800MB total memory usage (more aggressive)
+            )
+            self.logger.info(f"Enhanced queue rotation enabled:")
+            self.logger.info(f"  - Max concurrent: {max_processes} processes")
+            self.logger.info(f"  - Cycle time: {cycle_time_seconds}s")
+            self.logger.info(f"  - Target memory: 800MB")
 
         # Control flags
         self._shutdown_event = threading.Event()
@@ -281,13 +289,28 @@ class RedisProcessManager:
 
             self.logger.info(f"Launching process with command: {' '.join(cmd)}")
 
-            process = subprocess.Popen(
-                cmd,
-                stdout=None,  # Inherit from parent process (main terminal)
-                stderr=None,  # Inherit from parent process (main terminal)
-                text=True,
-                cwd=project_root
-            )
+            # CRITICAL FIX: Add process group management for proper cleanup
+            import platform
+            if platform.system() == "Windows":
+                # Windows: Use CREATE_NEW_PROCESS_GROUP for proper termination
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=None,  # Inherit from parent process (main terminal)
+                    stderr=None,  # Inherit from parent process (main terminal)
+                    text=True,
+                    cwd=project_root,
+                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+                )
+            else:
+                # Unix: Use process group for proper cleanup
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=None,  # Inherit from parent process (main terminal)
+                    stderr=None,  # Inherit from parent process (main terminal)
+                    text=True,
+                    cwd=project_root,
+                    preexec_fn=os.setsid  # Create new process group
+                )
 
             # Update status
             status.process = process
@@ -333,27 +356,60 @@ class RedisProcessManager:
             except Exception as e:
                 self.logger.debug(f"Could not send Redis stop message to {process_id}: {e}")
 
+            # ENHANCED: Terminate process group to catch all child processes
+            import platform
+            
             # Send SIGTERM first for graceful shutdown
             if hasattr(status.process, 'terminate'):
                 self.logger.info(f"Sending SIGTERM to process {process_id} (PID: {status.process.pid})")
-                status.process.terminate()
+                
+                # Try to terminate the entire process group
+                try:
+                    if platform.system() == "Windows":
+                        # Windows: Send CTRL_BREAK_EVENT to process group
+                        os.kill(status.process.pid, signal.CTRL_BREAK_EVENT)
+                    else:
+                        # Unix: Send SIGTERM to process group
+                        os.killpg(os.getpgid(status.process.pid), signal.SIGTERM)
+                    self.logger.info(f"Sent SIGTERM to process group for {process_id}")
+                except Exception as e:
+                    self.logger.debug(f"Could not terminate process group for {process_id}: {e}")
+                    # Fallback to individual process termination
+                    status.process.terminate()
 
-            # Wait for graceful shutdown
+            # Wait for graceful shutdown - increased timeout for proper cleanup
             try:
-                status.process.wait(timeout=min(timeout, 10))  # Max 10 seconds for graceful
+                graceful_timeout = min(timeout, 45)  # Increased from 30 to 45 seconds
+                status.process.wait(timeout=graceful_timeout)
                 self.logger.info(f"Process {process_id} terminated gracefully")
             except subprocess.TimeoutExpired:
-                self.logger.warning(f"Process {process_id} did not terminate gracefully, force killing...")
+                self.logger.warning(f"Process {process_id} did not terminate gracefully after {graceful_timeout}s, force killing...")
 
-                # Force kill with SIGKILL
-                if hasattr(status.process, 'kill'):
-                    status.process.kill()
+                # Force kill the entire process group
+                try:
+                    if platform.system() == "Windows":
+                        # Windows: Use taskkill to force terminate process tree
+                        subprocess.run(['taskkill', '/F', '/T', '/PID', str(status.process.pid)], 
+                                     capture_output=True, timeout=10)
+                        self.logger.info(f"Force killed process tree for {process_id}")
+                    else:
+                        # Unix: Send SIGKILL to process group
+                        os.killpg(os.getpgid(status.process.pid), signal.SIGKILL)
+                        self.logger.info(f"Force killed process group for {process_id}")
+                except Exception as e:
+                    self.logger.warning(f"Could not force kill process group for {process_id}: {e}")
+                    # Fallback to individual process kill
+                    if hasattr(status.process, 'kill'):
+                        status.process.kill()
 
                 try:
-                    status.process.wait(timeout=5)
+                    force_timeout = 20  # Increased from 15 to 20 seconds
+                    status.process.wait(timeout=force_timeout)
                     self.logger.info(f"Process {process_id} force killed")
                 except subprocess.TimeoutExpired:
-                    self.logger.error(f"Process {process_id} could not be killed! (PID: {status.process.pid})")
+                    self.logger.error(f"CRITICAL: Process {process_id} could not be killed after {force_timeout}s! (PID: {status.process.pid})")
+                    # Log the zombie process for manual cleanup
+                    self.logger.error(f"ZOMBIE PROCESS DETECTED: PID {status.process.pid} - may need manual cleanup")
 
             self._cleanup_process(process_id)
             self.logger.info(f"Process {process_id} stopped")

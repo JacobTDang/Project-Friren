@@ -26,15 +26,25 @@ class QueueState(Enum):
     STOPPING = "stopping"
 
 @dataclass
+class ProcessPriority(Enum):
+    """Process priority levels for queue management"""
+    ALWAYS_RUNNING = "always_running"    # Never rotated out (position_health_monitor)
+    HIGH_PRIORITY = "high_priority"      # Rarely rotated (decision_engine)
+    NORMAL = "normal"                    # Regular rotation (news, sentiment, strategy)
+    LOW_PRIORITY = "low_priority"        # First to be rotated out
+
+@dataclass
 class QueuedProcess:
     """Represents a process in the rotation queue"""
     process_id: str
     config: ProcessConfig
     status: ProcessStatus
+    priority: ProcessPriority = ProcessPriority.NORMAL
     last_execution_time: Optional[datetime] = None
     execution_count: int = 0
     total_execution_time: float = 0.0
     is_ready: bool = True
+    is_currently_running: bool = False
 
 class ProcessQueueManager:
     """
@@ -48,21 +58,28 @@ class ProcessQueueManager:
     - Execution statistics tracking
     """
     
-    def __init__(self, redis_process_manager: RedisProcessManager, cycle_time_seconds: float = 30.0):
+    def __init__(self, redis_process_manager: RedisProcessManager, cycle_time_seconds: float = 30.0, 
+                 max_concurrent_processes: int = 4, target_memory_mb: int = 900):
         """
-        Initialize the process queue manager.
+        Initialize the process queue manager with memory optimization.
         
         Args:
             redis_process_manager: The underlying Redis process manager
             cycle_time_seconds: How long each process gets to execute before rotation
+            max_concurrent_processes: Maximum processes running simultaneously (default 4)
+            target_memory_mb: Target total memory usage in MB (default 900MB)
         """
         self.redis_process_manager = redis_process_manager
         self.cycle_time_seconds = cycle_time_seconds
+        self.max_concurrent_processes = max_concurrent_processes
+        self.target_memory_mb = target_memory_mb
         
-        # Queue management
+        # Queue management with priority separation
         self.process_queue: deque[QueuedProcess] = deque()
         self.process_lookup: Dict[str, QueuedProcess] = {}
-        self.current_process: Optional[QueuedProcess] = None
+        self.always_running_processes: Dict[str, QueuedProcess] = {}  # position_health_monitor
+        self.high_priority_processes: Dict[str, QueuedProcess] = {}  # decision_engine
+        self.current_running_processes: Dict[str, QueuedProcess] = {}
         
         # State management
         self.queue_state = QueueState.STOPPED
@@ -70,30 +87,73 @@ class ProcessQueueManager:
         self._pause_event = threading.Event()
         self._queue_thread: Optional[threading.Thread] = None
         
-        # Statistics
+        # Statistics and monitoring
         self.total_cycles = 0
         self.start_time: Optional[datetime] = None
+        self.last_memory_check = datetime.now()
+        self.rotation_count = 0
+        
+        # Process priority mappings
+        self.process_priority_map = {
+            'position_health_monitor': ProcessPriority.ALWAYS_RUNNING,
+            'decision_engine': ProcessPriority.HIGH_PRIORITY,
+            'enhanced_news_pipeline': ProcessPriority.NORMAL,
+            'sentiment_analyzer': ProcessPriority.NORMAL,
+            'finbert_sentiment': ProcessPriority.NORMAL,
+            'strategy_analyzer': ProcessPriority.NORMAL,
+            'market_regime_detector': ProcessPriority.NORMAL
+        }
         
         # Logging
         self.logger = logging.getLogger("process_queue_manager")
-        self.logger.info(f"ProcessQueueManager initialized with cycle_time={cycle_time_seconds}s")
+        self.logger.info(f"Enhanced ProcessQueueManager initialized:")
+        self.logger.info(f"  - Cycle time: {cycle_time_seconds}s")
+        self.logger.info(f"  - Max concurrent: {max_concurrent_processes} processes") 
+        self.logger.info(f"  - Target memory: {target_memory_mb}MB")
+        self.logger.info(f"  - Priority system: ALWAYS_RUNNING, HIGH_PRIORITY, NORMAL rotation")
     
     def add_process(self, process_id: str, config: ProcessConfig, status: ProcessStatus):
-        """Add a process to the rotation queue"""
+        """Add a process to the priority-based rotation queue"""
         if process_id in self.process_lookup:
             self.logger.warning(f"Process {process_id} already in queue")
             return
         
+        # Determine process priority based on process_id
+        priority = self._get_process_priority(process_id)
+        
         queued_process = QueuedProcess(
             process_id=process_id,
             config=config,
-            status=status
+            status=status,
+            priority=priority
         )
         
-        self.process_queue.append(queued_process)
+        # Place process in appropriate queue based on priority
         self.process_lookup[process_id] = queued_process
         
-        self.logger.info(f"Added process {process_id} to rotation queue (position {len(self.process_queue)})")
+        if priority == ProcessPriority.ALWAYS_RUNNING:
+            self.always_running_processes[process_id] = queued_process
+            self.logger.info(f"Added ALWAYS_RUNNING process: {process_id}")
+        elif priority == ProcessPriority.HIGH_PRIORITY:
+            self.high_priority_processes[process_id] = queued_process
+            self.logger.info(f"Added HIGH_PRIORITY process: {process_id}")
+        else:
+            self.process_queue.append(queued_process)
+            self.logger.info(f"Added NORMAL process: {process_id} to rotation queue (position {len(self.process_queue)})")
+    
+    def _get_process_priority(self, process_id: str) -> ProcessPriority:
+        """Determine process priority based on process_id"""
+        # Check for exact matches first
+        if process_id in self.process_priority_map:
+            return self.process_priority_map[process_id]
+        
+        # Check for partial matches (handles cases like 'finbert_sentiment_process')
+        for key, priority in self.process_priority_map.items():
+            if key in process_id.lower():
+                return priority
+        
+        # Default to NORMAL priority
+        return ProcessPriority.NORMAL
     
     def remove_process(self, process_id: str):
         """Remove a process from the rotation queue"""
@@ -183,8 +243,17 @@ class ProcessQueueManager:
         self._pause_event.clear()
     
     def _queue_rotation_loop(self):
-        """Main queue rotation loop"""
-        self.logger.info("Queue rotation loop started")
+        """Event-driven queue rotation loop - starts processes when others finish"""
+        self.logger.info("Event-driven queue rotation loop started")
+        
+        # Start ALWAYS_RUNNING processes immediately
+        self._start_always_running_processes()
+        
+        # Start HIGH_PRIORITY processes
+        self._ensure_priority_processes_running()
+        
+        # Fill remaining slots with NORMAL processes
+        self._fill_remaining_slots()
         
         try:
             while not self._stop_event.is_set():
@@ -194,18 +263,23 @@ class ProcessQueueManager:
                     self._pause_event.wait()
                     continue
                 
-                # Get next process in queue
-                next_process = self._get_next_process()
-                if not next_process:
-                    self.logger.warning("No available processes in queue")
-                    time.sleep(5)
-                    continue
+                # Check for processes that have finished their business cycles
+                self._check_for_finished_processes()
                 
-                # Execute the process for its cycle time
-                self._execute_process_cycle(next_process)
+                # Check memory usage and adjust if needed (emergency only)
+                self._check_memory_and_adjust()
                 
-                # Rotate queue (move current process to back)
-                self._rotate_queue()
+                # Ensure critical processes are still running
+                self._ensure_priority_processes_running()
+                
+                # Fill any available slots with waiting processes
+                self._fill_remaining_slots()
+                
+                # Update statistics
+                self.total_cycles += 1
+                
+                # Short sleep to avoid busy waiting - much shorter since it's event-driven
+                time.sleep(5)  # Check every 5 seconds instead of 30+
                 
                 self.total_cycles += 1
                 
@@ -374,6 +448,209 @@ class ProcessQueueManager:
     def set_cycle_time(self, cycle_time_seconds: float):
         """Update the cycle time for process execution"""
         self.cycle_time_seconds = cycle_time_seconds
+
+    # ===== ENHANCED PRIORITY-BASED QUEUE METHODS =====
+    
+    def _start_always_running_processes(self):
+        """Start all ALWAYS_RUNNING processes (position_health_monitor)"""
+        for process_id, queued_process in self.always_running_processes.items():
+            if not queued_process.is_currently_running:
+                self._start_process(queued_process)
+                self.logger.info(f"Started ALWAYS_RUNNING process: {process_id}")
+    
+    def _ensure_priority_processes_running(self):
+        """Ensure ALWAYS_RUNNING and HIGH_PRIORITY processes are running"""
+        # Check ALWAYS_RUNNING processes
+        for process_id, queued_process in self.always_running_processes.items():
+            if not queued_process.is_currently_running:
+                self._start_process(queued_process)
+                self.logger.info(f"Restarted ALWAYS_RUNNING process: {process_id}")
+        
+        # Check HIGH_PRIORITY processes - start if we have capacity
+        if self._can_start_more_processes():
+            for process_id, queued_process in self.high_priority_processes.items():
+                if not queued_process.is_currently_running:
+                    self._start_process(queued_process)
+                    self.logger.info(f"Started HIGH_PRIORITY process: {process_id}")
+                    break  # Only start one high priority process per cycle
+    
+    def _can_start_more_processes(self) -> bool:
+        """Check if we can start more processes based on concurrent limit"""
+        running_count = len(self.current_running_processes)
+        can_start = running_count < self.max_concurrent_processes
+        
+        if not can_start:
+            self.logger.debug(f"Cannot start more processes: {running_count}/{self.max_concurrent_processes} running")
+        
+        return can_start
+    
+    def _get_next_normal_process(self) -> Optional[QueuedProcess]:
+        """Get the next NORMAL priority process to run"""
+        if not self.process_queue:
+            return None
+        
+        # Find the first process that's not currently running
+        for _ in range(len(self.process_queue)):
+            queued_process = self.process_queue[0]
+            if not queued_process.is_currently_running:
+                return queued_process
+            # Rotate to check next process
+            self.process_queue.rotate(-1)
+        
+        return None
+    
+    def _start_process(self, queued_process: QueuedProcess):
+        """Start a process and track it as running"""
+        try:
+            # Start the actual process via Redis process manager
+            success = self.redis_process_manager._start_process(queued_process.process_id)
+            
+            if success:
+                queued_process.is_currently_running = True
+                queued_process.last_execution_time = datetime.now()
+                queued_process.execution_count += 1
+                self.current_running_processes[queued_process.process_id] = queued_process
+                self.logger.info(f"Started process: {queued_process.process_id} ({queued_process.priority.value})")
+            else:
+                self.logger.error(f"Failed to start process: {queued_process.process_id}")
+                
+        except Exception as e:
+            self.logger.error(f"Error starting process {queued_process.process_id}: {e}")
+    
+    def _stop_process(self, queued_process: QueuedProcess):
+        """Stop a process and remove it from running tracking"""
+        try:
+            # Stop the actual process via Redis process manager
+            self.redis_process_manager._stop_process(queued_process.process_id)
+            
+            queued_process.is_currently_running = False
+            if queued_process.process_id in self.current_running_processes:
+                del self.current_running_processes[queued_process.process_id]
+            
+            # Calculate execution time
+            if queued_process.last_execution_time:
+                execution_time = (datetime.now() - queued_process.last_execution_time).total_seconds()
+                queued_process.total_execution_time += execution_time
+            
+            self.logger.info(f"Stopped process: {queued_process.process_id}")
+            
+        except Exception as e:
+            self.logger.error(f"Error stopping process {queued_process.process_id}: {e}")
+    
+    def _check_for_finished_processes(self):
+        """Check for processes that have completed their business cycles and can be rotated"""
+        finished_processes = []
+        
+        for process_id, queued_process in self.current_running_processes.items():
+            # Only check NORMAL priority processes for rotation
+            if queued_process.priority != ProcessPriority.NORMAL:
+                continue
+                
+            # Check if process has finished its business cycle via Redis
+            try:
+                # Check process health/status from Redis
+                health_data = self.redis_process_manager.redis_manager.get_process_health(process_id)
+                
+                # Look for indicators that the business cycle is complete
+                if health_data:
+                    cycle_status = health_data.get('cycle_status', 'running')
+                    last_activity = health_data.get('last_activity')
+                    
+                    # If cycle is marked as complete, or no activity for extended period
+                    if (cycle_status == 'complete' or 
+                        (last_activity and self._is_process_idle(last_activity))):
+                        
+                        finished_processes.append(queued_process)
+                        self.logger.info(f"Process {process_id} completed business cycle - ready for rotation")
+                
+            except Exception as e:
+                self.logger.debug(f"Could not check cycle status for {process_id}: {e}")
+        
+        # Rotate finished processes
+        for queued_process in finished_processes:
+            self._rotate_process(queued_process)
+    
+    def _is_process_idle(self, last_activity_str: str) -> bool:
+        """Check if process has been idle for rotation threshold"""
+        try:
+            last_activity = datetime.fromisoformat(last_activity_str)
+            idle_time = (datetime.now() - last_activity).total_seconds()
+            
+            # Consider process idle if no activity for 2x cycle time
+            idle_threshold = self.cycle_time_seconds * 2
+            return idle_time >= idle_threshold
+            
+        except (ValueError, TypeError):
+            return False
+    
+    def _rotate_process(self, queued_process: QueuedProcess):
+        """Rotate a process: stop it and move to back of queue"""
+        self.logger.info(f"Rotating process: {queued_process.process_id}")
+        
+        # Stop the process
+        self._stop_process(queued_process)
+        
+        # Move to back of queue for future execution
+        if queued_process in self.process_queue:
+            self.process_queue.remove(queued_process)
+            self.process_queue.append(queued_process)
+        
+        self.rotation_count += 1
+        
+        # Immediately try to fill the newly available slot
+        self._fill_remaining_slots()
+    
+    def _fill_remaining_slots(self):
+        """Fill available process slots with waiting NORMAL processes"""
+        while self._can_start_more_processes():
+            next_process = self._get_next_normal_process()
+            if next_process:
+                self._start_process(next_process)
+                self.logger.info(f"Filled slot with process: {next_process.process_id}")
+            else:
+                # No more processes waiting
+                break
+    
+    def _check_memory_and_adjust(self):
+        """Monitor memory usage and stop processes if needed"""
+        try:
+            import psutil
+            current_memory_mb = psutil.Process().memory_info().rss / 1024 / 1024
+            
+            if current_memory_mb > self.target_memory_mb:
+                self.logger.warning(f"Memory usage high: {current_memory_mb:.1f}MB > {self.target_memory_mb}MB")
+                
+                # Stop lowest priority running processes first
+                normal_running = [p for p in self.current_running_processes.values() 
+                                 if p.priority == ProcessPriority.NORMAL]
+                
+                if normal_running:
+                    # Stop the process that's been running longest
+                    oldest_process = min(normal_running, 
+                                       key=lambda p: p.last_execution_time or datetime.min)
+                    self.logger.warning(f"Stopping {oldest_process.process_id} due to memory pressure")
+                    self._stop_process(oldest_process)
+            
+            # Update last memory check time
+            self.last_memory_check = datetime.now()
+            
+        except Exception as e:
+            self.logger.error(f"Error checking memory usage: {e}")
+    
+    def get_enhanced_queue_status(self) -> Dict[str, Any]:
+        """Get enhanced queue status with priority information"""
+        status = self.get_queue_status()
+        
+        status.update({
+            'always_running_processes': list(self.always_running_processes.keys()),
+            'high_priority_processes': list(self.high_priority_processes.keys()),
+            'currently_running_processes': list(self.current_running_processes.keys()),
+            'max_concurrent_processes': self.max_concurrent_processes,
+            'target_memory_mb': self.target_memory_mb,
+            'rotation_count': self.rotation_count
+        })
+        
+        return status
         self.logger.info(f"Updated cycle time to {cycle_time_seconds}s")
     
     def reorder_queue(self, new_order: List[str]):

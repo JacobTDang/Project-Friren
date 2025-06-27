@@ -188,7 +188,12 @@ class MemoryMonitor:
         self._is_monitoring = False
 
         if self._monitor_thread and self._monitor_thread.is_alive():
-            self._monitor_thread.join(timeout=5)
+            self._monitor_thread.join(timeout=15)  # Increased from 5 to 15 seconds
+            
+            # Force thread termination if it doesn't stop gracefully
+            if self._monitor_thread.is_alive():
+                self.logger.warning(f"Memory monitor thread for {self.process_id} did not stop gracefully")
+                # Note: Python threads cannot be force-terminated, but we can flag this for investigation
 
         self.logger.info(f"Memory monitoring stopped for {self.process_id}")
 
