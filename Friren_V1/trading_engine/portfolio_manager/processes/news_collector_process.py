@@ -425,14 +425,19 @@ class EnhancedNewsCollectorProcess(RedisBaseProcess):
                         total_articles += news_data.news_volume
 
                         # Show colorized collection output
-                        if COLORIZED_OUTPUT_AVAILABLE:
-                            show_news_collection(symbol, article_count)
-
-                        self.logger.info(f"ARTICLES FOUND: {article_count}")
-                        self.logger.info(f"NEWS VOLUME: {news_data.news_volume}")
-                        self.logger.info(f"DATA QUALITY: {news_data.data_quality_score:.2f}")
-                        self.logger.info(f"SOURCES USED: {', '.join(news_data.sources_used)}")
-                        self.logger.info(f"STALENESS: {news_data.staleness_minutes} minutes")
+                        if NEW_COLOR_SYSTEM_AVAILABLE:
+                            print_news_collection(f"--- NEWS RESULTS FOR {symbol} ---")
+                            print_news_collection(f"ARTICLES FOUND: {article_count}")
+                            print_news_collection(f"NEWS VOLUME: {news_data.news_volume}")
+                            print_news_collection(f"DATA QUALITY: {news_data.data_quality_score:.2f}")
+                            print_news_collection(f"SOURCES USED: {', '.join(news_data.sources_used)}")
+                            print_news_collection(f"STALENESS: {news_data.staleness_minutes} minutes")
+                        else:
+                            self.logger.info(f"ARTICLES FOUND: {article_count}")
+                            self.logger.info(f"NEWS VOLUME: {news_data.news_volume}")
+                            self.logger.info(f"DATA QUALITY: {news_data.data_quality_score:.2f}")
+                            self.logger.info(f"SOURCES USED: {', '.join(news_data.sources_used)}")
+                            self.logger.info(f"STALENESS: {news_data.staleness_minutes} minutes")
 
                         # ENHANCED ARTICLE LOGGING - Show detailed article information
                         self.logger.info(f"=== DETAILED ARTICLE BREAKDOWN FOR {symbol} ===")

@@ -330,8 +330,16 @@ class PositionHealthMonitor(RedisBaseProcess):
         self._process_cycle()
 
     def _process_cycle(self):
-        self.logger.critical("EMERGENCY: ENTERED MAIN LOOP for position_health_monitor")
-        print("EMERGENCY: ENTERED MAIN LOOP for position_health_monitor")
+        self.logger.critical("BUSINESS LOGIC: Position health monitor cycle executing")
+        
+        # Add colored output for business execution visibility
+        try:
+            from colored_print import success, info
+            from terminal_color_system import print_position_monitor
+            print_position_monitor("Position health monitor analyzing portfolio...")
+            success("BUSINESS LOGIC: Position health cycle started")
+        except ImportError:
+            print("BUSINESS LOGIC: Position health monitor cycle executing")
         try:
             # NEW: Process strategy management messages first
             self._process_strategy_messages()
@@ -490,19 +498,11 @@ class PositionHealthMonitor(RedisBaseProcess):
                         else:
                             self.logger.warning(f"No data received for {symbol}")
                     else:
-                        # Create mock data for testing
-                        import pandas as pd
-                        import numpy as np
-                        dates = pd.date_range(end=datetime.now(), periods=50, freq='D')
-                        mock_df = pd.DataFrame({
-                            'Open': np.random.uniform(100, 200, 50),
-                            'High': np.random.uniform(100, 200, 50),
-                            'Low': np.random.uniform(100, 200, 50),
-                            'Close': np.random.uniform(100, 200, 50),
-                            'Volume': np.random.uniform(1000000, 10000000, 50)
-                        }, index=dates)
-                        market_data_dict[symbol] = mock_df
-                        self.logger.debug(f"Created mock data for {symbol}")
+                        # NO MOCK DATA - Skip symbols without real data fetcher
+                        self.logger.error(f"Cannot fetch real market data for {symbol} - StockDataFetcher not available")
+                        self.logger.error("CRITICAL: System cannot operate without real market data")
+                        # Skip this symbol completely rather than using fake data
+                        continue
 
                 except Exception as e:
                     self.logger.warning(f"Failed to fetch data for {symbol}: {e}")

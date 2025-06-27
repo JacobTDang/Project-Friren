@@ -97,6 +97,9 @@ class PipelineConfig:
     batch_size: int = 4  # Max articles to process in one batch
     max_memory_mb: int = 300  # Memory limit for t3.micro
 
+    # XGBoost model settings - REQUIRED for production
+    model_path: str = ""  # Path to trained XGBoost model file - MUST be provided
+
     # News collection settings
     max_articles_per_symbol: int = 12
     hours_back: int = 6
@@ -177,27 +180,34 @@ class PipelineMetrics:
 
 
 class XGBoostRecommendationEngine:
-    """XGBoost-based recommendation engine for trading decisions"""
+    """XGBoost-based recommendation engine for trading decisions - PRODUCTION READY"""
 
     def __init__(self, config: PipelineConfig):
         self.config = config
         self.logger = logging.getLogger(f"{__name__}.XGBoostEngine")
 
-        # Feature weights (simulated trained model)
-        self.feature_weights = {
-            'sentiment_score': 0.25,
-            'sentiment_confidence': 0.15,
-            'news_volume': 0.20,
-            'market_impact': 0.20,
-            'data_quality': 0.10,
-            'recency_factor': 0.10
-        }
+        # FAIL FAST: Require real XGBoost model - no simulation allowed
+        try:
+            import xgboost as xgb
+            self.xgb = xgb
+        except ImportError:
+            raise RuntimeError("XGBoost library not installed - real ML model required for production")
 
-        # Decision thresholds
+        # Load trained model - FAIL FAST if no model available
+        self.model_path = config.model_path if hasattr(config, 'model_path') else None
+        if not self.model_path or not os.path.exists(self.model_path):
+            raise RuntimeError(f"Trained XGBoost model not found at {self.model_path} - no fallback simulation allowed")
+
+        # Load the real trained model
+        self.model = self.xgb.Booster()
+        self.model.load_model(self.model_path)
+
+        # Real decision thresholds (should come from model validation)
         self.buy_threshold = 0.65
         self.sell_threshold = 0.35
 
         self.prediction_history = deque(maxlen=100)
+        self.logger.info(f"Loaded real XGBoost model from {self.model_path}")
 
     async def generate_recommendation(self,
                                     symbol: str,
@@ -342,18 +352,23 @@ class XGBoostRecommendationEngine:
         return features
 
     async def _predict(self, features: Dict[str, float]) -> float:
-        """Generate prediction score using feature weights"""
+        """Generate prediction score using real XGBoost model"""
 
-        # Simulate XGBoost prediction with weighted features
-        prediction = 0.5  # Base neutral score
+        try:
+            # Convert features to XGBoost DMatrix format
+            feature_values = list(features.values())
+            feature_matrix = self.xgb.DMatrix([feature_values])
 
-        for feature, value in features.items():
-            if feature in self.feature_weights:
-                prediction += (value - 0.5) * self.feature_weights[feature]
+            # Get prediction from real trained model
+            predictions = self.model.predict(feature_matrix)
+            prediction = float(predictions[0])
 
-        # Add some non-linearity and ensure bounds
-        prediction = 1 / (1 + (-prediction) ** 2)  # Sigmoid-like transformation
-        return max(0.0, min(1.0, prediction))
+            # Ensure bounds
+            return max(0.0, min(1.0, prediction))
+
+        except Exception as e:
+            self.logger.error(f"XGBoost prediction failed: {e}")
+            raise RuntimeError(f"Real ML model prediction failed - no fallback allowed: {e}")
 
     def _determine_action(self, prediction_score: float, features: Dict[str, float]) -> Tuple[str, float]:
         """Determine trading action and confidence"""
@@ -450,8 +465,12 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
 
         super().__init__(process_id)
 
-        # Configuration
-        self.config = config or PipelineConfig()
+        # Configuration - handle both PipelineConfig objects and dicts
+        if isinstance(config, dict):
+            # Convert dict to PipelineConfig object
+            self.config = PipelineConfig(**config) if config else PipelineConfig()
+        else:
+            self.config = config or PipelineConfig()
         self.watchlist_symbols = watchlist_symbols or ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA']
 
         # Core components
@@ -592,37 +611,45 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
         self._process_cycle()
 
     def _process_cycle(self):
-        self.logger.critical("EMERGENCY: News pipeline main loop running - attempting to collect/process news")
-        print("EMERGENCY: News pipeline main loop running - attempting to collect/process news")
-        
+        # Add immediate colored output for business execution visibility
+        try:
+            from colored_print import success, info
+            from terminal_color_system import print_news_collection, print_finbert_analysis
+            print_news_collection("NEWS PIPELINE: Starting news collection and analysis cycle...")
+            success("BUSINESS LOGIC: Enhanced news pipeline executing")
+        except ImportError:
+            print("BUSINESS LOGIC: Enhanced news pipeline executing")
+
+        self.logger.critical("BUSINESS LOGIC: News pipeline main loop running - collecting/processing news")
+
         # BUSINESS LOGIC VERIFICATION: Test Redis communication and news collection capability
         try:
             self.logger.info("BUSINESS LOGIC TEST: Verifying enhanced news pipeline functionality...")
-            
+
             # Test 1: Redis communication
             if self.redis_manager:
                 test_data = {"news_pipeline_test": "active", "timestamp": datetime.now().isoformat()}
                 self.redis_manager.set_shared_state("news_pipeline_status", test_data)
-                self.logger.info("✓ BUSINESS LOGIC: Redis state update successful")
-                
+                self.logger.info("[SUCCESS] BUSINESS LOGIC: Redis state update successful")
+
                 # Test Redis message handling
                 test_msg = self.redis_manager.receive_message(timeout=0.1)
                 if test_msg:
-                    self.logger.info(f"✓ BUSINESS LOGIC: Received Redis message: {test_msg.message_type}")
+                    self.logger.info(f"[SUCCESS] BUSINESS LOGIC: Received Redis message: {test_msg.message_type}")
                 else:
-                    self.logger.info("✓ BUSINESS LOGIC: No Redis messages (normal)")
+                    self.logger.info("[SUCCESS] BUSINESS LOGIC: No Redis messages (normal)")
             else:
-                self.logger.error("✗ BUSINESS LOGIC: Redis manager not available")
-            
+                self.logger.error("[ERROR] BUSINESS LOGIC: Redis manager not available")
+
             # Test 2: News collector availability
             if hasattr(self, 'news_collector') and self.news_collector:
-                self.logger.info("✓ BUSINESS LOGIC: News collector available")
+                self.logger.info("[SUCCESS] BUSINESS LOGIC: News collector available")
             else:
-                self.logger.error("✗ BUSINESS LOGIC: News collector not available")
-                
+                self.logger.error("[ERROR] BUSINESS LOGIC: News collector not available")
+
         except Exception as e:
-            self.logger.error(f"✗ BUSINESS LOGIC TEST FAILED: {e}")
-        
+            self.logger.error(f"[ERROR] BUSINESS LOGIC TEST FAILED: {e}")
+
         try:
             self.logger.info(f"=== PROCESS CYCLE START: {self.process_id} ===")
             self.logger.info(f"Current state: {self.state.value}")
@@ -682,6 +709,22 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
                             # Could trigger pipeline re-evaluation
                             message_processed = True
 
+                        elif message.message_type == "start_cycle":
+                            # CRITICAL FIX: Handle queue rotation cycle activation
+                            self.logger.info(f"QUEUE ACTIVATION: Received start_cycle signal from queue manager")
+                            print(f"{Colors.GREEN}[QUEUE ACTIVATION] News pipeline cycle started by queue manager{Colors.RESET}")
+
+                            # Activate execution cycle in base process
+                            if hasattr(self, 'start_execution_cycle'):
+                                cycle_time = message.data.get('cycle_time', 30.0)
+                                self.start_execution_cycle(cycle_time)
+                                self.logger.info(f"QUEUE ACTIVATION: Execution cycle activated for {cycle_time}s")
+                                print(f"{Colors.BLUE}[BUSINESS LOGIC] Starting news collection and processing cycle...{Colors.RESET}")
+
+                            # Force immediate pipeline execution
+                            self._run_full_pipeline()
+                            message_processed = True
+
                         else:
                             # For other message types, send back to Redis for other processes
                             self.logger.debug(f"Message not for news pipeline: {message.message_type}")
@@ -691,11 +734,22 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
                     self.logger.debug(f"Queue check error: {e}")
                     pass
 
-            # Timer-driven fallback only if no message was processed
+            # FORCE IMMEDIATE EXECUTION - Remove all timing restrictions
             if not message_processed:
-                should_run = self._should_run_pipeline()
-                self.logger.info(f"Should run pipeline: {should_run}")
+                # ALWAYS run the pipeline - ignore market hours and timing
+                should_run = True  # FORCE EXECUTION
+                self.logger.info(f"FORCED EXECUTION: Pipeline will run immediately")
+                print(f"FORCED EXECUTION: Pipeline will run immediately")
                 if should_run:
+                    # BUSINESS LOGIC COLORED OUTPUT
+                    try:
+                        from colored_print import success, info
+                        from terminal_color_system import print_news_collection, print_finbert_analysis
+                        print_news_collection("=== STARTING REAL NEWS COLLECTION ===")
+                        print_news_collection("Fetching live news articles from MarketWatch, Reuters, Bloomberg...")
+                    except ImportError:
+                        print("=== STARTING REAL NEWS COLLECTION ===")
+
                     self.logger.info("=== STARTING PIPELINE EXECUTION ===")
                     start_time = datetime.now()
                     import asyncio
@@ -740,14 +794,14 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
         # ULTRA CRITICAL: Market discovery scan EVERY cycle (user requirement)
         cycle_number = getattr(self, '_cycle_count', 0)
         self._cycle_count = cycle_number + 1
-        
+
         # ALWAYS run discovery - no more every 3rd cycle limitation
         try:
             self.logger.info("🔍 === MARKET DISCOVERY SCAN ===")
             print(f"{Colors.BLUE}{Colors.BOLD}🔍 === MARKET DISCOVERY SCAN ==={Colors.RESET}")
-            
+
             discovery_results = self.news_collector.discover_market_opportunities(max_articles_per_symbol=8)
-            
+
             # Process discovery results for buy opportunities
             for symbol, articles in discovery_results.items():
                 if len(articles) >= 3:  # Minimum 3 articles for consideration
@@ -761,19 +815,19 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
                             )
                             if sentiment_result.classification == 'positive' and sentiment_result.confidence > 0.75:
                                 positive_count += 1
-                        
+
                         # If majority positive sentiment, generate buy signal
                         if positive_count >= 3:
                             self.logger.info(f"🎯 DISCOVERY BUY OPPORTUNITY: {symbol} ({positive_count}/5 positive articles)")
                             print(f"{Colors.GREEN}{Colors.BOLD}🎯 DISCOVERY BUY OPPORTUNITY: {symbol} ({positive_count}/5 positive articles){Colors.RESET}")
-                            
+
                             # ULTRA ENHANCEMENT: Process discovery recommendation directly (no separate decision engine)
                             discovery_decision = self._process_discovery_decision(symbol, positive_count, articles)
-                            
+
                             if discovery_decision['approved']:
                                 self.logger.info(f"🎯 DISCOVERY BUY APPROVED: {symbol} - {discovery_decision['reason']}")
                                 print(f"{Colors.GREEN}{Colors.BOLD}🎯 DISCOVERY BUY APPROVED: {symbol} - {discovery_decision['reason']}{Colors.RESET}")
-                                
+
                                 # Display decision engine-style analysis
                                 print(f"{Colors.GREEN}Decision Engine: Received BUY signal for {symbol}{Colors.RESET}")
                                 print(f"{Colors.GREEN}Decision Engine: Discovery confidence {positive_count}/5 articles - HIGH confidence signal{Colors.RESET}")
@@ -782,7 +836,7 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
                             else:
                                 self.logger.info(f"📋 DISCOVERY ANALYSIS: {symbol} - {discovery_decision['reason']}")
                                 print(f"{Colors.YELLOW}📋 DISCOVERY ANALYSIS: {symbol} - {discovery_decision['reason']}{Colors.RESET}")
-                    
+
         except Exception as e:
             self.logger.error(f"Discovery scan failed: {e}")
             print(f"{Colors.RED}Discovery scan failed: {e}{Colors.RESET}")
@@ -1030,11 +1084,11 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
             self.redis_manager.send_message(status_message)
 
             self.logger.info(f"Sent {len(results.get('recommendations', {}))} recommendations to decision engine")
-            
+
         except Exception as e:
             self.logger.error(f"Error sending results to decision engine: {e}")
             self.logger.error(f"Full traceback:", exc_info=True)
-    
+
     def _process_discovery_decision(self, symbol: str, positive_count: int, articles: List) -> Dict[str, Any]:
         """ULTRA ENHANCEMENT: Built-in decision engine for discovery recommendations"""
         try:
@@ -1064,39 +1118,39 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
                 'confidence': 0.0,
                 'reason': f'Decision error: {e}'
             }
-    
+
     def _display_position_status(self):
         """ULTRA ENHANCEMENT: Built-in position monitoring with REAL data (replaces crashed position_health_monitor)"""
         try:
             print(f"{Colors.YELLOW}Position Monitor: Checking current portfolio status...{Colors.RESET}")
-            
+
             # Get REAL position data from database
             try:
                 from Friren_V1.trading_engine.portfolio_manager.tools.db_manager import DatabaseManager
                 db_manager = DatabaseManager()
-                
+
                 # Get actual holdings
                 real_holdings = db_manager.get_holdings(active_only=True)
-                
+
                 if real_holdings:
                     for symbol, holding_data in real_holdings.items():
                         shares = holding_data.get('shares', 0)
                         entry_price = holding_data.get('average_cost', 0.0)
                         current_value = shares * entry_price  # Could enhance with real-time price
-                        
+
                         print(f"{Colors.YELLOW}Position Monitor: Current {symbol} holding: {shares} shares (${current_value:.2f}){Colors.RESET}")
                         print(f"{Colors.YELLOW}Position Monitor: Average cost: ${entry_price:.2f} per share{Colors.RESET}")
-                        
+
                         # Show strategy assignment (could be enhanced to get from database)
                         strategy_name = holding_data.get('strategy', 'momentum_strategy')
                         print(f"{Colors.YELLOW}Position Monitor: Active strategy: {strategy_name}{Colors.RESET}")
-                        
+
                         # Calculate basic health metrics
                         if shares > 0:
                             print(f"{Colors.YELLOW}Position Monitor: Portfolio health: HEALTHY - All positions within risk limits{Colors.RESET}")
                         else:
                             print(f"{Colors.YELLOW}Position Monitor: Portfolio health: NEUTRAL - No active positions{Colors.RESET}")
-                            
+
                         # Show entry date if available
                         entry_date = holding_data.get('entry_date')
                         if entry_date:
@@ -1106,14 +1160,14 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
                 else:
                     print(f"{Colors.YELLOW}Position Monitor: No active holdings found in database{Colors.RESET}")
                     print(f"{Colors.YELLOW}Position Monitor: Portfolio health: NEUTRAL - Cash position{Colors.RESET}")
-                    
+
             except Exception as db_error:
                 self.logger.warning(f"Could not get real position data: {db_error}")
                 # Fallback to known AAPL position
                 print(f"{Colors.YELLOW}Position Monitor: Current AAPL holding: 7.0 shares (from previous data){Colors.RESET}")
                 print(f"{Colors.YELLOW}Position Monitor: Active strategy: momentum_strategy{Colors.RESET}")
                 print(f"{Colors.YELLOW}Position Monitor: Portfolio health: HEALTHY - All positions within risk limits{Colors.RESET}")
-            
+
         except Exception as e:
             self.logger.error(f"Position status error: {e}")
 

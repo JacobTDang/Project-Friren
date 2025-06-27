@@ -34,14 +34,14 @@ from collections import defaultdict, deque
 from queue import Queue, PriorityQueue, Empty
 import logging
 import json
+import uuid
 
-# Import existing message infrastructure
+# Import existing message infrastructure - FIXED: Use Redis-based infrastructure
 try:
-    from Friren_V1.multiprocess_infrastructure.queue_manager import QueueMessage, MessageType, MessagePriority
-    QUEUE_INFRASTRUCTURE_AVAILABLE = True
-except ImportError:
-    QUEUE_INFRASTRUCTURE_AVAILABLE = False
-    # Fallback definitions
+    from Friren_V1.multiprocess_infrastructure.trading_redis_manager import ProcessMessage, MessagePriority
+    REDIS_INFRASTRUCTURE_AVAILABLE = True
+    
+    # Adapter for compatibility with existing code
     class MessageType(Enum):
         DECISION_REQUEST = "decision_request"
         MARKET_DATA_UPDATE = "market_data_update"
@@ -49,16 +49,64 @@ except ImportError:
         STRATEGY_SIGNAL = "strategy_signal"
         RESOURCE_REQUEST = "resource_request"
         SYMBOL_COORDINATION = "symbol_coordination"
-        # Add missing types from actual queue manager
         POSITION_UPDATE = "position_update"
         HEALTH_ALERT = "health_alert"
         STRATEGY_REASSESSMENT_REQUEST = "strategy_reassessment_request"
+        # FIXED: Add missing message types that were causing router initialization failure
+        SYSTEM_STATUS = "system_status"
+        SENTIMENT_UPDATE = "sentiment_update"
+        NEWS_REQUEST = "news_request"
+        NEWS_UPDATE = "news_update"
+        MARKET_REGIME_UPDATE = "market_regime_update"
+
+    @dataclass
+    class QueueMessage:
+        """Compatibility wrapper for ProcessMessage"""
+        message_type: MessageType
+        priority: MessagePriority
+        sender_id: str = ""
+        recipient_id: str = ""
+        payload: Dict[str, Any] = field(default_factory=dict)
+        timestamp: datetime = field(default_factory=datetime.now)
+        correlation_id: str = ""
+        
+        def to_process_message(self) -> ProcessMessage:
+            """Convert to Redis ProcessMessage format"""
+            return ProcessMessage(
+                message_id=self.correlation_id or str(uuid.uuid4()),
+                sender=self.sender_id,
+                recipient=self.recipient_id,
+                message_type=self.message_type.value,
+                priority=self.priority,
+                timestamp=self.timestamp,
+                data=self.payload
+            )
+            
+except ImportError:
+    REDIS_INFRASTRUCTURE_AVAILABLE = False
+    # Fallback definitions for development/testing
+    class MessageType(Enum):
+        DECISION_REQUEST = "decision_request"
+        MARKET_DATA_UPDATE = "market_data_update"
+        HEALTH_CHECK = "health_check"
+        STRATEGY_SIGNAL = "strategy_signal"
+        RESOURCE_REQUEST = "resource_request"
+        SYMBOL_COORDINATION = "symbol_coordination"
+        POSITION_UPDATE = "position_update"
+        HEALTH_ALERT = "health_alert"
+        STRATEGY_REASSESSMENT_REQUEST = "strategy_reassessment_request"
+        # FIXED: Add missing message types
+        SYSTEM_STATUS = "system_status"
+        SENTIMENT_UPDATE = "sentiment_update"
+        NEWS_REQUEST = "news_request"
+        NEWS_UPDATE = "news_update"
+        MARKET_REGIME_UPDATE = "market_regime_update"
 
     class MessagePriority(Enum):
-        CRITICAL = "critical"
-        HIGH = "high"
-        NORMAL = "normal"
-        LOW = "low"
+        CRITICAL = 4
+        HIGH = 3
+        NORMAL = 2
+        LOW = 1
 
     @dataclass
     class QueueMessage:
@@ -183,7 +231,9 @@ class MessageRouter:
         # Initialize default routing rules
         self._setup_default_routing_rules()
 
-        self.logger.info("MessageRouter initialized")
+        infrastructure_status = "Redis-based" if REDIS_INFRASTRUCTURE_AVAILABLE else "Fallback"
+        self.logger.info(f"MessageRouter initialized with {infrastructure_status} message infrastructure")
+        self.logger.info(f"Supported message types: {[mt.value for mt in MessageType]}")
 
     def start(self):
         """Start message routing threads"""

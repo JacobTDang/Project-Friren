@@ -274,14 +274,15 @@ class DecisionCoordinator:
                 if symbol_to_process:
                     # Create strategy analysis message
                     try:
-                        from Friren_V1.multiprocess_infrastructure.queue_manager import QueueMessage, MessageType, MessagePriority
+                        # FIXED: Use Redis-based message system
+                        from Friren_V1.multiprocess_infrastructure.trading_redis_manager import create_process_message, MessagePriority
 
-                        message = QueueMessage(
-                            message_type=MessageType.STRATEGY_SIGNAL,
+                        message = create_process_message(
+                            sender='decision_coordinator',
+                            recipient='strategy_analyzer',
+                            message_type='strategy_signal',
                             priority=MessagePriority.HIGH,
-                            sender_id='decision_coordinator',
-                            recipient_id='strategy_analyzer',
-                            payload={
+                            data={
                                 'symbol': symbol_to_process,
                                 'timestamp': datetime.now().isoformat(),
                                 'source': 'decision_coordinator'

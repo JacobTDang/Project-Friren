@@ -31,17 +31,14 @@ from Friren_V1.multiprocess_infrastructure.trading_redis_manager import (
     get_trading_redis_manager, create_process_message, MessagePriority, ProcessMessage
 )
 
-# Import color system for terminal output
-try:
-    # Add project root to path for color system import
-    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
-    if project_root not in sys.path:
-        sys.path.append(project_root)
-    
-    from terminal_color_system import print_decision_engine, print_communication, print_success, print_warning, print_error
-    COLOR_SYSTEM_AVAILABLE = True
-except ImportError:
-    COLOR_SYSTEM_AVAILABLE = False
+# Import color system for terminal output - FAIL FAST: No fallback allowed
+# Add project root to path for color system import
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
+from terminal_color_system import print_decision_engine, print_communication, print_success, print_warning, print_error
+COLOR_SYSTEM_AVAILABLE = True
 
 # NEW: Strategy Management Enums (from implementation_rules.xml)
 class MonitoringStrategyStatus(Enum):
@@ -93,142 +90,30 @@ class RateLimiter:
         """Record that an API call was made"""
         self.calls_made += 1
 
-# Handle numpy import gracefully
-try:
-    import numpy as np
-    NUMPY_AVAILABLE = True
-except ImportError:
-    NUMPY_AVAILABLE = False
-    # Create minimal numpy stub for basic operations
-    class NumpyStub:
-        @staticmethod
-        def mean(data):
-            return sum(data) / len(data) if data else 0.0
-        @staticmethod
-        def std(data):
-            if not data or len(data) < 2:
-                return 0.0
-            mean_val = sum(data) / len(data)
-            variance = sum((x - mean_val) ** 2 for x in data) / len(data)
-            return variance ** 0.5
-    np = NumpyStub()
+# Import numpy - FAIL FAST: No fallback allowed
+import numpy as np
+NUMPY_AVAILABLE = True
 
 # Add project root for imports
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-# Import existing infrastructure
-try:
-    from multiprocess_infrastructure.base_process import BaseProcess, ProcessState
-    # Legacy queue imports - now using Redis ProcessMessage
-    INFRASTRUCTURE_AVAILABLE = True
-except ImportError:
-    INFRASTRUCTURE_AVAILABLE = False
+# Import existing infrastructure - FAIL FAST: No fallback allowed
+from Friren_V1.multiprocess_infrastructure.redis_base_process import RedisBaseProcess
+# Legacy queue imports - now using Redis ProcessMessage
+INFRASTRUCTURE_AVAILABLE = True
 
-# PRODUCTION: Enable enhanced component imports for real trading
-# Import real trading components for production use
-try:
-    from .risk_manager import SolidRiskManager as RealRiskManager
-    from .parameter_adapter import ParameterAdapter as RealParameterAdapter  
-    from .execution_orchestrator import ExecutionOrchestrator as RealExecutionOrchestrator
-    from .conflict_resolver import ConflictResolver as RealConflictResolver
-    ENHANCED_COMPONENTS_AVAILABLE = True
-    CONFLICT_RESOLVER_AVAILABLE = True
-    print("PRODUCTION: Enhanced trading components loaded successfully")
-except ImportError as e:
-    print(f"WARNING: Enhanced components import failed: {e}")
-    ENHANCED_COMPONENTS_AVAILABLE = False
-    CONFLICT_RESOLVER_AVAILABLE = False
-    RealRiskManager = None
-    RealParameterAdapter = None
-    RealExecutionOrchestrator = None
-    RealConflictResolver = None
+# PRODUCTION: Import real trading components - FAIL FAST: No fallback allowed
+from .risk_manager import SolidRiskManager
+from .parameter_adapter import ParameterAdapter
+from .execution_orchestrator import ExecutionOrchestrator
+from .conflict_resolver import ConflictResolver
+ENHANCED_COMPONENTS_AVAILABLE = True
+CONFLICT_RESOLVER_AVAILABLE = True
+print("PRODUCTION: Enhanced trading components loaded successfully")
 
-# Define fallback classes with proper method signatures
-class FallbackRiskManager:
-    def __init__(self, position_sizer=None, db_manager=None, alpaca_interface=None):
-        self.limits = {'max_position_size_pct': 0.1, 'max_daily_trades': 50}
 
-    def validate_decision(self, decision):
-        return type('RiskValidation', (), {
-            'is_approved': True,
-            'should_execute': True,
-            'reason': 'Fallback approval',
-            'symbol': getattr(decision, 'symbol', 'UNKNOWN'),
-            'original_decision': decision
-        })()
-
-    def get_risk_summary(self):
-        return {'status': 'fallback', 'active_alerts': 0}
-
-    def resume_trading(self):
-        pass
-
-    def emergency_halt_trading(self, reason):
-        pass
-
-class FallbackParameterAdapter:
-    def __init__(self, level):
-        pass
-
-    def adapt_parameters(self, metrics):
-        return type('AdaptedParams', (), {
-            'signal_weights': {},
-            'adaptation_reason': 'No adaptation - fallback mode',
-            'max_position_size': 0.1,
-            'max_daily_trades': 50
-        })()
-
-    def get_adaptation_status(self):
-        return {'current_weights': {}, 'status': 'fallback'}
-
-    def force_parameter_reset(self):
-        pass
-
-class FallbackExecutionOrchestrator:
-    def __init__(self):
-        self.active_executions = {}
-
-    def execute_approved_decision(self, validation, **kwargs):
-        return type('ExecutionResult', (), {
-            'was_successful': True,
-            'symbol': getattr(validation, 'symbol', 'TEST'),
-            'execution_summary': 'Fallback execution',
-            'error_message': None,
-            'execution_slippage': 0.001,
-            'executed_amount': 100.0
-        })()
-
-    def get_execution_status(self):
-        return {'execution_stats': {'total_executions': 0}}
-
-class FallbackConflictResolver:
-    def resolve_conflict(self, signal):
-        return type('ResolvedDecision', (), {
-            'symbol': getattr(signal, 'symbol', 'UNKNOWN'),
-            'final_direction': getattr(signal, 'final_direction', 0.0),
-            'final_confidence': getattr(signal, 'confidence', 50.0) / 100.0,
-            'resolution_method': 'simple_fallback'
-        })()
-
-    def resolve_strategy_transition_signals(self, symbol, transition_signals, current_strategy, current_performance):
-        return type('TransitionDecision', (), {
-            'should_transition': False,
-            'wait_for_more_signals': True,
-            'transition_reasoning': 'Fallback mode - transitions disabled',
-            'transition_confidence': 0.5,
-            'emergency_change': False,
-            'recommended_strategy': None,
-            'supporting_signals': [],
-            'risk_factors': []
-        })()
-
-# Select which implementations to use
-SolidRiskManager = RealRiskManager if ENHANCED_COMPONENTS_AVAILABLE else FallbackRiskManager
-ParameterAdapter = RealParameterAdapter if ENHANCED_COMPONENTS_AVAILABLE else FallbackParameterAdapter
-ExecutionOrchestrator = RealExecutionOrchestrator if ENHANCED_COMPONENTS_AVAILABLE else FallbackExecutionOrchestrator
-ConflictResolver = RealConflictResolver if CONFLICT_RESOLVER_AVAILABLE else FallbackConflictResolver
 
 
 class DecisionType(Enum):
@@ -412,14 +297,22 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
         self.logger.critical("EMERGENCY: ENTERED _initialize for decision_engine")
         print("EMERGENCY: ENTERED _initialize for decision_engine")
         try:
-            # CRITICAL FIX: Skip ALL complex initialization operations
-            # This completely bypasses any deadlock in the initialization sequence
+            self.logger.info("LIFECYCLE_DEBUG: Initializing SolidRiskManager...")
+            self.risk_manager = SolidRiskManager()
+            self.logger.info("LIFECYCLE_DEBUG: SolidRiskManager initialized.")
 
-            # Set up only the most basic required components
-            self.risk_manager = FallbackRiskManager()
-            self.parameter_adapter = FallbackParameterAdapter(None)
-            self.execution_orchestrator = FallbackExecutionOrchestrator()
-            self.conflict_resolver = FallbackConflictResolver()
+            self.logger.info("LIFECYCLE_DEBUG: Initializing ParameterAdapter...")
+            self.parameter_adapter = ParameterAdapter(level="decision_engine")
+            self.logger.info("LIFECYCLE_DEBUG: ParameterAdapter initialized.")
+
+            self.logger.info("LIFECYCLE_DEBUG: Initializing ExecutionOrchestrator...")
+            self.execution_orchestrator = ExecutionOrchestrator()
+            self.logger.info("LIFECYCLE_DEBUG: ExecutionOrchestrator initialized.")
+
+            self.logger.info("LIFECYCLE_DEBUG: Initializing ConflictResolver...")
+            self.conflict_resolver = ConflictResolver()
+            self.logger.info("LIFECYCLE_DEBUG: ConflictResolver initialized.")
+
             self.enhanced_init_status = {'done': True, 'error': None}
 
             # Initialize basic performance tracking
@@ -427,23 +320,22 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
 
             # Set process state to RUNNING immediately
             self.state = ProcessState.RUNNING
-            self.logger.info("LIFECYCLE_DEBUG: Emergency bypass initialization complete - process ready for business logic")
+            self.logger.info("LIFECYCLE_DEBUG: Enhanced components initialization complete - process ready for business logic")
 
         except Exception as e:
-            self.logger.error(f"LIFECYCLE_DEBUG: Failed emergency bypass initialization: {e}")
+            self.logger.error(f"LIFECYCLE_DEBUG: Failed enhanced components initialization: {e}", exc_info=True)
             self.state = ProcessState.ERROR
             raise
         self.logger.critical("EMERGENCY: EXITING _initialize for decision_engine")
         print("EMERGENCY: EXITING _initialize for decision_engine")
 
     def _initialize_enhanced_components(self):
-        """EMERGENCY BYPASS: Minimal initialization to eliminate deadlock"""
-        # CRITICAL FIX: Skip all complex operations and immediately create simple fallbacks
-        # This bypasses any logger deadlock or other hidden issues
-        self.risk_manager = FallbackRiskManager()
-        self.parameter_adapter = FallbackParameterAdapter(None)
-        self.execution_orchestrator = FallbackExecutionOrchestrator()
-        self.conflict_resolver = FallbackConflictResolver()
+        """Initialize enhanced trading components with Redis-based infrastructure"""
+        # Initialize proper enhanced components
+        self.risk_manager = SolidRiskManager()
+        self.parameter_adapter = ParameterAdapter(level="decision_engine")
+        self.execution_orchestrator = ExecutionOrchestrator()
+        self.conflict_resolver = ConflictResolver()
         self.enhanced_init_status = {'done': True, 'error': None}
 
     def _initialize_tool_connections(self):
@@ -470,8 +362,16 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
         self._process_cycle()
 
     def _process_cycle(self):
-        self.logger.critical("EMERGENCY: ENTERED MAIN LOOP for decision_engine")
-        print("EMERGENCY: ENTERED MAIN LOOP for decision_engine")
+        # BUSINESS LOGIC COLORED OUTPUT
+        try:
+            from colored_print import success, info
+            from terminal_color_system import print_decision_engine
+            print_decision_engine("DECISION ENGINE: Analyzing trading signals and processing decisions...")
+            success("BUSINESS LOGIC: Decision engine main cycle executing")
+        except ImportError:
+            print("BUSINESS LOGIC: Decision engine main cycle executing")
+        
+        self.logger.critical("BUSINESS LOGIC: Decision engine main loop running - processing signals")
         try:
             messages_processed = 0
             cycle_start = time.time()
@@ -533,6 +433,27 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
                 self._handle_strategy_reassessment_request(message)
             elif hasattr(MessageType, 'SENTIMENT_UPDATE') and message.message_type == MessageType.SENTIMENT_UPDATE:
                 self._handle_sentiment_update(message)
+            elif message.message_type == "start_cycle":
+                # CRITICAL FIX: Handle queue rotation cycle activation
+                self.logger.info(f"QUEUE ACTIVATION: Decision engine received start_cycle signal")
+                
+                # Import colored output functions
+                try:
+                    from colored_print import success, info
+                    from terminal_color_system import print_decision_engine
+                    success("QUEUE ACTIVATION: Decision engine cycle started")
+                    print_decision_engine("Starting decision analysis and signal processing...")
+                except ImportError:
+                    print("[QUEUE ACTIVATION] Decision engine cycle started")
+                
+                # Activate execution cycle in base process  
+                if hasattr(self, 'start_execution_cycle'):
+                    cycle_time = message.data.get('cycle_time', 30.0)
+                    self.start_execution_cycle(cycle_time)
+                    self.logger.info(f"QUEUE ACTIVATION: Decision engine execution cycle activated for {cycle_time}s")
+                
+                # Force immediate decision processing
+                self._process_pending_signals()
             else:
                 self.logger.warning(f"Unknown message type: {message.message_type}")
 
@@ -569,7 +490,7 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
             print_decision_engine(f"Decision Engine: Strategy '{payload.get('strategy_name', 'unknown')}' confidence: {signal_data.get('confidence', 0):.1%}")
             if 'reasoning' in signal_data:
                 print_decision_engine(f"Decision Engine: Strategy reasoning - {signal_data['reasoning']}")
-            
+
             # Decision-making process
             confidence = signal_data.get('confidence', 0)
             if confidence >= 0.8:
@@ -629,18 +550,18 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
             sentiment_score = sentiment_data.get('sentiment_score', 0)
             article_count = sentiment_data.get('article_count', 0)
             confidence = sentiment_data.get('confidence', 0)
-            
+
             print_decision_engine(f"Decision Engine: Processing sentiment update for {symbol}")
             print_decision_engine(f"Decision Engine: {article_count} articles analyzed, sentiment: {sentiment_score:.2f}, confidence: {confidence:.1%}")
-            
+
             # Decision engine sentiment interpretation
             if sentiment_score > 0.3:
                 print_decision_engine(f"Decision Engine: POSITIVE sentiment detected - Bullish indicators confirmed")
             elif sentiment_score < -0.3:
-                print_decision_engine(f"Decision Engine: NEGATIVE sentiment detected - Bearish indicators confirmed") 
+                print_decision_engine(f"Decision Engine: NEGATIVE sentiment detected - Bearish indicators confirmed")
             else:
                 print_decision_engine(f"Decision Engine: NEUTRAL sentiment - Mixed signals requiring additional analysis")
-            
+
             if confidence >= 0.8:
                 print_decision_engine(f"Decision Engine: Sentiment confidence HIGH - Incorporating into decision matrix")
             else:
@@ -702,11 +623,11 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
             symbol = payload.get('symbol')
             recommendation = payload.get('recommendation', {})
             supporting_data = payload.get('supporting_data', {})
-            
+
             if not symbol or not recommendation:
                 self.logger.warning("Trading recommendation missing symbol or recommendation data")
                 return
-                
+
             self.logger.info(f"=== TRADING RECOMMENDATION RECEIVED ===")
             self.logger.info(f"SYMBOL: {symbol}")
             self.logger.info(f"FROM: {message.sender_id}")
@@ -714,7 +635,7 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
             self.logger.info(f"CONFIDENCE: {recommendation.get('confidence', 0):.3f}")
             self.logger.info(f"NEWS VOLUME: {supporting_data.get('news_volume', 0)}")
             self.logger.info(f"SENTIMENT COUNT: {supporting_data.get('sentiment_count', 0)}")
-            
+
             # Convert recommendation to aggregated signal format for existing pipeline
             aggregated_signal = {
                 'symbol': symbol,
@@ -725,18 +646,18 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
                 'timestamp': message.timestamp,
                 'supporting_data': supporting_data
             }
-            
+
             # Process through existing decision pipeline
             self._process_trading_recommendation_signal(symbol, aggregated_signal)
-            
+
         except Exception as e:
             self.logger.error(f"Error handling trading recommendation: {e}")
-            
+
     def _process_trading_recommendation_signal(self, symbol: str, signal: dict):
         """Process trading recommendation through conflict resolution and risk validation"""
         try:
             self.logger.info(f"=== PROCESSING TRADING RECOMMENDATION FOR {symbol} ===")
-            
+
             # Step 1: Conflict resolution using existing conflict resolver
             if hasattr(self, 'conflict_resolver') and self.conflict_resolver:
                 resolved_signal = self.conflict_resolver.resolve_conflicts(symbol, [signal])
@@ -744,7 +665,7 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
                     self.logger.info(f"CONFLICT RESOLUTION: Signal rejected for {symbol}")
                     return
                 signal = resolved_signal
-                
+
             # Step 2: Risk validation using existing risk manager
             if hasattr(self, 'risk_manager') and self.risk_manager:
                 risk_validation = self.risk_manager.validate_decision(
@@ -753,11 +674,11 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
                     confidence=signal['confidence'],
                     reasoning=signal['reasoning']
                 )
-                
+
                 self.logger.info(f"RISK VALIDATION: {symbol} - Approved: {risk_validation.is_approved}")
                 if risk_validation.risk_warnings:
                     self.logger.warning(f"RISK WARNINGS: {risk_validation.risk_warnings}")
-                    
+
                 # Step 3: Execute if approved
                 if risk_validation.is_approved and risk_validation.should_execute:
                     self._execute_approved_recommendation(risk_validation, signal)
@@ -765,22 +686,22 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
                     self.logger.info(f"EXECUTION BLOCKED: {risk_validation.rejection_reason}")
             else:
                 self.logger.warning("Risk manager not available - cannot validate trading recommendation")
-                
+
         except Exception as e:
             self.logger.error(f"Error processing trading recommendation signal: {e}")
-            
+
     def _execute_approved_recommendation(self, risk_validation, signal):
         """Execute approved trading recommendation"""
         try:
             symbol = signal['symbol']
             action = signal['action']
             confidence = signal['confidence']
-            
+
             self.logger.info(f"=== EXECUTING APPROVED RECOMMENDATION ===")
             self.logger.info(f"SYMBOL: {symbol}")
             self.logger.info(f"ACTION: {action}")
             self.logger.info(f"CONFIDENCE: {confidence:.3f}")
-            
+
             # Use existing execution orchestrator
             if hasattr(self, 'execution_orchestrator') and self.execution_orchestrator:
                 execution_result = self.execution_orchestrator.execute_approved_decision(
@@ -788,14 +709,14 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
                     strategy_name="news_recommendation",
                     confidence=confidence
                 )
-                
+
                 if execution_result.was_successful:
                     self.logger.info(f"EXECUTION SUCCESS: {execution_result.execution_summary}")
                 else:
                     self.logger.error(f"EXECUTION FAILED: {execution_result.error_message}")
             else:
                 self.logger.warning("Execution orchestrator not available - cannot execute recommendation")
-                
+
         except Exception as e:
             self.logger.error(f"Error executing approved recommendation: {e}")
 

@@ -10,6 +10,13 @@ from typing import Dict, List, Any, Optional
 from datetime import datetime
 import logging
 
+# Import color system for strategy analyzer (dark green)
+try:
+    from terminal_color_system import print_decision_engine, print_error, print_warning, print_success, create_colored_logger
+    COLOR_SYSTEM_AVAILABLE = True
+except ImportError:
+    COLOR_SYSTEM_AVAILABLE = False
+
 from Friren_V1.multiprocess_infrastructure.redis_base_process import RedisBaseProcess, ProcessState
 from Friren_V1.multiprocess_infrastructure.trading_redis_manager import (
     get_trading_redis_manager, create_process_message, MessagePriority, ProcessMessage
@@ -190,7 +197,10 @@ class StrategyAnalyzerProcess(RedisBaseProcess):
 
             # Log cycle completion
             cycle_time = time.time() - start_time
-            self.logger.info(f"Process cycle complete - {cycle_time:.2f}s, {signals_sent} signals sent")
+            if COLOR_SYSTEM_AVAILABLE:
+                print_decision_engine(f"Process cycle complete - {cycle_time:.2f}s, {signals_sent} signals sent")
+            else:
+                self.logger.info(f"Process cycle complete - {cycle_time:.2f}s, {signals_sent} signals sent")
 
             for symbol in self.symbols:
                 strategies = self.get_strategies_for_symbol(symbol)

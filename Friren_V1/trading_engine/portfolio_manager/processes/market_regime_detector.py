@@ -19,7 +19,7 @@ if project_root not in sys.path:
 
 # Import color system for market regime detection (dark yellow)
 try:
-    from terminal_color_system import print_finbert_analysis, print_error, print_warning, print_success, create_colored_logger
+    from terminal_color_system import print_decision_engine, print_error, print_warning, print_success, create_colored_logger
     COLOR_SYSTEM_AVAILABLE = True
 except ImportError:
     COLOR_SYSTEM_AVAILABLE = False

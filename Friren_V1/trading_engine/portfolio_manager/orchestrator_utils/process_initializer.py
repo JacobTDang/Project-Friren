@@ -10,38 +10,31 @@ from typing import Optional
 from datetime import datetime
 
 # Import infrastructure components (Redis only - production)
-try:
-    from Friren_V1.trading_engine.portfolio_manager.tools.account_manager import AccountManager
-    from Friren_V1.trading_engine.portfolio_manager.tools.db_manager import TradingDBManager
-    from Friren_V1.trading_engine.portfolio_manager.tools.alpaca_interface import SimpleAlpacaInterface
-    
-    # PRODUCTION: Redis required
-    from Friren_V1.multiprocess_infrastructure.trading_redis_manager import get_trading_redis_manager, TradingRedisManager
-    from Friren_V1.multiprocess_infrastructure.redis_process_manager import RedisProcessManager, ProcessConfig, RestartPolicy
-    REDIS_AVAILABLE = True
-    print("DEBUG: Redis infrastructure required and available")
-    
-    INFRASTRUCTURE_AVAILABLE = True
-    print("DEBUG: Infrastructure imports successful")
-except ImportError as e:
-    print(f"DEBUG: Infrastructure import failed: {e}")
-    INFRASTRUCTURE_AVAILABLE = False
-    REDIS_AVAILABLE = False
+# FAIL FAST: No try...except - let ImportError crash the system immediately
+from Friren_V1.trading_engine.portfolio_manager.tools.account_manager import AccountManager
+from Friren_V1.trading_engine.portfolio_manager.tools.db_manager import TradingDBManager
+from Friren_V1.trading_engine.portfolio_manager.tools.alpaca_interface import SimpleAlpacaInterface
+
+# PRODUCTION: Redis required
+from Friren_V1.multiprocess_infrastructure.trading_redis_manager import get_trading_redis_manager, TradingRedisManager
+from Friren_V1.multiprocess_infrastructure.redis_process_manager import RedisProcessManager, ProcessConfig, RestartPolicy
+REDIS_AVAILABLE = True
+print("DEBUG: Redis infrastructure required and available")
+
+INFRASTRUCTURE_AVAILABLE = True
+print("DEBUG: Infrastructure imports successful")
 
 # Import trading components
-try:
-    from Friren_V1.trading_engine.portfolio_manager.decision_engine.decision_engine import EnhancedMarketDecisionEngineProcess as MarketDecisionEngine
-    from Friren_V1.trading_engine.portfolio_manager.decision_engine.execution_orchestrator import ExecutionOrchestrator
-    from Friren_V1.trading_engine.portfolio_manager.processes.position_health_monitor import PositionHealthMonitor
-    from Friren_V1.trading_engine.portfolio_manager.processes.strategy_analyzer_process import StrategyAnalyzerProcess
-    from Friren_V1.trading_engine.portfolio_manager.processes.finbert_sentiment_process import FinBERTSentimentProcess
-    from Friren_V1.trading_engine.portfolio_manager.processes.enhanced_news_pipeline_process import EnhancedNewsPipelineProcess, get_default_pipeline_config
-    from Friren_V1.trading_engine.portfolio_manager.processes.market_regime_detector import MarketRegimeDetector
-    TRADING_COMPONENTS_AVAILABLE = True
-    print("DEBUG: Trading components imports successful")
-except ImportError as e:
-    print(f"DEBUG: Trading components import failed: {e}")
-    TRADING_COMPONENTS_AVAILABLE = False
+# FAIL FAST: No try...except - let ImportError crash the system immediately
+from Friren_V1.trading_engine.portfolio_manager.decision_engine.decision_engine import EnhancedMarketDecisionEngineProcess as MarketDecisionEngine
+from Friren_V1.trading_engine.portfolio_manager.decision_engine.execution_orchestrator import ExecutionOrchestrator
+from Friren_V1.trading_engine.portfolio_manager.processes.position_health_monitor import PositionHealthMonitor
+from Friren_V1.trading_engine.portfolio_manager.processes.strategy_analyzer_process import StrategyAnalyzerProcess
+from Friren_V1.trading_engine.portfolio_manager.processes.finbert_sentiment_process import FinBERTSentimentProcess
+from Friren_V1.trading_engine.portfolio_manager.processes.enhanced_news_pipeline_process import EnhancedNewsPipelineProcess, get_default_pipeline_config
+from Friren_V1.trading_engine.portfolio_manager.processes.market_regime_detector import MarketRegimeDetector
+TRADING_COMPONENTS_AVAILABLE = True
+print("DEBUG: Trading components imports successful")
 
 
 class ProcessInitializer:
@@ -149,121 +142,103 @@ class ProcessInitializer:
         self.logger.info("Starting process manager initialization")
 
         try:
-            if INFRASTRUCTURE_AVAILABLE and TRADING_COMPONENTS_AVAILABLE:
-                # PRODUCTION: Redis-based ProcessManager required
-                self.logger.info("Creating Redis ProcessManager (production)")
-                self.process_manager = RedisProcessManager(
-                    max_processes=6  # ULTRA PARALLEL: All 6 processes enabled
-                )
-                self.logger.info("Redis ProcessManager created successfully")
+            # PRODUCTION: Redis-based ProcessManager required
+            self.logger.info("Creating Redis ProcessManager (production)")
+            self.process_manager = RedisProcessManager(
+                max_processes=5,  # UPDATED: Max 5 processes to include enhanced news pipeline
+                enable_queue_rotation=False,  # CRITICAL FIX: Disable queue rotation for continuous business logic execution
+                cycle_time_seconds=30.0  # 30-second execution cycles per process
+            )
+            self.logger.info("Redis ProcessManager created successfully with CONTINUOUS execution enabled")
 
-                # ULTRA FIX: ENABLE ALL PROCESSES with Windows deadlock fixes
-                self.logger.info("ULTRA PARALLEL MODE: Enabling ALL 6 processes with deadlock fixes")
-                self.logger.info("REASON: User wants true parallelism - applying Windows-specific fixes")
-                self.logger.info("SOLUTION: All processes enabled with ultra-minimal initialization")
-                
-                # ALL PROCESSES ENABLED with Windows fixes
-                processes = [
-                    ('decision_engine', MarketDecisionEngine),
-                    ('position_health_monitor', PositionHealthMonitor),  
-                    ('strategy_analyzer', StrategyAnalyzerProcess),
-                    ('sentiment_analyzer', FinBERTSentimentProcess),
-                    ('enhanced_news_pipeline', EnhancedNewsPipelineProcess),
-                    ('market_regime_detector', MarketRegimeDetector)
-                ]
+            # MEMORY OPTIMIZED: Limit to 4 critical processes to reduce RAM usage
+            self.logger.info("MEMORY OPTIMIZED MODE: Limiting to 5 most critical processes")
+            self.logger.info("REASON: Enhanced news pipeline critical for sentiment analysis")
+            self.logger.info("SOLUTION: Queue-based process execution with health monitor first, then rotating queue")
+            
+            # TOP 5 CRITICAL PROCESSES - health monitor first, then add enhanced news pipeline
+            processes = [
+                ('position_health_monitor', PositionHealthMonitor),  # FIRST - provides system health data
+                ('decision_engine', MarketDecisionEngine),
+                ('enhanced_news_pipeline', EnhancedNewsPipelineProcess),  # ADDED - critical for news and sentiment
+                ('strategy_analyzer', StrategyAnalyzerProcess),
+                ('sentiment_analyzer', FinBERTSentimentProcess),
+                # QUEUED: market_regime_detector will be queued
+            ]
 
-                for process_id, process_class in processes:
-                    # Special configuration for enhanced news pipeline
-                    if process_id == 'enhanced_news_pipeline':
-                        # Create enhanced pipeline with optimized configuration
-                        pipeline_config = get_default_pipeline_config()
-                        config = ProcessConfig(
-                            process_class=process_class,
-                            process_id=process_id,
-                            restart_policy=RestartPolicy.ON_FAILURE,
-                            max_restarts=3,  # Allow some restarts for Redis processes
-                            restart_delay_seconds=5,
-                            health_check_interval=self.config.health_check_interval,
-                            process_args={
-                                'watchlist_symbols': self.config.symbols,
-                                'config': pipeline_config
-                            }
-                        )
-                    elif process_id == 'strategy_analyzer':
-                        # Strategy analyzer with reduced intervals for more active testing
-                        config = ProcessConfig(
-                            process_class=process_class,
-                            process_id=process_id,
-                            restart_policy=RestartPolicy.ON_FAILURE,
-                            max_restarts=3,  # Allow some restarts for Redis processes
-                            restart_delay_seconds=5,
-                            health_check_interval=self.config.health_check_interval,
-                            process_args={
-                                'analysis_interval': 30,  # 30 seconds instead of 150
-                                'confidence_threshold': 50.0,  # 50% instead of 70%
-                                'symbols': self.config.symbols
-                            }
-                        )
-                    elif process_id == 'position_health_monitor':
-                        # Position health monitor with reduced intervals
-                        config = ProcessConfig(
-                            process_class=process_class,
-                            process_id=process_id,
-                            restart_policy=RestartPolicy.ON_FAILURE,
-                            max_restarts=3,  # Allow some restarts for Redis processes
-                            restart_delay_seconds=5,
-                            health_check_interval=self.config.health_check_interval,
-                            process_args={
-                                'check_interval': 5,  # 5 seconds instead of 10
-                                'symbols': self.config.symbols
-                            }
-                        )
-                    elif process_id == 'market_regime_detector':
-                        # Market regime detector with reduced intervals
-                        config = ProcessConfig(
-                            process_class=process_class,
-                            process_id=process_id,
-                            restart_policy=RestartPolicy.ON_FAILURE,
-                            max_restarts=3,  # Allow some restarts for Redis processes
-                            restart_delay_seconds=5,
-                            health_check_interval=self.config.health_check_interval,
-                            process_args={
-                                'check_interval': 60,  # 60 seconds instead of 300
-                                'symbols': self.config.symbols
-                            }
-                        )
-                    elif process_id == 'sentiment_analyzer':
-                        # PRODUCTION: FinBERT sentiment analyzer needs longer startup for model loading
-                        config = ProcessConfig(
-                            process_class=process_class,
-                            process_id=process_id,
-                            restart_policy=RestartPolicy.ON_FAILURE,
-                            max_restarts=3,
-                            restart_delay_seconds=5,
-                            health_check_interval=self.config.health_check_interval,
-                            startup_timeout=300,  # 5 minutes for FinBERT model loading
-                            process_args={
-                                'analysis_interval': 30,
-                                'confidence_threshold': 50.0,
-                                'symbols': self.config.symbols
-                            }
-                        )
-                    else:
-                        config = ProcessConfig(
-                            process_class=process_class,
-                            process_id=process_id,
-                            restart_policy=RestartPolicy.ON_FAILURE,
-                            max_restarts=3,  # Allow some restarts for Redis processes
-                            restart_delay_seconds=5,
-                            health_check_interval=self.config.health_check_interval,
-                            process_args={}
-                        )
+            for process_id, process_class in processes:
+                if process_id == 'strategy_analyzer':
+                    # Strategy analyzer with reduced intervals for more active testing
+                    config = ProcessConfig(
+                        process_class=process_class,
+                        process_id=process_id,
+                        restart_policy=RestartPolicy.ON_FAILURE,
+                        max_restarts=3,  # Allow some restarts for Redis processes
+                        restart_delay_seconds=5,
+                        health_check_interval=self.config.health_check_interval,
+                        process_args={
+                            'analysis_interval': 30,  # 30 seconds instead of 150
+                            'confidence_threshold': 50.0,  # 50% instead of 70%
+                            'symbols': self.config.symbols
+                        }
+                    )
+                elif process_id == 'position_health_monitor':
+                    # Position health monitor with reduced intervals
+                    config = ProcessConfig(
+                        process_class=process_class,
+                        process_id=process_id,
+                        restart_policy=RestartPolicy.ON_FAILURE,
+                        max_restarts=3,  # Allow some restarts for Redis processes
+                        restart_delay_seconds=5,
+                        health_check_interval=self.config.health_check_interval,
+                        process_args={
+                            'check_interval': 3,  # Very fast execution - 3 seconds
+                            'symbols': self.config.symbols
+                        }
+                    )
+                elif process_id == 'enhanced_news_pipeline':
+                    # Enhanced news pipeline for news collection and sentiment analysis
+                    config = ProcessConfig(
+                        process_class=process_class,
+                        process_id=process_id,
+                        restart_policy=RestartPolicy.ON_FAILURE,
+                        max_restarts=3,
+                        restart_delay_seconds=5,
+                        health_check_interval=self.config.health_check_interval,
+                        process_args={
+                            'watchlist_symbols': self.config.symbols
+                        }
+                    )
+                elif process_id == 'sentiment_analyzer':
+                    # PRODUCTION: FinBERT sentiment analyzer needs longer startup for model loading
+                    config = ProcessConfig(
+                        process_class=process_class,
+                        process_id=process_id,
+                        restart_policy=RestartPolicy.ON_FAILURE,
+                        max_restarts=3,
+                        restart_delay_seconds=5,
+                        health_check_interval=self.config.health_check_interval,
+                        startup_timeout=60,  # Reduced timeout - 1 minute
+                        process_args={
+                            'analysis_interval': 10,  # Faster execution 
+                            'confidence_threshold': 50.0,
+                            'symbols': self.config.symbols
+                        }
+                    )
+                elif process_id == 'decision_engine':
+                    config = ProcessConfig(
+                        process_class=process_class,
+                        process_id=process_id,
+                        restart_policy=RestartPolicy.ON_FAILURE,
+                        max_restarts=3,
+                        restart_delay_seconds=5,
+                        health_check_interval=self.config.health_check_interval,
+                        startup_timeout=45,  # Reduced timeout - 45 seconds
+                        process_args={}
+                    )
 
-                    self.process_manager.register_process(config)
-                    self.logger.info(f"Registered process: {process_id}")
-            else:
-                self.logger.error("Real infrastructure not available - SYSTEM MUST FAIL")
-                raise RuntimeError("Real infrastructure components required - no fallback allowed")
+                self.process_manager.register_process(config)
+                self.logger.info(f"Registered process: {process_id}")
 
         except Exception as e:
             self.logger.error(f"FAILED to create ProcessManager: {e}")
@@ -275,13 +250,9 @@ class ProcessInitializer:
     def _initialize_execution_orchestrator(self):
         """Initialize the execution orchestrator"""
         try:
-            if TRADING_COMPONENTS_AVAILABLE:
-                self.logger.info("Initializing real execution orchestrator...")
-                self.execution_orchestrator = ExecutionOrchestrator()
-                self.logger.info("Real execution orchestrator initialized successfully")
-            else:
-                self.logger.error("Trading components not available - SYSTEM MUST FAIL")
-                raise RuntimeError("Real trading components required - no fallback allowed")
+            self.logger.info("Initializing real execution orchestrator...")
+            self.execution_orchestrator = ExecutionOrchestrator()
+            self.logger.info("Real execution orchestrator initialized successfully")
             self.logger.info("Execution orchestrator initialized")
         except Exception as e:
             self.logger.error(f"CRITICAL ERROR initializing execution orchestrator: {e}")
@@ -304,20 +275,20 @@ class ProcessInitializer:
             raise RuntimeError(f"System readiness validation failed: {issues}")
 
     def start_processes(self):
-        """Start all registered processes"""
+        """Start all registered processes (limited to 4 for memory optimization)"""
         if self.process_manager:
             # Define dependency order - decision engine should start first
+            # INCLUDE NEWS PIPELINE - Critical for business logic execution
             dependency_order = [
                 'decision_engine',
                 'position_health_monitor',
-                'strategy_analyzer',
-                'sentiment_analyzer',
-                'enhanced_news_pipeline',
-                'market_regime_detector'
+                'enhanced_news_pipeline',  # CRITICAL: This was missing!
+                'strategy_analyzer', 
+                'sentiment_analyzer'
             ]
 
             self.process_manager.start_all_processes(dependency_order)
-            self.logger.info("All processes started")
+            self.logger.info("All 5 critical processes started with news pipeline enabled")
         else:
             self.logger.warning("Process manager not available")
 

@@ -702,6 +702,17 @@ class FinBERTSentimentProcess(RedisBaseProcess):
                     except Exception as e:
                         self.logger.error(f"Failed to update shared state for {symbol}: {e}")
 
+                # CRITICAL FIX: Send sentiment message to decision engine
+                try:
+                    message_sent = self._send_sentiment_to_decision_engine(symbol, sentiment_data, detailed_results, "finbert")
+                    if message_sent:
+                        self.logger.info(f"SENTIMENT MESSAGE SENT: {symbol} sentiment message sent to decision engine")
+                        print(f"SENTIMENT MESSAGE SENT: {symbol} sentiment message sent to decision engine")
+                    else:
+                        self.logger.warning(f"SENTIMENT MESSAGE FAILED: Could not send {symbol} to decision engine")
+                except Exception as e:
+                    self.logger.error(f"Error sending sentiment message for {symbol}: {e}")
+
                 # Log summary
                 sentiment_direction = "POSITIVE" if overall_sentiment > 0.1 else "NEGATIVE" if overall_sentiment < -0.1 else "NEUTRAL"
                 self.logger.info(f"FINBERT SUMMARY: {symbol} = {sentiment_direction} ({overall_sentiment:.3f}) with {confidence:.1%} confidence")
