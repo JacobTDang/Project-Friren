@@ -12,6 +12,10 @@ from datetime import datetime, timedelta
 from typing import List, Optional, Dict
 import logging
 import threading
+import warnings
+
+# Suppress PRAW async environment warnings - we use sync PRAW intentionally
+warnings.filterwarnings("ignore", message="It appears that you are using PRAW in an asynchronous environment")
 
 try:
     from .base import NewsDataSource, NewsArticle

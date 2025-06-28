@@ -3,6 +3,33 @@ import numpy as np
 from sklearn.feature_selection import mutual_info_regression
 from typing import List, Dict, Optional, Union
 
+class StockDataFetcher:
+    """
+    Data fetcher wrapper that provides a consistent interface for strategy classes.
+    Acts as a bridge to YahooFinancePriceData for backwards compatibility.
+    """
+    
+    def __init__(self):
+        from .yahoo_price import YahooFinancePriceData
+        self.yahoo_data = YahooFinancePriceData()
+    
+    def fetch_data(self, symbol: str, period: str = "1y") -> pd.DataFrame:
+        """
+        Fetch historical data for a symbol
+        
+        Args:
+            symbol: Stock symbol to fetch
+            period: Time period (1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max)
+        
+        Returns:
+            DataFrame with OHLCV data
+        """
+        return self.yahoo_data.get_historical_data(symbol, period)
+    
+    def get_historical_data(self, symbol: str, period: str = "1y") -> pd.DataFrame:
+        """Alias for fetch_data for compatibility"""
+        return self.fetch_data(symbol, period)
+
 class StockDataTools:
     """
     Comprehensive data processing and technical analysis toolkit
