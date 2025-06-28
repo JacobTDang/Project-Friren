@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from scipy.stats import linregress
 from .base_strategy import BaseStrategy, StrategySignal, StrategyMetadata
-from trading_engine.data.data_utils import StockDataTools
+from trading_engine.data.data_utils import StockDataTools, StockDataFetcher
 from Friren_V1.trading_engine.data.yahoo_price import YahooFinancePriceData
 
 class PairsStrategy(BaseStrategy):
