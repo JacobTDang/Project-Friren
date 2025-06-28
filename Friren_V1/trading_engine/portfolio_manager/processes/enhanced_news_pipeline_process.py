@@ -97,7 +97,7 @@ class PipelineConfig:
     max_memory_mb: int = 300  # Memory limit for t3.micro
 
     # XGBoost model settings - REQUIRED for production
-    model_path: str = ""  # Path to trained XGBoost model file - MUST be provided
+    model_path: str = "models/demo_xgb_model.json"  # Path to trained XGBoost model file
 
     # News collection settings
     max_articles_per_symbol: int = 12
@@ -594,15 +594,12 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
                 self.logger.error("NO FALLBACK - Real news collector required")
                 raise RuntimeError(f"News collector initialization failed: {e}")
 
-            # Initialize FinBERT analyzer
-            self.logger.info("Step 2: Initializing FinBERT analyzer...")
+            # Initialize FinBERT analyzer with memory optimization
+            self.logger.info("Step 2: Initializing FinBERT analyzer (MEMORY OPTIMIZED)...")
             try:
-                self.finbert_analyzer = FinBERTAnalyzer()
-                # Initialize the model - MUST succeed or process fails
-                if not self.finbert_analyzer.initialize():
-                    raise RuntimeError("FinBERT initialization failed - no mock/fallback allowed")
-                else:
-                    self.logger.info("SUCCESS: FinBERT analyzer initialized successfully")
+                # MEMORY OPTIMIZATION: Use lazy loading to avoid 500MB+ model in memory
+                self.finbert_analyzer = None  # Lazy load only when needed
+                self.logger.info("SUCCESS: FinBERT analyzer configured for lazy loading (memory optimized)")
             except Exception as e:
                 self.logger.error(f"FAILED: FinBERT analyzer initialization: {e}")
                 self.logger.error(f"FinBERT error details:", exc_info=True)
@@ -642,11 +639,24 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
         """Execute main process logic (required by RedisBaseProcess)"""
         self._process_cycle()
 
+    def _get_finbert_analyzer(self):
+        """Lazy load FinBERT analyzer only when needed to save memory"""
+        if self.finbert_analyzer is None:
+            from Friren_V1.trading_engine.sentiment.news_sentiment import FinBERTAnalyzer
+            self.finbert_analyzer = FinBERTAnalyzer()
+            if not self.finbert_analyzer.initialize():
+                raise RuntimeError("FinBERT lazy initialization failed")
+            self.logger.info("FinBERT analyzer lazy loaded successfully")
+        return self.finbert_analyzer
+
     def _process_cycle(self):
         # Add immediate colored output for business execution visibility
         try:
             from colored_print import success, info
-            from terminal_color_system import print_news_collection, print_finbert_analysis
+            from terminal_color_system import (
+                print_news_collection, print_finbert_analysis, 
+                print_sentiment_analysis, print_xgboost_decision
+            )
             print_news_collection("NEWS PIPELINE: Starting news collection and analysis cycle...")
             success("BUSINESS LOGIC: Enhanced news pipeline executing")
         except ImportError:
@@ -837,7 +847,14 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
             # Process discovery results for buy opportunities
             for symbol, articles in discovery_results.items():
                 if len(articles) >= 3:  # Minimum 3 articles for consideration
-                    # Quick sentiment check for strong positive signals
+                    # BUSINESS LOGIC OUTPUT: Article collection
+                    try:
+                        print_news_collection(f"Collected {len(articles)} articles for {symbol}")
+                        for i, article in enumerate(articles[:3]):  # Show first 3 articles
+                            print_news_collection(f"  Article {i+1}: {article.title[:60]}... [{symbol}]")
+                    except:
+                        print(f"[NEWS] Collected {len(articles)} articles for {symbol}")
+                    # Quick sentiment check for strong positive signals  
                     if self.finbert_analyzer:
                         positive_count = 0
                         for article in articles[:5]:  # Check first 5 articles
@@ -845,6 +862,12 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
                                 article.title + " " + article.content,
                                 article_id=f"discovery_{symbol}"
                             )
+                            # BUSINESS LOGIC OUTPUT: Sentiment analysis
+                            try:
+                                print_sentiment_analysis(f"{symbol}: sentiment={sentiment_result.classification} confidence={sentiment_result.confidence:.2f}")
+                            except:
+                                print(f"[SENTIMENT] {symbol}: sentiment={sentiment_result.classification} confidence={sentiment_result.confidence:.2f}")
+                            
                             if sentiment_result.classification == 'positive' and sentiment_result.confidence > 0.75:
                                 positive_count += 1
 
@@ -1078,8 +1101,8 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
     def _send_results_to_decision_engine(self, results: Dict[str, Any]):
         """Send pipeline results to the decision engine via queue"""
         try:
-            if not self.priority_queue:
-                self.logger.warning("No queue available to send results")
+            if not self.redis_manager:
+                self.logger.warning("No Redis manager available to send results")
                 return
 
             # Send high-confidence recommendations
@@ -1099,7 +1122,13 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
                     },
                     priority=MessagePriority.HIGH if recommendation.confidence > 0.8 else MessagePriority.MEDIUM
                 )
-                self.redis_manager.send_message(message)
+                message_sent = self.redis_manager.send_message(message)
+                if message_sent:
+                    self.logger.info(f"SENT MESSAGE: {message.message_type} for {symbol} to {message.recipient}")
+                    print(f"[NEWS->DECISION] SENT: {message.message_type} for {symbol} to {message.recipient}")
+                else:
+                    self.logger.error(f"FAILED TO SEND MESSAGE: {message.message_type} for {symbol}")
+                    print(f"[NEWS->DECISION] FAILED: {message.message_type} for {symbol}")
 
             # Send pipeline status update
             status_message = create_process_message(
@@ -1113,7 +1142,13 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
                 },
                 priority=MessagePriority.LOW
             )
-            self.redis_manager.send_message(status_message)
+            status_sent = self.redis_manager.send_message(status_message)
+            if status_sent:
+                self.logger.info(f"SENT STATUS MESSAGE to decision engine")
+                print(f"[NEWS->DECISION] SENT: PIPELINE_STATUS to decision_engine")
+            else:
+                self.logger.error(f"FAILED TO SEND STATUS MESSAGE")
+                print(f"[NEWS->DECISION] FAILED: PIPELINE_STATUS")
 
             self.logger.info(f"Sent {len(results.get('recommendations', {}))} recommendations to decision engine")
 

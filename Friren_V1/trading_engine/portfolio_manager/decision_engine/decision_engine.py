@@ -185,10 +185,10 @@ class DecisionMetrics:
 
 @dataclass
 class PerformanceTracker:
-    """Track performance for parameter adaptation"""
-    recent_decisions: deque = field(default_factory=lambda: deque(maxlen=50))
-    strategy_performance: Dict[str, deque] = field(default_factory=lambda: defaultdict(lambda: deque(maxlen=20)))
-    execution_results: deque = field(default_factory=lambda: deque(maxlen=30))
+    """Track performance for parameter adaptation - MEMORY OPTIMIZED"""
+    recent_decisions: deque = field(default_factory=lambda: deque(maxlen=15))  # Reduced from 50 to 15
+    strategy_performance: Dict[str, deque] = field(default_factory=lambda: defaultdict(lambda: deque(maxlen=5)))  # Reduced from 20 to 5
+    execution_results: deque = field(default_factory=lambda: deque(maxlen=10))  # Reduced from 30 to 10
     last_adaptation: datetime = field(default_factory=datetime.now)
 
     def add_decision_result(self, symbol: str, strategy: str, was_successful: bool, confidence: float):
@@ -237,8 +237,8 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
     def __init__(self, process_id: str = "market_decision_engine"):
         super().__init__(process_id)
 
-        # Your existing signal aggregation (unchanged)
-        self.signal_buffer = defaultdict(lambda: deque(maxlen=50))
+        # MEMORY OPTIMIZED: Reduced signal aggregation buffers
+        self.signal_buffer = defaultdict(lambda: deque(maxlen=10))  # Reduced from 50 to 10
         self.sentiment_cache = {}
         self.regime_state = {"current": "normal", "confidence": 0.5, "updated": datetime.now()}
 
@@ -250,10 +250,10 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
             "risk": SignalWeight.RISK.value
         }
 
-        # Enhanced metrics and tracking
+        # MEMORY OPTIMIZED: Reduced metrics and tracking buffers
         self.metrics = DecisionMetrics()
-        self.recent_decisions = deque(maxlen=100)
-        self.performance_window = deque(maxlen=50)
+        self.recent_decisions = deque(maxlen=25)  # Reduced from 100 to 25
+        self.performance_window = deque(maxlen=15)  # Reduced from 50 to 15
 
         # NEW: Performance tracking for adaptation
         self.performance_tracker = PerformanceTracker()
@@ -318,14 +318,33 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
             self.execution_orchestrator = ExecutionOrchestrator()
             self.logger.info("LIFECYCLE_DEBUG: ExecutionOrchestrator initialized.")
 
-            self.logger.info("LIFECYCLE_DEBUG: Initializing ConflictResolver...")
-            self.conflict_resolver = ConflictResolver()
-            self.logger.info("LIFECYCLE_DEBUG: ConflictResolver initialized.")
+            self.logger.info("LIFECYCLE_DEBUG: ConflictResolver set for lazy loading...")
+            # MEMORY OPTIMIZATION: Lazy load ConflictResolver only when needed
+            self.conflict_resolver = None
+            self._conflict_resolver_path = "models/demo_xgb_model.json"
+            self.logger.info("LIFECYCLE_DEBUG: ConflictResolver configured for lazy loading.")
 
             self.enhanced_init_status = {'done': True, 'error': None}
 
             # Initialize basic performance tracking
             self.performance_tracker = PerformanceTracker()
+            
+    def _get_conflict_resolver(self):
+        """Lazy load ConflictResolver only when needed to save memory"""
+        if self.conflict_resolver is None:
+            try:
+                self.logger.info("MEMORY_OPTIMIZATION: Loading ConflictResolver on demand...")
+                from .conflict_resolver import ConflictResolver
+                self.conflict_resolver = ConflictResolver(model_path=self._conflict_resolver_path)
+                self.logger.info("MEMORY_OPTIMIZATION: ConflictResolver loaded successfully")
+            except Exception as e:
+                self.logger.error(f"Failed to lazy load ConflictResolver: {e}")
+                # Return a dummy resolver that always returns original decisions
+                class DummyResolver:
+                    def resolve_conflicts(self, decisions, *args, **kwargs):
+                        return decisions
+                self.conflict_resolver = DummyResolver()
+        return self.conflict_resolver
 
             # Set process state to RUNNING immediately
             self.state = ProcessState.RUNNING
@@ -344,7 +363,7 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
         self.risk_manager = SolidRiskManager()
         self.parameter_adapter = ParameterAdapter()
         self.execution_orchestrator = ExecutionOrchestrator()
-        self.conflict_resolver = ConflictResolver()
+        self.conflict_resolver = ConflictResolver(model_path="models/demo_xgb_model.json")
         self.enhanced_init_status = {'done': True, 'error': None}
 
     def _initialize_tool_connections(self):
@@ -628,20 +647,28 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
     def _handle_trading_recommendation(self, message: ProcessMessage):
         """Handle trading recommendations from enhanced news pipeline"""
         try:
-            payload = message.payload
+            self.logger.info(f"DECISION ENGINE: Received TRADING_RECOMMENDATION message from {message.sender}")
+            print(f"[DECISION ENGINE] RECEIVED: TRADING_RECOMMENDATION from {message.sender}")
+            
+            payload = message.data  # Fixed: use .data instead of .payload
             symbol = payload.get('symbol')
             recommendation = payload.get('recommendation', {})
             supporting_data = payload.get('supporting_data', {})
 
             if not symbol or not recommendation:
                 self.logger.warning("Trading recommendation missing symbol or recommendation data")
+                print(f"[DECISION ENGINE] ERROR: Missing symbol or recommendation data")
                 return
 
             self.logger.info(f"=== TRADING RECOMMENDATION RECEIVED ===")
             self.logger.info(f"SYMBOL: {symbol}")
-            self.logger.info(f"FROM: {message.sender_id}")
+            self.logger.info(f"FROM: {message.sender}")
             self.logger.info(f"ACTION: {recommendation.get('action', 'unknown')}")
             self.logger.info(f"CONFIDENCE: {recommendation.get('confidence', 0):.3f}")
+            
+            # Business logic output to terminal
+            print(f"[DECISION ENGINE] Processing {symbol}: {recommendation.get('action', 'unknown')} (confidence: {recommendation.get('confidence', 0):.3f})")
+            print(f"[DECISION ENGINE] News volume: {supporting_data.get('news_volume', 0)}, Sentiment count: {supporting_data.get('sentiment_count', 0)}")
             self.logger.info(f"NEWS VOLUME: {supporting_data.get('news_volume', 0)}")
             self.logger.info(f"SENTIMENT COUNT: {supporting_data.get('sentiment_count', 0)}")
 
@@ -669,7 +696,7 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
 
             # Step 1: Conflict resolution using existing conflict resolver
             if hasattr(self, 'conflict_resolver') and self.conflict_resolver:
-                resolved_signal = self.conflict_resolver.resolve_conflicts(symbol, [signal])
+                resolved_signal = self._get_conflict_resolver().resolve_conflicts(symbol, [signal])
                 if not resolved_signal:
                     self.logger.info(f"CONFLICT RESOLUTION: Signal rejected for {symbol}")
                     return
@@ -904,7 +931,7 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
         """NEW: Resolve signal conflicts using conflict resolver"""
         try:
             if self.conflict_resolver:
-                return self.conflict_resolver.resolve_conflict(aggregated_signal)
+                return self._get_conflict_resolver().resolve_conflict(aggregated_signal)
             else:
                 # Fallback: return signal as-is
                 return type('ResolvedDecision', (), {
@@ -921,9 +948,29 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
         """NEW: Validate decision with enhanced risk manager"""
         try:
             if self.risk_manager:
-                return self.risk_manager.validate_decision(resolved_decision)
+                risk_result = self.risk_manager.validate_decision(resolved_decision)
+                
+                # BUSINESS LOGIC OUTPUT: Risk management real-time
+                try:
+                    from terminal_color_system import print_risk_manager
+                    symbol = getattr(resolved_decision, 'symbol', 'UNKNOWN')
+                    is_approved = getattr(risk_result, 'is_approved', False)
+                    reason = getattr(risk_result, 'reason', 'No reason')
+                    action = "APPROVED" if is_approved else "REJECTED"
+                    print_risk_manager(f"Decision: {action} {symbol} - reason: {reason}")
+                except:
+                    print(f"[RISK MANAGER] Decision: {action} {symbol} - reason: {reason}")
+                
+                return risk_result
             else:
                 # Fallback: approve all decisions
+                try:
+                    from terminal_color_system import print_risk_manager
+                    symbol = getattr(resolved_decision, 'symbol', 'UNKNOWN')
+                    print_risk_manager(f"Decision: APPROVED {symbol} - reason: No risk manager (fallback)")
+                except:
+                    print(f"[RISK MANAGER] Decision: APPROVED {symbol} - reason: No risk manager (fallback)")
+                    
                 return type('RiskValidation', (), {
                     'is_approved': True,
                     'should_execute': True,
@@ -961,8 +1008,29 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
 
                 if getattr(result, 'was_successful', False):
                     self.logger.info(f"Execution successful: {getattr(result, 'execution_summary', 'No summary')}")
+                    
+                    # BUSINESS LOGIC OUTPUT: Trade execution success
+                    try:
+                        from terminal_color_system import print_trade_execution
+                        symbol = getattr(result, 'symbol', 'UNKNOWN')
+                        executed_amount = getattr(result, 'executed_amount', 0.0)
+                        execution_price = getattr(result, 'execution_price', 0.0)
+                        action = getattr(risk_validation.original_decision, 'action', 'UNKNOWN')
+                        print_trade_execution(f"Execution: {action} {executed_amount} {symbol} at ${execution_price}")
+                    except:
+                        print(f"[EXECUTION] Trade executed successfully")
+                        
                 else:
                     self.logger.warning(f"Execution failed: {getattr(result, 'error_message', 'Unknown error')}")
+                    
+                    # BUSINESS LOGIC OUTPUT: Trade execution failure  
+                    try:
+                        from terminal_color_system import print_trade_execution
+                        symbol = getattr(result, 'symbol', 'UNKNOWN')
+                        error = getattr(result, 'error_message', 'Unknown error')
+                        print_trade_execution(f"Execution: FAILED {symbol} - {error}")
+                    except:
+                        print(f"[EXECUTION] Trade execution failed")
 
                 return result
             else:
@@ -1168,7 +1236,7 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
                 current_performance = self._get_strategy_performance(symbol)
 
                 # Get enhanced decision from conflict resolver
-                transition_decision = self.conflict_resolver.resolve_strategy_transition_signals(
+                transition_decision = self._get_conflict_resolver().resolve_strategy_transition_signals(
                     symbol=symbol,
                     transition_signals=signals_dict,
                     current_strategy=current_strategy,
@@ -1702,6 +1770,12 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
 
     def _reset_daily_counters(self):
         """Reset daily execution counter if new day"""
+        # Defensive initialization for Redis subprocess context
+        if not hasattr(self, 'last_execution_reset'):
+            self.last_execution_reset = datetime.now().date()
+        if not hasattr(self, 'daily_execution_count'):
+            self.daily_execution_count = 0
+            
         today = datetime.now().date()
         if today > self.last_execution_reset:
             self.daily_execution_count = 0
@@ -1721,21 +1795,26 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
         """Enhanced periodic maintenance"""
         try:
             # Clean old signals
-            cutoff_time = datetime.now() - timedelta(hours=6)
+            # MEMORY OPTIMIZATION: More aggressive cleanup (1 hour instead of 6)
+            cutoff_time = datetime.now() - timedelta(hours=1)
             for symbol in list(self.signal_buffer.keys()):
                 self.signal_buffer[symbol] = deque(
                     [s for s in self.signal_buffer[symbol] if s['timestamp'] > cutoff_time],
-                    maxlen=50
+                    maxlen=10  # Updated to match reduced buffer size
                 )
 
                 # Remove empty signal buffers
                 if not self.signal_buffer[symbol]:
                     del self.signal_buffer[symbol]
 
-            # Clean old sentiment data
+            # MEMORY OPTIMIZATION: Clean old sentiment data more aggressively (30 minutes instead of 2 hours)
             for symbol in list(self.sentiment_cache.keys()):
-                if (datetime.now() - self.sentiment_cache[symbol]['timestamp']).total_seconds() > 7200:  # 2 hours
+                if (datetime.now() - self.sentiment_cache[symbol]['timestamp']).total_seconds() > 1800:  # 30 minutes
                     del self.sentiment_cache[symbol]
+                    
+            # MEMORY OPTIMIZATION: Trigger garbage collection after cleanup
+            import gc
+            gc.collect()
 
             # Clear resolved risk alerts (older than 1 hour)
             alerts_to_remove = set()

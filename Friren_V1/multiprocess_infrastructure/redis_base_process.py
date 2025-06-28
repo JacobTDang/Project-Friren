@@ -11,6 +11,8 @@ import threading
 import logging
 import sys
 import os
+import signal
+import atexit
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
 from datetime import datetime, timedelta
@@ -72,7 +74,7 @@ class RedisBaseProcess(ABC):
     - Comprehensive memory monitoring and leak prevention
     """
 
-    def __init__(self, process_id: str, heartbeat_interval: int = 30, memory_limit_mb: float = 1024):
+    def __init__(self, process_id: str, heartbeat_interval: int = 30, memory_limit_mb: float = 250):
         self.process_id = process_id
         self.heartbeat_interval = heartbeat_interval
         self.memory_limit_mb = memory_limit_mb
@@ -105,9 +107,16 @@ class RedisBaseProcess(ABC):
         # Memory monitoring
         self.memory_monitor = None
         self._emergency_shutdown_triggered = False
+        self._memory_high = False  # Flag for queue blocking instead of shutdown
 
         # Configure logging
         self._setup_logging()
+        
+        # Setup signal handlers to prevent orphaned subprocesses
+        self._setup_signal_handlers()
+        
+        # Register cleanup function
+        atexit.register(self._emergency_cleanup)
 
         self.logger.info(f"RedisBaseProcess {self.process_id} initialized with {memory_limit_mb}MB memory limit")
 
@@ -141,6 +150,36 @@ class RedisBaseProcess(ABC):
             self.logger.addHandler(console_handler)
             self.logger.setLevel(logging.INFO)
 
+    def _setup_signal_handlers(self):
+        """Setup signal handlers to prevent orphaned subprocesses"""
+        try:
+            signal.signal(signal.SIGINT, self._signal_handler)
+            signal.signal(signal.SIGTERM, self._signal_handler)
+            if hasattr(signal, 'SIGHUP'):
+                signal.signal(signal.SIGHUP, self._signal_handler)
+        except Exception as e:
+            self.logger.warning(f"Could not setup signal handlers: {e}")
+
+    def _signal_handler(self, signum, frame):
+        """Handle shutdown signals to prevent orphaned processes"""
+        self.logger.critical(f"Process {self.process_id} received signal {signum} - initiating emergency shutdown")
+        self._emergency_shutdown_triggered = True
+        self._stop_event.set()
+        self.stop()
+        
+    def _emergency_cleanup(self):
+        """Emergency cleanup function called at exit"""
+        try:
+            if hasattr(self, 'memory_monitor') and self.memory_monitor:
+                self.memory_monitor.stop()
+            if hasattr(self, 'redis_manager') and self.redis_manager:
+                # Clean up Redis connections
+                pass
+            self.logger.info(f"Emergency cleanup completed for {self.process_id}")
+        except Exception as e:
+            # Don't raise exceptions during cleanup
+            pass
+
     def _setup_memory_monitoring(self):
         """Setup memory monitoring for this process"""
         try:
@@ -155,8 +194,11 @@ class RedisBaseProcess(ABC):
             def emergency_callback(snapshot, stats):
                 if not self._emergency_shutdown_triggered:
                     self._emergency_shutdown_triggered = True
-                    self.logger.critical(f"EMERGENCY: Memory usage critical - initiating shutdown")
-                    self._emergency_shutdown()
+                    self.logger.critical(f"MEMORY HIGH: {snapshot.memory_mb:.1f}MB exceeds limit - blocking queue operations")
+                    # Set flag to block queue rotation instead of shutdown
+                    self._memory_high = True
+                    # Try aggressive cleanup
+                    self.memory_monitor.cleanup_memory(aggressive=True)
 
             self.memory_monitor.add_emergency_callback(emergency_callback)
 
@@ -476,31 +518,40 @@ class RedisBaseProcess(ABC):
     def _process_messages(self):
         """Process incoming messages from Redis"""
         try:
-            # Check for messages addressed to this process
-            message = self.redis_manager.receive_message(self.process_queue, timeout=1)
+            # CRITICAL FIX: Read from shared priority queue, not individual process queues
+            # This fixes the issue where processes show "Messages: 1" but queues show "Size=0"
+            message = self.redis_manager.receive_message(queue_name=None, timeout=0.1)  # Use shared priority queue
 
             if message:
-                self.logger.debug(f"Received message: {message.message_type}")
-                self.messages_processed += 1
+                # CRITICAL: Filter messages for this process only
+                if message.recipient == self.process_id or message.recipient == "all":
+                    self.logger.debug(f"Received message for {self.process_id}: {message.message_type}")
+                    self.messages_processed += 1
 
-                # Handle message
-                self._handle_message(message)
+                    # Handle message
+                    self._handle_message(message)
 
-                # Send acknowledgment if required
-                if message.data.get('require_ack', False):
-                    ack_message = create_process_message(
-                        sender=self.process_id,
-                        recipient=message.sender,
-                        message_type='message_ack',
-                        data={
-                            'original_message_id': message.message_id,
-                            'status': 'processed'
-                        }
-                    )
-                    self.send_message(ack_message)
+                    # Send acknowledgment if required
+                    if message.data.get('require_ack', False):
+                        ack_message = create_process_message(
+                            sender=self.process_id,
+                            recipient=message.sender,
+                            message_type='message_ack',
+                            data={
+                                'original_message_id': message.message_id,
+                                'status': 'processed'
+                            }
+                        )
+                        self.send_message(ack_message)
+                else:
+                    # Message not for this process - put it back in the queue for other processes
+                    self.redis_manager.send_message(message)
+                    self.logger.debug(f"Message {message.message_type} not for {self.process_id} (recipient: {message.recipient}) - routing to correct process")
 
         except Exception as e:
-            self.logger.error(f"Error processing messages: {e}")
+            # Only log actual errors, not timeouts
+            if "timeout" not in str(e).lower():
+                self.logger.error(f"Error processing messages: {e}")
 
     def send_message(self, message: ProcessMessage, queue_name: str = None) -> bool:
         """Send a message via Redis"""
@@ -680,3 +731,13 @@ class RedisBaseProcess(ABC):
 
     def __repr__(self):
         return self.__str__()
+    
+    def is_memory_healthy(self) -> bool:
+        """Check if process memory is within acceptable limits for queue operations"""
+        return not self._memory_high
+    
+    def get_memory_usage(self) -> float:
+        """Get current memory usage in MB"""
+        if self.memory_monitor:
+            return self.memory_monitor.get_current_memory()
+        return 0.0
