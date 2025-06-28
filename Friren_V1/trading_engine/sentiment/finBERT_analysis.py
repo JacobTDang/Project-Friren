@@ -119,16 +119,14 @@ class EnhancedFinBERT:
             return True
 
         except ImportError as e:
-            self.logger.warning(f"Required libraries not available: {e}")
-            self.logger.info("Falling back to mock sentiment analysis")
-            self.initialized = False
-            return False
+            self.logger.error(f"CRITICAL: Required libraries not available: {e}")
+            self.logger.error("PRODUCTION: Install transformers and torch: pip install transformers torch")
+            raise ImportError(f"FinBERT dependencies missing: {e}")
 
         except Exception as e:
-            self.logger.error(f"Failed to initialize FinBERT model: {e}")
-            self.logger.info("Falling back to mock sentiment analysis")
-            self.initialized = False
-            return False
+            self.logger.error(f"CRITICAL: Failed to initialize FinBERT model: {e}")
+            self.logger.error("PRODUCTION: Check model access and internet connectivity")
+            raise RuntimeError(f"FinBERT initialization failed: {e}")
 
     def analyze_text(self, text: str, article_id: str = None) -> SentimentResult:
         """
@@ -166,10 +164,10 @@ class EnhancedFinBERT:
             )
 
         try:
-            if self.initialized:
-                result = self._analyze_with_finbert(text, article_id)
-            else:
-                result = self._analyze_with_mock(text, article_id)
+            if not self.initialized:
+                raise RuntimeError("FinBERT model not initialized - call initialize() first")
+            
+            result = self._analyze_with_finbert(text, article_id)
 
             # Cache the result
             if self.enable_caching:
@@ -183,11 +181,10 @@ class EnhancedFinBERT:
             return result
 
         except Exception as e:
-            self.logger.error(f"Error analyzing text: {e}")
+            self.logger.error(f"CRITICAL: Error analyzing text: {e}")
             self.error_count += 1
-
-            # Return fallback result
-            return self._create_fallback_result(text, article_id, time.time() - start_time)
+            # NO fallback - system must fail if FinBERT cannot analyze
+            raise RuntimeError(f"FinBERT analysis failed for text: {e}")
 
     def analyze_batch(self, texts: List[str],
                       article_ids: Optional[List[str]] = None) -> BatchSentimentResult:
@@ -257,22 +254,10 @@ class EnhancedFinBERT:
             )
 
         except Exception as e:
-            self.logger.error(f"Error in batch analysis: {e}")
+            self.logger.error(f"CRITICAL: Error in batch analysis: {e}")
             self.error_count += len(texts)
-
-            # Return fallback results
-            fallback_results = []
-            for text, article_id in zip(texts, article_ids):
-                fallback_results.append(self._create_fallback_result(text, article_id, 0.0))
-
-            return BatchSentimentResult(
-                results=fallback_results,
-                batch_processing_time=time.time() - start_time,
-                success_count=0,
-                error_count=len(texts),
-                average_confidence=0.0,
-                sentiment_distribution={'POSITIVE': 0, 'NEGATIVE': 0, 'NEUTRAL': len(texts)}
-            )
+            # NO fallback - system must fail if FinBERT batch processing fails
+            raise RuntimeError(f"FinBERT batch analysis failed: {e}")
 
     def _analyze_with_finbert(self, text: str, article_id: str) -> SentimentResult:
         """Analyze text using actual FinBERT model"""
@@ -425,87 +410,8 @@ class EnhancedFinBERT:
 
         return results
 
-    def _analyze_with_mock(self, text: str, article_id: str) -> SentimentResult:
-        """Mock sentiment analysis for development/fallback"""
-        import random
-
-        start_time = time.time()
-
-        # Simple keyword-based sentiment for more realistic mock results
-        text_lower = text.lower()
-
-        positive_keywords = ['good', 'great', 'excellent', 'strong', 'up', 'gain', 'profit', 'bull', 'buy',
-                           'growth', 'beat', 'exceeds', 'outperform', 'surge', 'rally', 'positive']
-        negative_keywords = ['bad', 'poor', 'weak', 'down', 'loss', 'bear', 'sell', 'crash', 'decline',
-                           'drop', 'fall', 'disappointing', 'miss', 'concern', 'risk', 'negative']
-
-        positive_count = sum(1 for word in positive_keywords if word in text_lower)
-        negative_count = sum(1 for word in negative_keywords if word in text_lower)
-
-        # Base sentiment on keyword analysis with some randomness
-        if positive_count > negative_count:
-            base_sentiment = 0.3 + random.uniform(0.0, 0.5)
-            classification = 'POSITIVE'
-        elif negative_count > positive_count:
-            base_sentiment = -0.3 - random.uniform(0.0, 0.5)
-            classification = 'NEGATIVE'
-        else:
-            base_sentiment = random.uniform(-0.2, 0.2)
-            classification = 'NEUTRAL'
-
-        # Add some noise but keep realistic
-        sentiment_score = base_sentiment + random.uniform(-0.1, 0.1)
-        sentiment_score = max(-1.0, min(1.0, sentiment_score))
-
-        # Generate realistic confidence based on keyword strength
-        keyword_strength = abs(positive_count - negative_count)
-        base_confidence = 0.5 + (keyword_strength * 0.1)
-        confidence = min(0.95, base_confidence + random.uniform(-0.1, 0.1))
-
-        # Check reliability
-        is_reliable = confidence >= self.confidence_threshold
-
-        # Create mock raw scores that are consistent with classification
-        if classification == 'POSITIVE':
-            positive_raw = 0.5 + abs(sentiment_score) / 2
-            negative_raw = 0.5 - abs(sentiment_score) / 2
-        elif classification == 'NEGATIVE':
-            positive_raw = 0.5 - abs(sentiment_score) / 2
-            negative_raw = 0.5 + abs(sentiment_score) / 2
-        else:
-            positive_raw = 0.4 + random.uniform(-0.1, 0.1)
-            negative_raw = 0.4 + random.uniform(-0.1, 0.1)
-
-        neutral_raw = max(0.05, 1.0 - positive_raw - negative_raw)
-
-        # Normalize to ensure they sum to 1
-        total = positive_raw + negative_raw + neutral_raw
-        positive_raw /= total
-        negative_raw /= total
-        neutral_raw /= total
-
-        raw_scores = {
-            'negative': negative_raw,
-            'neutral': neutral_raw,
-            'positive': positive_raw,
-            'max_score': confidence,
-            'prediction_index': 0 if classification == 'NEGATIVE' else (1 if classification == 'NEUTRAL' else 2)
-        }
-
-        # Simulate realistic processing time
-        processing_time = time.time() - start_time
-
-        return SentimentResult(
-            article_id=article_id,
-            text=text,
-            sentiment_score=sentiment_score,
-            confidence=confidence,
-            classification=classification,
-            raw_scores=raw_scores,
-            processing_time=processing_time,
-            model_version="mock_finbert_v1.0",
-            is_reliable=is_reliable
-        )
+    # REMOVED: Mock implementation completely eliminated per user requirements
+    # NO mock data allowed - system must use real FinBERT or fail
 
     def _clean_text(self, text: str) -> str:
         """Clean and prepare text for analysis"""
@@ -542,19 +448,8 @@ class EnhancedFinBERT:
             'is_reliable': result.is_reliable
         }
 
-    def _create_fallback_result(self, text: str, article_id: str, processing_time: float) -> SentimentResult:
-        """Create neutral fallback result for errors"""
-        return SentimentResult(
-            article_id=article_id,
-            text=text,
-            sentiment_score=0.0,
-            confidence=0.0,
-            classification='NEUTRAL',
-            raw_scores={'negative': 0.33, 'neutral': 0.34, 'positive': 0.33, 'max_score': 0.34, 'prediction_index': 1},
-            processing_time=processing_time,
-            model_version="fallback",
-            is_reliable=False  # Fallback results are never reliable
-        )
+    # REMOVED: Fallback result method completely eliminated per user requirements
+    # NO fallback data allowed - system must use real FinBERT or fail
 
     def get_statistics(self) -> Dict[str, Any]:
         """Get performance and usage statistics"""
