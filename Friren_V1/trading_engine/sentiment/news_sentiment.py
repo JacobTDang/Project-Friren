@@ -8,6 +8,10 @@ from typing import List, Dict, Optional, Any
 import time
 from dataclasses import dataclass, field
 import re
+import warnings
+
+# Suppress PRAW async environment warnings - we use sync PRAW intentionally
+warnings.filterwarnings("ignore", message="It appears that you are using PRAW in an asynchronous environment")
 from dotenv import load_dotenv
 import yfinance as yf
 from bs4 import BeautifulSoup

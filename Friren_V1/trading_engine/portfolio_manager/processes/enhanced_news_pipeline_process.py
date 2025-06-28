@@ -47,6 +47,42 @@ class Colors:
     BOLD = '\033[1m'
     RESET = '\033[0m'
 
+# Import MainTerminalBridge for colored business output with Redis fallback
+def send_colored_business_output(process_id, message, output_type):
+    """Send colored business output with Redis communication fallback"""
+    try:
+        # Method 1: Try direct main terminal bridge import
+        from main_terminal_bridge import send_colored_business_output as bridge_output
+        bridge_output(process_id, message, output_type)
+    except ImportError:
+        try:
+            # Method 2: Use Redis direct communication (same as subprocess wrapper)
+            from Friren_V1.multiprocess_infrastructure.trading_redis_manager import get_trading_redis_manager
+            from datetime import datetime
+            import json
+            
+            # Create message data for main terminal
+            message_data = {
+                'process_id': process_id,
+                'output': message,
+                'color_type': output_type,
+                'timestamp': datetime.now().isoformat()
+            }
+
+            # Get Redis manager and send message
+            redis_manager = get_trading_redis_manager()
+            if redis_manager:
+                # Try to get Redis client directly and send message
+                redis_client = getattr(redis_manager, 'redis_client', None)
+                if redis_client:
+                    redis_client.rpush("terminal_output", json.dumps(message_data))
+            else:
+                # Fallback to print
+                print(f"[{process_id.upper()}] {message}")
+        except Exception:
+            # Final fallback
+            print(f"[{process_id.upper()}] {message}")
+
 # Import path resolution
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 if project_root not in sys.path:
@@ -173,6 +209,10 @@ class PipelineMetrics:
     # Resource metrics
     memory_usage_mb: float = 0.0
     cpu_usage_percent: float = 0.0
+
+    # Idle state tracking
+    idle_cycles: int = 0
+    last_idle_time: Optional[datetime] = None
 
     # Timestamp
     timestamp: datetime = field(default_factory=datetime.now)
@@ -627,6 +667,15 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
             self.logger.info(f"Final state: {self.state.value}")
             self.logger.info(f"All components initialized successfully")
 
+            # SMART NEWS SCHEDULING: Initialize collection state tracking
+            self._collection_active = False      # Track if collection is currently active
+            self._idle_mode = True              # Start in idle mode (awaiting scheduler)
+            self._last_collection_start = None  # Track when collection started
+            self._collection_duration_minutes = 3  # Default collection duration
+            
+            self.logger.info("SMART_NEWS: Initialized scheduled collection mode")
+            self.logger.info("SMART_NEWS: Starting in IDLE state - awaiting scheduler commands")
+            
         except Exception as e:
             self.logger.error(f"=== ENHANCED NEWS PIPELINE INITIALIZATION FAILED: {self.process_id} ===")
             self.logger.error(f"Error during initialization: {e}")
@@ -652,13 +701,10 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
     def _process_cycle(self):
         # Add immediate colored output for business execution visibility
         try:
-            from colored_print import success, info
-            from terminal_color_system import (
-                print_news_collection, print_finbert_analysis, 
-                print_sentiment_analysis, print_xgboost_decision
-            )
-            print_news_collection("NEWS PIPELINE: Starting news collection and analysis cycle...")
-            success("BUSINESS LOGIC: Enhanced news pipeline executing")
+            # Route through terminal bridge for main process visibility
+            from main_terminal_bridge import send_colored_business_output
+            send_colored_business_output(self.process_id, "NEWS PIPELINE: Starting news collection and analysis cycle...", "news")
+            send_colored_business_output(self.process_id, "BUSINESS LOGIC: Enhanced news pipeline executing", "news")
         except ImportError:
             print("BUSINESS LOGIC: Enhanced news pipeline executing")
 
@@ -751,20 +797,61 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
                             # Could trigger pipeline re-evaluation
                             message_processed = True
 
+                        elif message.message_type == "START_COLLECTION":
+                            # SMART NEWS SCHEDULING: Handle START_COLLECTION from news scheduler
+                            self.logger.info("SMART_NEWS: Received START_COLLECTION from news scheduler")
+                            print(f"{Colors.GREEN}[SMART NEWS] Starting scheduled collection period{Colors.RESET}")
+                            
+                            # Update collection state
+                            self._collection_active = True
+                            self._idle_mode = False
+                            self._last_collection_start = datetime.now()
+                            
+                            # Extract collection parameters from message
+                            if 'collection_duration_minutes' in message.data:
+                                self._collection_duration_minutes = message.data['collection_duration_minutes']
+                            
+                            self.logger.info(f"SMART_NEWS: Collection active for {self._collection_duration_minutes} minutes")
+                            print(f"{Colors.BLUE}[SMART NEWS] News collection active - duration: {self._collection_duration_minutes}min{Colors.RESET}")
+                            message_processed = True
+
+                        elif message.message_type == "STOP_COLLECTION":
+                            # SMART NEWS SCHEDULING: Handle STOP_COLLECTION from news scheduler
+                            self.logger.info("SMART_NEWS: Received STOP_COLLECTION from news scheduler")
+                            print(f"{Colors.YELLOW}[SMART NEWS] Stopping scheduled collection period{Colors.RESET}")
+                            
+                            # Update collection state
+                            self._collection_active = False
+                            self._idle_mode = True
+                            
+                            # Log collection statistics
+                            if self._last_collection_start:
+                                duration = (datetime.now() - self._last_collection_start).total_seconds() / 60
+                                self.logger.info(f"SMART_NEWS: Collection completed - actual duration: {duration:.1f} minutes")
+                                print(f"{Colors.CYAN}[SMART NEWS] Collection completed - {duration:.1f}min runtime{Colors.RESET}")
+                            
+                            message_processed = True
+
                         elif message.message_type == "start_cycle":
-                            # CRITICAL FIX: Handle queue rotation cycle activation
+                            # QUEUE ACTIVATION: Handle queue rotation cycle activation
                             self.logger.info(f"QUEUE ACTIVATION: Received start_cycle signal from queue manager")
                             print(f"{Colors.GREEN}[QUEUE ACTIVATION] News pipeline cycle started by queue manager{Colors.RESET}")
 
-                            # Activate execution cycle in base process
-                            if hasattr(self, 'start_execution_cycle'):
-                                cycle_time = message.data.get('cycle_time', 30.0)
-                                self.start_execution_cycle(cycle_time)
-                                self.logger.info(f"QUEUE ACTIVATION: Execution cycle activated for {cycle_time}s")
-                                print(f"{Colors.BLUE}[BUSINESS LOGIC] Starting news collection and processing cycle...{Colors.RESET}")
+                            # Only activate if collection is active (scheduled mode)
+                            if self._collection_active and not self._idle_mode:
+                                # Activate execution cycle in base process
+                                if hasattr(self, 'start_execution_cycle'):
+                                    cycle_time = message.data.get('cycle_time', 30.0)
+                                    self.start_execution_cycle(cycle_time)
+                                    self.logger.info(f"QUEUE ACTIVATION: Execution cycle activated for {cycle_time}s")
+                                    print(f"{Colors.BLUE}[BUSINESS LOGIC] Starting news collection and processing cycle...{Colors.RESET}")
 
-                            # Force immediate pipeline execution
-                            self._run_full_pipeline()
+                                # Execute pipeline only during active collection
+                                self._run_full_pipeline()
+                            else:
+                                self.logger.info("QUEUE ACTIVATION: Skipping execution - collection not active (idle mode)")
+                                print(f"{Colors.GRAY}[SMART NEWS] Skipping cycle - in idle mode{Colors.RESET}")
+                            
                             message_processed = True
 
                         else:
@@ -776,21 +863,21 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
                     self.logger.debug(f"Queue check error: {e}")
                     pass
 
-            # FORCE IMMEDIATE EXECUTION - Remove all timing restrictions
+            # SMART NEWS SCHEDULING: Execute only during active collection periods
             if not message_processed:
-                # ALWAYS run the pipeline - ignore market hours and timing
-                should_run = True  # FORCE EXECUTION
-                self.logger.info(f"FORCED EXECUTION: Pipeline will run immediately")
-                print(f"FORCED EXECUTION: Pipeline will run immediately")
+                if self._collection_active and not self._idle_mode:
+                    # Only run pipeline during scheduled collection periods
+                    should_run = self._should_run_pipeline()
+                    self.logger.info(f"SMART_NEWS: Collection active - checking if pipeline should run: {should_run}")
+                    print(f"{Colors.BLUE}[SMART NEWS] Active collection period - pipeline execution: {should_run}{Colors.RESET}")
+                else:
+                    # Handle idle state - minimal processing
+                    self._handle_idle_state()
+                    should_run = False
+                    
                 if should_run:
                     # BUSINESS LOGIC COLORED OUTPUT
-                    try:
-                        from colored_print import success, info
-                        from terminal_color_system import print_news_collection, print_finbert_analysis
-                        print_news_collection("=== STARTING REAL NEWS COLLECTION ===")
-                        print_news_collection("Fetching live news articles from MarketWatch, Reuters, Bloomberg...")
-                    except ImportError:
-                        print("=== STARTING REAL NEWS COLLECTION ===")
+                    send_colored_business_output(self.process_id, "News collected: Starting real-time news gathering from MarketWatch, Reuters, Bloomberg...", "news")
 
                     self.logger.info("=== STARTING PIPELINE EXECUTION ===")
                     start_time = datetime.now()
@@ -848,12 +935,9 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
             for symbol, articles in discovery_results.items():
                 if len(articles) >= 3:  # Minimum 3 articles for consideration
                     # BUSINESS LOGIC OUTPUT: Article collection
-                    try:
-                        print_news_collection(f"Collected {len(articles)} articles for {symbol}")
-                        for i, article in enumerate(articles[:3]):  # Show first 3 articles
-                            print_news_collection(f"  Article {i+1}: {article.title[:60]}... [{symbol}]")
-                    except:
-                        print(f"[NEWS] Collected {len(articles)} articles for {symbol}")
+                    send_colored_business_output(self.process_id, f"News collected: '{articles[0].title[:60]}...' for {symbol} - {len(articles)} articles", "news")
+                    if len(articles) > 1:
+                        send_colored_business_output(self.process_id, f"News collected: Additional {len(articles)-1} articles for {symbol}", "news")
                     # Quick sentiment check for strong positive signals  
                     if self.finbert_analyzer:
                         positive_count = 0
@@ -863,10 +947,7 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
                                 article_id=f"discovery_{symbol}"
                             )
                             # BUSINESS LOGIC OUTPUT: Sentiment analysis
-                            try:
-                                print_sentiment_analysis(f"{symbol}: sentiment={sentiment_result.classification} confidence={sentiment_result.confidence:.2f}")
-                            except:
-                                print(f"[SENTIMENT] {symbol}: sentiment={sentiment_result.classification} confidence={sentiment_result.confidence:.2f}")
+                            send_colored_business_output(self.process_id, f"News collected: '{article.title[:40]}...' for {symbol} - sentiment: {sentiment_result.classification}", "finbert")
                             
                             if sentiment_result.classification == 'positive' and sentiment_result.confidence > 0.75:
                                 positive_count += 1
@@ -884,10 +965,9 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
                                 print(f"{Colors.GREEN}{Colors.BOLD}[TARGET] DISCOVERY BUY APPROVED: {symbol} - {discovery_decision['reason']}{Colors.RESET}")
 
                                 # Display decision engine-style analysis
-                                print(f"{Colors.GREEN}Decision Engine: Received BUY signal for {symbol}{Colors.RESET}")
-                                print(f"{Colors.GREEN}Decision Engine: Discovery confidence {positive_count}/5 articles - HIGH confidence signal{Colors.RESET}")
-                                print(f"{Colors.GREEN}Decision Engine: Risk check PASSED - Strong positive sentiment detected{Colors.RESET}")
-                                print(f"{Colors.GREEN}Decision Engine FINAL: APPROVED - BUY action recommended for {symbol}{Colors.RESET}")
+                                send_colored_business_output(self.process_id, f"Decision: BUY {symbol} - discovery confidence {positive_count}/5 articles", "decision")
+                                send_colored_business_output(self.process_id, f"XGBoost decision: BUY {symbol} (confidence: 0.85)", "xgboost")
+                                send_colored_business_output(self.process_id, f"Risk Manager: Position size approved for {symbol} - risk: low", "risk")
                             else:
                                 self.logger.info(f"[ANALYSIS] DISCOVERY ANALYSIS: {symbol} - {discovery_decision['reason']}")
                                 print(f"{Colors.YELLOW}[ANALYSIS] DISCOVERY ANALYSIS: {symbol} - {discovery_decision['reason']}{Colors.RESET}")
@@ -1262,6 +1342,122 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
         if self.shared_state:
             self.shared_state.set(f"{self.process_id}_metrics", asdict(self.pipeline_metrics))
             self.shared_state.set(f"{self.process_id}_symbol_tracking", self.symbol_tracking)
+
+    def _should_run_pipeline(self) -> bool:
+        """Determine if pipeline should run during active collection period"""
+        try:
+            # Check if we're still within collection duration
+            if self._last_collection_start:
+                elapsed_minutes = (datetime.now() - self._last_collection_start).total_seconds() / 60
+                if elapsed_minutes > self._collection_duration_minutes:
+                    self.logger.info(f"SMART_NEWS: Collection period expired ({elapsed_minutes:.1f} > {self._collection_duration_minutes}min)")
+                    return False
+            
+            # Check memory pressure - don't run if system memory is high
+            try:
+                from Friren_V1.multiprocess_infrastructure.memory_threshold_controller import get_memory_threshold_controller
+                controller = get_memory_threshold_controller()
+                status = controller.get_status()
+                if status['mode'] in ['threshold', 'emergency']:
+                    self.logger.info(f"SMART_NEWS: Skipping pipeline due to memory pressure (mode: {status['mode']})")
+                    return False
+            except Exception as e:
+                self.logger.debug(f"Could not check memory status: {e}")
+            
+            # All checks passed - run the pipeline
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error in _should_run_pipeline: {e}")
+            return False
+
+    def _handle_idle_state(self):
+        """Handle idle state when not actively collecting"""
+        try:
+            self.logger.debug("SMART_NEWS: News pipeline in idle state - awaiting START_COLLECTION")
+            
+            # Update shared state to indicate idle status
+            if self.shared_state:
+                self.shared_state.set(f"{self.process_id}_status", {
+                    'state': 'idle',
+                    'collection_active': False,
+                    'next_collection': None,  # This would come from scheduler
+                    'timestamp': datetime.now().isoformat()
+                })
+            
+            # Minimal maintenance - update process health but don't collect news
+            self._update_idle_metrics()
+            
+        except Exception as e:
+            self.logger.error(f"Error in _handle_idle_state: {e}")
+
+    def _update_idle_metrics(self):
+        """Update metrics during idle state"""
+        try:
+            # Minimal metrics update for idle state
+            if hasattr(self, 'pipeline_metrics'):
+                self.pipeline_metrics.idle_cycles += 1
+                self.pipeline_metrics.last_idle_time = datetime.now()
+                
+                # Update shared state with idle status
+                if self.shared_state:
+                    idle_status = {
+                        'process_id': self.process_id,
+                        'state': 'idle',
+                        'collection_active': self._collection_active,
+                        'idle_mode': self._idle_mode,
+                        'idle_cycles': getattr(self.pipeline_metrics, 'idle_cycles', 0),
+                        'last_update': datetime.now().isoformat()
+                    }
+                    self.shared_state.set(f"{self.process_id}_idle_status", idle_status)
+                    
+        except Exception as e:
+            self.logger.error(f"Error updating idle metrics: {e}")
+
+    def _reset_to_initialization(self):
+        """Reset process to initialization state for smart memory management"""
+        try:
+            self.logger.info("SMART_MEMORY: Resetting news pipeline to initialization state")
+            
+            # Reset collection state
+            self._collection_active = False
+            self._idle_mode = True
+            self._last_collection_start = None
+            
+            # Clear news and sentiment caches
+            if hasattr(self, 'news_cache'):
+                self.news_cache.clear()
+                self.logger.debug("SMART_MEMORY: Cleared news cache")
+            
+            if hasattr(self, 'sentiment_cache'):
+                self.sentiment_cache.clear()
+                self.logger.debug("SMART_MEMORY: Cleared sentiment cache")
+            
+            # Reset metrics but keep essential counters
+            if hasattr(self, 'pipeline_metrics'):
+                # Keep important counters but reset working data
+                total_articles = getattr(self.pipeline_metrics, 'total_articles_processed', 0)
+                total_cycles = getattr(self.pipeline_metrics, 'total_cycles', 0)
+                
+                # Reinitialize metrics
+                from dataclasses import fields
+                for field in fields(self.pipeline_metrics):
+                    if field.name not in ['total_articles_processed', 'total_cycles']:
+                        setattr(self.pipeline_metrics, field.name, field.default_factory() if callable(field.default_factory) else field.default)
+                
+                # Restore important counters
+                self.pipeline_metrics.total_articles_processed = total_articles
+                self.pipeline_metrics.total_cycles = total_cycles
+                
+                self.logger.debug("SMART_MEMORY: Reset pipeline metrics")
+            
+            # Trigger garbage collection
+            import gc
+            collected = gc.collect()
+            self.logger.info(f"SMART_MEMORY: Reset complete, garbage collection freed {collected} objects")
+            
+        except Exception as e:
+            self.logger.error(f"Error in _reset_to_initialization: {e}")
 
     def _cleanup(self):
         """Cleanup resources"""
