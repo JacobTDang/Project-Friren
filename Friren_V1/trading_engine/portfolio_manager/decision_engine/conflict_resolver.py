@@ -618,16 +618,16 @@ class ConflictResolver:
 
             feature_array = feature_array.reshape(1, -1)
 
-            # Make prediction
+            # Make prediction using sklearn interface
             if hasattr(self.xgb_model, 'predict_proba'):
-                # Classification model
+                # Classification model - use probability predictions
                 probabilities = self.xgb_model.predict_proba(feature_array)[0]
-                # Assume classes are [sell, hold, buy] or similar
-                predicted_direction = (probabilities[-1] - probabilities[0])  # buy - sell
+                # Assume classes are [sell, hold, buy] (0, 1, 2)
+                predicted_direction = (probabilities[2] - probabilities[0])  # buy - sell
                 ml_confidence = np.max(probabilities)
                 prediction_probability = dict(zip(['sell', 'hold', 'buy'], probabilities))
             else:
-                # Regression model
+                # Regression model or fallback
                 prediction = self.xgb_model.predict(feature_array)[0]
                 predicted_direction = np.clip(prediction, -1.0, 1.0)
                 ml_confidence = 1.0 - abs(prediction - np.round(prediction))  # Confidence based on certainty
@@ -657,6 +657,24 @@ class ConflictResolver:
                 except Exception as e:
                     self.logger.warning(f"SHAP calculation failed: {e}")
 
+            # Convert direction to action for logging
+            if predicted_direction > 0.1:
+                action = "BUY"
+            elif predicted_direction < -0.1:
+                action = "SELL"
+            else:
+                action = "HOLD"
+            
+            # Log XGBoost decision (required business logic output)
+            self.logger.info(f"XGBoost decision: {action} {symbol} (confidence: {ml_confidence:.2f})")
+            
+            # BUSINESS LOGIC OUTPUT: XGBoost colored terminal output
+            try:
+                from terminal_color_system import print_xgboost_decision
+                print_xgboost_decision(f"{action} {symbol} (confidence: {ml_confidence:.2f})")
+            except:
+                print(f"[XGBOOST] {action} {symbol} (confidence: {ml_confidence:.2f})")
+            
             return MLDecision(
                 predicted_direction=predicted_direction,
                 ml_confidence=ml_confidence,
@@ -717,8 +735,16 @@ class ConflictResolver:
     def _load_ml_model(self, model_path: str):
         """Load XGBoost model and setup SHAP explainer"""
         try:
-            self.xgb_model = xgb.Booster()
-            self.xgb_model.load_model(model_path)
+            # Try loading as sklearn XGBoost model first (for demo model)
+            try:
+                import joblib
+                self.xgb_model = joblib.load(model_path.replace('.json', '.pkl'))
+                self.logger.info("Loaded sklearn XGBoost model")
+            except:
+                # Fallback to native XGBoost format
+                self.xgb_model = xgb.Booster()
+                self.xgb_model.load_model(model_path)
+                self.logger.info("Loaded native XGBoost model")
 
             # Load feature names if available
             feature_names_path = Path(model_path).parent / "feature_names.pkl"

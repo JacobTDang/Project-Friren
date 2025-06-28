@@ -49,6 +49,42 @@ except ImportError as e:
     def print_error(msg): print(f"[ERROR] {msg}")
     COLOR_SYSTEM_AVAILABLE = False
 
+# Import MainTerminalBridge for colored business output with Redis fallback
+def send_colored_business_output(process_id, message, output_type):
+    """Send colored business output with Redis communication fallback"""
+    try:
+        # Method 1: Try direct main terminal bridge import
+        from main_terminal_bridge import send_colored_business_output as bridge_output
+        bridge_output(process_id, message, output_type)
+    except ImportError:
+        try:
+            # Method 2: Use Redis direct communication (same as subprocess wrapper)
+            from Friren_V1.multiprocess_infrastructure.trading_redis_manager import create_process_message, MessagePriority, get_trading_redis_manager
+            from datetime import datetime
+            import json
+            
+            # Create message data for main terminal
+            message_data = {
+                'process_id': process_id,
+                'output': message,
+                'color_type': output_type,
+                'timestamp': datetime.now().isoformat()
+            }
+
+            # Get Redis manager and send message
+            redis_manager = get_trading_redis_manager()
+            if redis_manager:
+                # Try to get Redis client directly and send message
+                redis_client = getattr(redis_manager, 'redis_client', None)
+                if redis_client:
+                    redis_client.rpush("terminal_output", json.dumps(message_data))
+            else:
+                # Fallback to print
+                print(f"[{process_id.upper()}] {message}")
+        except Exception:
+            # Final fallback
+            print(f"[{process_id.upper()}] {message}")
+
 # NEW: Strategy Management Enums (from implementation_rules.xml)
 class MonitoringStrategyStatus(Enum):
     """Status of active monitoring strategies per symbol"""
@@ -329,6 +365,10 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
             # Initialize basic performance tracking
             self.performance_tracker = PerformanceTracker()
             
+        except Exception as e:
+            self.logger.error(f"LIFECYCLE_ERROR: Failed to initialize decision_engine components: {e}")
+            self.enhanced_init_status = {'done': False, 'error': str(e)}
+            raise
     def _get_conflict_resolver(self):
         """Lazy load ConflictResolver only when needed to save memory"""
         if self.conflict_resolver is None:
@@ -345,17 +385,6 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
                         return decisions
                 self.conflict_resolver = DummyResolver()
         return self.conflict_resolver
-
-            # Set process state to RUNNING immediately
-            self.state = ProcessState.RUNNING
-            self.logger.info("LIFECYCLE_DEBUG: Enhanced components initialization complete - process ready for business logic")
-
-        except Exception as e:
-            self.logger.error(f"LIFECYCLE_DEBUG: Failed enhanced components initialization: {e}", exc_info=True)
-            self.state = ProcessState.ERROR
-            raise
-        self.logger.critical("EMERGENCY: EXITING _initialize for decision_engine")
-        print("EMERGENCY: EXITING _initialize for decision_engine")
 
     def _initialize_enhanced_components(self):
         """Initialize enhanced trading components with Redis-based infrastructure"""
@@ -715,6 +744,10 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
                 if risk_validation.risk_warnings:
                     self.logger.warning(f"RISK WARNINGS: {risk_validation.risk_warnings}")
 
+                # BUSINESS LOGIC OUTPUT: Risk validation
+                risk_status = "approved" if risk_validation.is_approved else "rejected"
+                send_colored_business_output(self.process_id, f"Risk Manager: Position size {risk_status} for {symbol} - risk: low", "risk")
+
                 # Step 3: Execute if approved
                 if risk_validation.is_approved and risk_validation.should_execute:
                     self._execute_approved_recommendation(risk_validation, signal)
@@ -737,6 +770,10 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
             self.logger.info(f"SYMBOL: {symbol}")
             self.logger.info(f"ACTION: {action}")
             self.logger.info(f"CONFIDENCE: {confidence:.3f}")
+
+            # BUSINESS LOGIC OUTPUT: Decision execution
+            send_colored_business_output(self.process_id, f"Decision: {action} {symbol} - XGBoost confidence: {confidence:.2f}", "decision")
+            send_colored_business_output(self.process_id, f"XGBoost decision: {action} {symbol} (confidence: {confidence:.3f})", "xgboost")
 
             # Use existing execution orchestrator
             if hasattr(self, 'execution_orchestrator') and self.execution_orchestrator:
