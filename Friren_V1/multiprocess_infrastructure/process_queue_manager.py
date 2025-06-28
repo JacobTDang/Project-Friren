@@ -12,7 +12,7 @@ import threading
 import logging
 from typing import List, Dict, Optional, Any
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 
@@ -39,7 +39,7 @@ class QueuedProcess:
     process_id: str
     config: ProcessConfig
     status: ProcessStatus
-    priority: ProcessPriority = ProcessPriority.NORMAL
+    priority: ProcessPriority = field(default_factory=lambda: ProcessPriority.NORMAL)
     last_execution_time: Optional[datetime] = None
     execution_count: int = 0
     total_execution_time: float = 0.0
@@ -59,7 +59,7 @@ class ProcessQueueManager:
     """
     
     def __init__(self, redis_process_manager: RedisProcessManager, cycle_time_seconds: float = 30.0, 
-                 max_concurrent_processes: int = 4, target_memory_mb: int = 900):
+                 max_concurrent_processes: int = 3, target_memory_mb: int = 750):
         """
         Initialize the process queue manager with memory optimization.
         
@@ -193,6 +193,9 @@ class ProcessQueueManager:
         self.start_time = datetime.now()
         self._stop_event.clear()
         self._pause_event.clear()
+        
+        # Enable queue mode for all processes in rotation
+        self._enable_queue_mode_for_all_processes()
         
         # Start the queue rotation thread
         self._queue_thread = threading.Thread(target=self._queue_rotation_loop, daemon=True)
@@ -445,6 +448,30 @@ class ProcessQueueManager:
             'process_statistics': process_stats
         }
     
+    def _enable_queue_mode_for_all_processes(self):
+        """Enable queue mode for all processes in the rotation queue"""
+        self.logger.info("Enabling queue mode for all processes in rotation")
+        
+        # Enable queue mode for regular processes
+        for queued_process in self.process_queue:
+            self._enable_queue_mode_for_process(queued_process.process_id)
+        
+        # Enable queue mode for high priority processes
+        for process_id in self.high_priority_processes:
+            self._enable_queue_mode_for_process(process_id)
+        
+        # Enable queue mode for always running processes
+        for process_id in self.always_running_processes:
+            self._enable_queue_mode_for_process(process_id)
+    
+    def _enable_queue_mode_for_process(self, process_id: str):
+        """Enable queue mode for a specific process"""
+        try:
+            self.redis_process_manager.enable_queue_mode_for_process(process_id)
+            self.logger.debug(f"Enabled queue mode for process {process_id}")
+        except Exception as e:
+            self.logger.error(f"Error enabling queue mode for {process_id}: {e}")
+    
     def set_cycle_time(self, cycle_time_seconds: float):
         """Update the cycle time for process execution"""
         self.cycle_time_seconds = cycle_time_seconds
@@ -475,12 +502,38 @@ class ProcessQueueManager:
                     break  # Only start one high priority process per cycle
     
     def _can_start_more_processes(self) -> bool:
-        """Check if we can start more processes based on concurrent limit"""
+        """Check if we can start more processes based on concurrent limit and TOTAL memory health"""
         running_count = len(self.current_running_processes)
-        can_start = running_count < self.max_concurrent_processes
+        concurrent_limit_ok = running_count < self.max_concurrent_processes
         
-        if not can_start:
+        # CRITICAL FIX: Check TOTAL system memory before allowing new processes
+        memory_healthy = True
+        try:
+            import psutil
+            main_process = psutil.Process()
+            total_memory_mb = main_process.memory_info().rss / 1024 / 1024
+            
+            # Add memory from all child processes
+            for child in main_process.children(recursive=True):
+                try:
+                    total_memory_mb += child.memory_info().rss / 1024 / 1024
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+            
+            # Block new processes if we're approaching 90% of target memory
+            memory_threshold = self.target_memory_mb * 0.9
+            if total_memory_mb > memory_threshold:
+                memory_healthy = False
+                self.logger.warning(f"Cannot start more processes: Total system memory {total_memory_mb:.1f}MB > {memory_threshold:.1f}MB (90% of {self.target_memory_mb}MB)")
+        except Exception as e:
+            self.logger.debug(f"Could not check system memory: {e}")
+        
+        can_start = concurrent_limit_ok and memory_healthy
+        
+        if not concurrent_limit_ok:
             self.logger.debug(f"Cannot start more processes: {running_count}/{self.max_concurrent_processes} running")
+        elif not memory_healthy:
+            self.logger.info(f"Cannot start more processes: High memory usage in system")
         
         return can_start
     
@@ -615,10 +668,27 @@ class ProcessQueueManager:
         """Monitor memory usage and stop processes if needed"""
         try:
             import psutil
-            current_memory_mb = psutil.Process().memory_info().rss / 1024 / 1024
             
-            if current_memory_mb > self.target_memory_mb:
-                self.logger.warning(f"Memory usage high: {current_memory_mb:.1f}MB > {self.target_memory_mb}MB")
+            # CRITICAL FIX: Check TOTAL system memory including all subprocesses
+            main_process = psutil.Process()
+            total_memory_mb = main_process.memory_info().rss / 1024 / 1024
+            
+            # Add memory from all child processes (subprocesses)
+            try:
+                for child in main_process.children(recursive=True):
+                    try:
+                        child_memory = child.memory_info().rss / 1024 / 1024
+                        total_memory_mb += child_memory
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        continue  # Child may have terminated
+            except Exception as e:
+                self.logger.debug(f"Error getting child processes memory: {e}")
+            
+            # Log total system memory usage
+            self.logger.info(f"TOTAL SYSTEM MEMORY: {total_memory_mb:.1f}MB (target: {self.target_memory_mb}MB)")
+            
+            if total_memory_mb > self.target_memory_mb:
+                self.logger.warning(f"Memory usage high: {total_memory_mb:.1f}MB > {self.target_memory_mb}MB")
                 
                 # Stop lowest priority running processes first
                 normal_running = [p for p in self.current_running_processes.values() 

@@ -57,8 +57,10 @@ class TradingRedisManager:
             port=port,
             db=db,
             decode_responses=True,
-            socket_connect_timeout=5,
-            socket_timeout=5
+            socket_connect_timeout=10,
+            socket_timeout=10,
+            retry_on_timeout=True,
+            health_check_interval=30
         )
 
         # Test connection
@@ -241,8 +243,12 @@ class TradingRedisManager:
             else:
                 source_queue = self.PRIORITY_QUEUE
 
-            # Blocking pop with timeout
-            result = self.redis_client.brpop(source_queue, timeout=timeout)
+            # Blocking pop with timeout - handle timeouts gracefully
+            try:
+                result = self.redis_client.brpop(source_queue, timeout=timeout)
+            except redis.TimeoutError:
+                # This is normal when no messages are available
+                return None
 
             if not result:
                 return None
@@ -440,25 +446,31 @@ class TradingRedisManager:
         """Redis hash set operation (compatibility method)"""
         try:
             if field and value:
-                # Ensure value is string serializable
+                # Ensure value is string serializable - handle all types including bool
                 if isinstance(value, (dict, list)):
                     value = json.dumps(value, default=str)
+                elif isinstance(value, bool):
+                    value = str(value).lower()  # Convert True/False to 'true'/'false'
                 return self.redis_client.hset(key, field, str(value))
             elif mapping:
-                # Serialize dict/list values to JSON strings
+                # Serialize dict/list/bool values to JSON strings
                 serialized_mapping = {}
                 for k, v in mapping.items():
                     if isinstance(v, (dict, list)):
                         serialized_mapping[k] = json.dumps(v, default=str)
+                    elif isinstance(v, bool):
+                        serialized_mapping[k] = str(v).lower()  # Convert bool to string
                     else:
                         serialized_mapping[k] = str(v)
                 return self.redis_client.hset(key, mapping=serialized_mapping)
             else:
-                # Serialize kwargs values
+                # Serialize kwargs values including bool
                 serialized_kwargs = {}
                 for k, v in kwargs.items():
                     if isinstance(v, (dict, list)):
                         serialized_kwargs[k] = json.dumps(v, default=str)
+                    elif isinstance(v, bool):
+                        serialized_kwargs[k] = str(v).lower()  # Convert bool to string
                     else:
                         serialized_kwargs[k] = str(v)
                 return self.redis_client.hset(key, mapping=serialized_kwargs)
@@ -511,7 +523,8 @@ class TradingRedisManager:
             health_data['last_update'] = datetime.now().isoformat()
             health_data['process_id'] = process_id
 
-            self.redis_client.hset(health_key, mapping=health_data)
+            # Use wrapper method to handle boolean values properly
+            self.hset(health_key, mapping=health_data)
 
             # Set expiration for health data (5 minutes)
             self.redis_client.expire(health_key, 300)

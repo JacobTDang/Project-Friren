@@ -96,7 +96,7 @@ class MemoryMonitor:
 
     def __init__(self,
                  process_id: str,
-                 memory_limit_mb: float = 2048,  # 2GB default limit
+                 memory_limit_mb: float = 200,   # 200MB per process (1GB total / 5 processes)
                  check_interval: int = 30,       # Check every 30 seconds
                  history_size: int = 100,        # Keep 100 snapshots
                  cleanup_threshold: float = 0.85): # Cleanup at 85% of limit
@@ -188,11 +188,11 @@ class MemoryMonitor:
         self._is_monitoring = False
 
         if self._monitor_thread and self._monitor_thread.is_alive():
-            self._monitor_thread.join(timeout=15)  # Increased from 5 to 15 seconds
+            self._monitor_thread.join(timeout=60)  # Increased to 60 seconds for proper cleanup
             
             # Force thread termination if it doesn't stop gracefully
             if self._monitor_thread.is_alive():
-                self.logger.warning(f"Memory monitor thread for {self.process_id} did not stop gracefully")
+                self.logger.warning(f"Memory monitor thread for {self.process_id} did not stop gracefully after 60s")
                 # Note: Python threads cannot be force-terminated, but we can flag this for investigation
 
         self.logger.info(f"Memory monitoring stopped for {self.process_id}")
@@ -241,12 +241,37 @@ class MemoryMonitor:
                 try:
                     memory_full = self.process.memory_full_info()
                     rss_mb = memory_full.rss / 1024 / 1024
+                    
+                    # CRITICAL FIX: For main process, include ALL child processes
+                    if self.process_id == "main_process":
+                        try:
+                            for child in self.process.children(recursive=True):
+                                try:
+                                    child_memory = child.memory_info().rss / 1024 / 1024
+                                    rss_mb += child_memory
+                                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                                    continue
+                        except Exception as e:
+                            self.logger.debug(f"Could not get child process memory: {e}")
+                    
                     vms_mb = memory_full.vms / 1024 / 1024
                     shared_mb = getattr(memory_full, 'shared', 0) / 1024 / 1024
                     text_mb = getattr(memory_full, 'text', 0) / 1024 / 1024
                     data_mb = getattr(memory_full, 'data', 0) / 1024 / 1024
                 except:
                     rss_mb = memory_info.rss / 1024 / 1024
+                    
+                    # CRITICAL FIX: Fallback also needs child process memory for main process
+                    if self.process_id == "main_process":
+                        try:
+                            for child in self.process.children(recursive=True):
+                                try:
+                                    child_memory = child.memory_info().rss / 1024 / 1024
+                                    rss_mb += child_memory
+                                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                                    continue
+                        except Exception as e:
+                            self.logger.debug(f"Could not get child process memory: {e}")
                     vms_mb = memory_info.vms / 1024 / 1024
                     shared_mb = text_mb = data_mb = 0
 
@@ -644,7 +669,13 @@ class MemoryMonitor:
                 # Trigger leak-specific callbacks
                 for callback in self.alert_callbacks:
                     try:
-                        callback(None, stats, MemoryAlert.HIGH)
+                        # DEFENSIVE FIX: Create a dummy snapshot to prevent callback errors
+                        dummy_snapshot = type('MemorySnapshot', (), {
+                            'memory_mb': getattr(stats, 'current_memory', 0.0),
+                            'timestamp': datetime.now(),
+                            'process_id': self.process_id
+                        })()
+                        callback(dummy_snapshot, stats, MemoryAlert.HIGH)
                     except Exception as e:
                         self.logger.error(f"Leak callback failed: {e}")
         except Exception as e:
@@ -712,7 +743,7 @@ def memory_tracked(monitor: MemoryMonitor,
 _global_monitors: Dict[str, MemoryMonitor] = {}
 
 def get_memory_monitor(process_id: str,
-                      memory_limit_mb: float = 2048,
+                      memory_limit_mb: float = 250,
                       auto_start: bool = True) -> MemoryMonitor:
     """Get or create a memory monitor for a process"""
     if process_id not in _global_monitors:

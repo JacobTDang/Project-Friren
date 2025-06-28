@@ -103,12 +103,12 @@ class RedisProcessManager:
                 redis_process_manager=self, 
                 cycle_time_seconds=cycle_time_seconds,
                 max_concurrent_processes=max_processes,
-                target_memory_mb=800  # Target 800MB total memory usage (more aggressive)
+                target_memory_mb=1000  # Target 1GB total memory usage for all processes
             )
             self.logger.info(f"Enhanced queue rotation enabled:")
             self.logger.info(f"  - Max concurrent: {max_processes} processes")
             self.logger.info(f"  - Cycle time: {cycle_time_seconds}s")
-            self.logger.info(f"  - Target memory: 800MB")
+            self.logger.info(f"  - Target memory: 1000MB")
 
         # Control flags
         self._shutdown_event = threading.Event()

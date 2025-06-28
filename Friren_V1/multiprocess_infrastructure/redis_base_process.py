@@ -38,12 +38,15 @@ from Friren_V1.multiprocess_infrastructure.memory_monitor import (
 )
 
 class ProcessState(Enum):
-    """Process lifecycle states"""
+    """Enhanced process lifecycle states for smart memory management"""
     INITIALIZING = "initializing"
     RUNNING = "running"
-    PAUSED = "paused"
+    PAUSED = "paused"           # Waiting for memory/turn (minimal resources)
+    IDLE = "idle"               # Completed work, minimal memory footprint
+    RESETTING = "resetting"     # Clearing memory to init state
     STOPPING = "stopping"
     STOPPED = "stopped"
+    KILLED = "killed"           # Terminated, ready for cleanup
     ERROR = "error"
 
 @dataclass
@@ -263,6 +266,140 @@ class RedisBaseProcess(ABC):
         except Exception as e:
             self.logger.error(f"Error during emergency shutdown: {e}")
 
+    # SMART MEMORY MANAGEMENT METHODS
+    def _handle_pause_request(self, message: ProcessMessage):
+        """Handle request to pause process for memory management"""
+        try:
+            reason = message.data.get('reason', 'unknown')
+            total_memory = message.data.get('total_memory_mb', 0)
+            
+            self.logger.info(f"SMART_MEMORY: Pausing process due to {reason} (system memory: {total_memory:.1f}MB)")
+            
+            # Set state to paused
+            self.state = ProcessState.PAUSED
+            
+            # If this process has queue mode, pause cycles
+            if self.queue_mode:
+                self._cycle_pause.set()
+                self._cycle_active.clear()
+            
+            # Perform memory cleanup
+            self._emergency_memory_cleanup()
+            
+            # Update health with paused status
+            self._update_health()
+            
+            # Send acknowledgment
+            ack_message = create_process_message(
+                sender=self.process_id,
+                recipient=message.sender,
+                message_type='PROCESS_PAUSED',
+                data={
+                    'process_id': self.process_id,
+                    'reason': reason,
+                    'memory_freed_mb': 0,  # TODO: Calculate actual memory freed
+                    'timestamp': datetime.now().isoformat()
+                },
+                priority=MessagePriority.HIGH
+            )
+            self.send_message(ack_message)
+            
+        except Exception as e:
+            self.logger.error(f"Error handling pause request: {e}")
+    
+    def _handle_resume_request(self, message: ProcessMessage):
+        """Handle request to resume process after memory management"""
+        try:
+            reason = message.data.get('reason', 'unknown')
+            total_memory = message.data.get('total_memory_mb', 0)
+            
+            self.logger.info(f"SMART_MEMORY: Resuming process due to {reason} (system memory: {total_memory:.1f}MB)")
+            
+            # Set state to running
+            self.state = ProcessState.RUNNING
+            
+            # If this process has queue mode, resume cycles
+            if self.queue_mode:
+                self._cycle_pause.clear()
+                self._cycle_active.set()
+            
+            # Update health with running status
+            self._update_health()
+            
+            # Send acknowledgment
+            ack_message = create_process_message(
+                sender=self.process_id,
+                recipient=message.sender,
+                message_type='PROCESS_RESUMED',
+                data={
+                    'process_id': self.process_id,
+                    'reason': reason,
+                    'timestamp': datetime.now().isoformat()
+                },
+                priority=MessagePriority.HIGH
+            )
+            self.send_message(ack_message)
+            
+        except Exception as e:
+            self.logger.error(f"Error handling resume request: {e}")
+    
+    def _handle_reset_request(self, message: ProcessMessage):
+        """Handle request to reset process to initialization state"""
+        try:
+            self.logger.info("SMART_MEMORY: Resetting process to initialization state")
+            
+            # Set state to resetting
+            self.state = ProcessState.RESETTING
+            
+            # Call the reset method (to be implemented by subclasses)
+            if hasattr(self, '_reset_to_initialization'):
+                self._reset_to_initialization()
+            else:
+                self.logger.warning("Process does not implement _reset_to_initialization method")
+            
+            # Perform aggressive memory cleanup
+            self._emergency_memory_cleanup()
+            
+            # Set state to idle
+            self.state = ProcessState.IDLE
+            self._update_health()
+            
+            # Send acknowledgment
+            ack_message = create_process_message(
+                sender=self.process_id,
+                recipient=message.sender,
+                message_type='PROCESS_RESET',
+                data={
+                    'process_id': self.process_id,
+                    'timestamp': datetime.now().isoformat()
+                },
+                priority=MessagePriority.HIGH
+            )
+            self.send_message(ack_message)
+            
+        except Exception as e:
+            self.logger.error(f"Error handling reset request: {e}")
+    
+    def _emergency_memory_cleanup(self):
+        """Perform emergency memory cleanup"""
+        try:
+            import gc
+            
+            # Force garbage collection
+            collected = gc.collect()
+            self.logger.debug(f"Garbage collection freed {collected} objects")
+            
+            # Clear any caches if they exist
+            if hasattr(self, '_clear_caches'):
+                self._clear_caches()
+            
+            # Additional cleanup for subclasses
+            if hasattr(self, '_emergency_cleanup'):
+                self._emergency_cleanup()
+                
+        except Exception as e:
+            self.logger.error(f"Error during emergency memory cleanup: {e}")
+
     def start(self):
         """Start the process"""
         try:
@@ -365,8 +502,16 @@ class RedisBaseProcess(ABC):
                 memory_mb = 0.0
                 cpu_percent = 0.0
 
+            # Enhanced status for smart memory management
+            if self.state in [ProcessState.RUNNING, ProcessState.PAUSED, ProcessState.IDLE]:
+                status = 'healthy'
+            elif self.state in [ProcessState.RESETTING]:
+                status = 'resetting'
+            else:
+                status = 'unhealthy'
+
             health_data = {
-                'status': 'healthy' if self.state == ProcessState.RUNNING else 'unhealthy',
+                'status': status,
                 'state': self.state.value,
                 'last_heartbeat': datetime.now().isoformat(),
                 'error_count': self.error_count,
@@ -375,7 +520,9 @@ class RedisBaseProcess(ABC):
                 'memory_usage_mb': memory_mb,
                 'cpu_percent': cpu_percent,
                 'messages_processed': self.messages_processed,
-                'last_activity': self.last_activity.isoformat() if self.last_activity else None
+                'last_activity': self.last_activity.isoformat() if self.last_activity else None,
+                'can_be_paused': True,  # All processes support smart memory management
+                'memory_management_enabled': True
             }
 
             self.redis_manager.update_process_health(self.process_id, health_data)
@@ -518,12 +665,19 @@ class RedisBaseProcess(ABC):
     def _process_messages(self):
         """Process incoming messages from Redis"""
         try:
-            # CRITICAL FIX: Read from shared priority queue, not individual process queues
-            # This fixes the issue where processes show "Messages: 1" but queues show "Size=0"
-            message = self.redis_manager.receive_message(queue_name=None, timeout=0.1)  # Use shared priority queue
+            # CRITICAL FIX: Read from process-specific queue first, then shared queue
+            message = None
+            
+            # Try process-specific queue first
+            if hasattr(self, 'process_queue'):
+                message = self.redis_manager.receive_message(queue_name=self.process_queue, timeout=0.05)
+            
+            # If no message in process queue, try shared priority queue
+            if not message:
+                message = self.redis_manager.receive_message(queue_name=None, timeout=0.05)
 
             if message:
-                # CRITICAL: Filter messages for this process only
+                # Filter messages for this process only
                 if message.recipient == self.process_id or message.recipient == "all":
                     self.logger.debug(f"Received message for {self.process_id}: {message.message_type}")
                     self.messages_processed += 1
@@ -619,11 +773,21 @@ class RedisBaseProcess(ABC):
         pass
 
     def _handle_message(self, message: ProcessMessage):
-        """Handle incoming message (override in subclasses if needed)"""
+        """Handle incoming message - enhanced with smart memory management"""
         self.logger.debug(f"Received message type: {message.message_type}")
 
+        # SMART MEMORY MANAGEMENT: Handle pause/resume messages
+        if message.message_type == 'PAUSE_PROCESS':
+            self._handle_pause_request(message)
+            
+        elif message.message_type == 'RESUME_PROCESS':
+            self._handle_resume_request(message)
+            
+        elif message.message_type == 'RESET_TO_INIT':
+            self._handle_reset_request(message)
+            
         # Default message handling
-        if message.message_type == 'ping':
+        elif message.message_type == 'ping':
             # Respond to ping
             response = create_process_message(
                 sender=self.process_id,

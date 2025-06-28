@@ -531,7 +531,7 @@ class SystemMemoryCoordinator:
         self.cleanup_managers = {}
 
         # System-wide thresholds
-        self.system_memory_limit_gb = 8.0  # 8GB system limit
+        self.system_memory_limit_gb = 1.0  # 1GB t3.micro limit
         self.emergency_threshold = 0.9  # 90% of system limit
 
         self.logger.info("System Memory Coordinator initialized")
