@@ -160,6 +160,14 @@ class StrategyAnalyzerProcess(RedisBaseProcess):
         """Main processing cycle - orchestrates timing and communication"""
         self.logger.critical("EMERGENCY: ENTERED MAIN LOOP for strategy_analyzer")
         print("EMERGENCY: ENTERED MAIN LOOP for strategy_analyzer")
+        
+        # BUSINESS LOGIC OUTPUT: Strategy analyzer real-time
+        try:
+            # Route through terminal bridge for main process visibility
+            from main_terminal_bridge import send_colored_business_output
+            send_colored_business_output(self.process_id, "Strategy analyzer cycle starting - analyzing market conditions...", "strategy")
+        except:
+            print("[STRATEGY] Strategy analyzer cycle starting - analyzing market conditions...")
         try:
             # Check if it's time for analysis
             if not self._should_run_analysis():
@@ -182,17 +190,16 @@ class StrategyAnalyzerProcess(RedisBaseProcess):
 
             # Show what's being analyzed (business logic output)
             try:
-                from colored_print import success, info
-                from terminal_color_system import print_decision_engine
+                from main_terminal_bridge import send_colored_business_output
                 
                 analyzed_symbols = list(market_data_dict.keys())
                 for symbol in analyzed_symbols:
                     # Show each strategy being analyzed
                     available_strategies = ["momentum_strategy", "jump_diffusion_strategy", "bollinger_strategy", "rsi_contrarian"]
                     for strategy in available_strategies:
-                        print_decision_engine(f"Analyzing {symbol} with {strategy}: market regime {market_regime}")
+                        send_colored_business_output(self.process_id, f"Analyzing {symbol} with {strategy}: market regime {market_regime}", "decision")
                 
-                print_decision_engine(f"Strategy analyzer processing {len(analyzed_symbols)} symbols with {len(available_strategies)} strategies")
+                send_colored_business_output(self.process_id, f"Strategy analyzer processing {len(analyzed_symbols)} symbols with {len(available_strategies)} strategies", "decision")
                 
             except ImportError:
                 print(f"BUSINESS LOGIC: Strategy analyzer analyzing {len(market_data_dict)} symbols with multiple strategies")
@@ -214,9 +221,10 @@ class StrategyAnalyzerProcess(RedisBaseProcess):
 
             # Log cycle completion
             cycle_time = time.time() - start_time
-            if COLOR_SYSTEM_AVAILABLE:
-                print_decision_engine(f"Process cycle complete - {cycle_time:.2f}s, {signals_sent} signals sent")
-            else:
+            try:
+                from main_terminal_bridge import send_colored_business_output
+                send_colored_business_output(self.process_id, f"Process cycle complete - {cycle_time:.2f}s, {signals_sent} signals sent", "decision")
+            except:
                 self.logger.info(f"Process cycle complete - {cycle_time:.2f}s, {signals_sent} signals sent")
 
             for symbol in self.symbols:
@@ -404,7 +412,7 @@ class StrategyAnalyzerProcess(RedisBaseProcess):
     def _update_process_status(self, task_results: List[TaskResult], signals_sent: int):
         """Update process status in shared state (Layer 1)"""
         try:
-            if not self.shared_state:
+            if not self.redis_manager:
                 return
 
             # Calculate summary statistics
@@ -434,7 +442,11 @@ class StrategyAnalyzerProcess(RedisBaseProcess):
                 'process_state': self.state.value
             }
 
-            self.shared_state.update_system_status(self.process_id, status_data)
+            # Use Redis manager to update status
+            self.redis_manager.update_shared_state(
+                {f'{self.process_id}_status': status_data}, 
+                namespace='process_status'
+            )
 
         except Exception as e:
             self.logger.warning(f"Failed to update process status: {e}")
@@ -534,11 +546,11 @@ class StrategyAnalyzerProcess(RedisBaseProcess):
     def get_latest_signals(self, symbol: Optional[str] = None, action: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get latest signals from shared state with optional filtering"""
         try:
-            if not self.shared_state:
+            if not self.redis_manager:
                 return []
 
-            # Get all strategy signals from shared state
-            all_signals = self.shared_state.get_all_strategy_signals()
+            # Get all strategy signals from Redis shared state
+            all_signals = self.redis_manager.get_shared_state('all_strategy_signals', 'strategy_signals', {})
 
             # Flatten signals and apply filters
             latest_signals = []
@@ -581,3 +593,20 @@ class StrategyAnalyzerProcess(RedisBaseProcess):
         except Exception as e:
             self.logger.error(f"Error getting strategy performance: {e}")
             return {}
+    
+    def get_strategies_for_symbol(self, symbol: str) -> List[str]:
+        """Get strategies associated with a symbol"""
+        try:
+            # Return default strategies for now - this could be enhanced to return
+            # symbol-specific strategies based on analysis results
+            default_strategies = ["momentum_strategy", "jump_diffusion_strategy", "bollinger_strategy", "rsi_contrarian"]
+            
+            # If we have a strategy analyzer, try to get symbol-specific strategies
+            if self.strategy_analyzer and hasattr(self.strategy_analyzer, 'get_strategies_for_symbol'):
+                return self.strategy_analyzer.get_strategies_for_symbol(symbol)
+            
+            return default_strategies
+            
+        except Exception as e:
+            self.logger.error(f"Error getting strategies for {symbol}: {e}")
+            return []

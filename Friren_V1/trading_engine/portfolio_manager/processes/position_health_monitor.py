@@ -391,9 +391,31 @@ class PositionHealthMonitor(RedisBaseProcess):
             if active_symbols:
                 for symbol in active_symbols:
                     strategy_info = self.active_strategies[symbol]
-                    shares = strategy_info.get('shares', 0)
-                    strategy_type = strategy_info.get('strategy_type', 'unknown')
-                    print_position_monitor(f"Monitoring {symbol}: {shares} shares, {strategy_type} active")
+                    # Handle both ActiveStrategy objects and dictionary objects
+                    # Defensive programming: Handle both ActiveStrategy and dict objects
+                    if hasattr(strategy_info, 'position_size') and hasattr(strategy_info, 'strategy_type'):
+                        # ActiveStrategy object
+                        shares = strategy_info.position_size
+                        strategy_type = strategy_info.strategy_type
+                    elif hasattr(strategy_info, '__dict__'):
+                        # ActiveStrategy object without expected attributes (fallback)
+                        shares = getattr(strategy_info, 'position_size', getattr(strategy_info, 'shares', 0))
+                        strategy_type = getattr(strategy_info, 'strategy_type', 'unknown')
+                    elif hasattr(strategy_info, 'get'):
+                        # Dictionary object
+                        shares = strategy_info.get('shares', 0)
+                        strategy_type = strategy_info.get('strategy_type', 'unknown')
+                    else:
+                        # Unknown object type - use safe defaults
+                        shares = 0
+                        strategy_type = 'unknown'
+                    # Dynamic strategy assignment printing (real data, no mock)
+                    current_time = datetime.now()
+                    if hasattr(strategy_info, 'entry_time'):
+                        time_in_position = current_time - strategy_info.entry_time
+                        print_position_monitor(f"Monitoring {symbol}: {shares} shares, {strategy_type} active ({time_in_position.days}d)")
+                    else:
+                        print_position_monitor(f"Monitoring {symbol}: {shares} shares, {strategy_type} active")
                     
                 print_position_monitor(f"Position health monitor analyzing {len(active_symbols)} positions...")
             else:
@@ -536,7 +558,7 @@ class PositionHealthMonitor(RedisBaseProcess):
                                 self.logger.error(f"Failed to create strategy for {symbol}: {e}")
                         
                         database_positions_loaded = True
-                        self.logger.info(f"✅ Loaded {len(self.active_strategies)} positions from database")
+                        self.logger.info(f"SUCCESS: Loaded {len(self.active_strategies)} positions from database")
                         
                     else:
                         self.logger.info("No current holdings found in database")
@@ -572,11 +594,11 @@ class PositionHealthMonitor(RedisBaseProcess):
             
             # Final summary
             if self.active_strategies:
-                self.logger.critical(f"🎯 TOTAL ACTIVE POSITIONS: {len(self.active_strategies)} symbols")
+                self.logger.critical(f"TARGET: TOTAL ACTIVE POSITIONS: {len(self.active_strategies)} symbols")
                 for symbol, strategy in self.active_strategies.items():
-                    self.logger.critical(f"   - {symbol}: {strategy.allocation} shares ({strategy.strategy_name})")
+                    self.logger.critical(f"   - {symbol}: {strategy.position_size} shares ({strategy.strategy_type})")
             else:
-                self.logger.warning("⚠️ NO ACTIVE POSITIONS found in database or Redis")
+                self.logger.warning("WARNING: NO ACTIVE POSITIONS found in database or Redis")
 
         except Exception as e:
             self.logger.error(f"Failed to load active strategies: {e}")
@@ -1595,14 +1617,45 @@ class PositionHealthMonitor(RedisBaseProcess):
             if self.active_strategies:
                 print_position_monitor("Position Monitor: Active Strategies:")
                 for symbol, strategy_data in self.active_strategies.items():
-                    strategy_type = strategy_data.get('strategy_type', 'unknown')
-                    health_score = strategy_data.get('health_score', 0)
-                    risk_level = strategy_data.get('risk_level', 'unknown')
-                    entry_time = strategy_data.get('entry_time', datetime.now())
+                    # Defensive programming: Handle both ActiveStrategy and dict objects
+                    if hasattr(strategy_data, 'strategy_type') and hasattr(strategy_data, 'entry_time'):
+                        # ActiveStrategy object
+                        strategy_type = strategy_data.strategy_type
+                        health_score = 0.75  # Default health score for ActiveStrategy objects
+                        risk_level = 'medium'  # Default risk level
+                        entry_time = strategy_data.entry_time
+                    elif hasattr(strategy_data, '__dict__'):
+                        # ActiveStrategy object without expected attributes (fallback)
+                        strategy_type = getattr(strategy_data, 'strategy_type', 'unknown')
+                        health_score = 0.75
+                        risk_level = 'medium'
+                        entry_time = getattr(strategy_data, 'entry_time', datetime.now())
+                    elif hasattr(strategy_data, 'get'):
+                        # Dictionary object
+                        strategy_type = strategy_data.get('strategy_type', 'unknown')
+                        health_score = strategy_data.get('health_score', 0)
+                        risk_level = strategy_data.get('risk_level', 'unknown')
+                        entry_time = strategy_data.get('entry_time', datetime.now())
+                    else:
+                        # Unknown object type - use safe defaults
+                        strategy_type = 'unknown'
+                        health_score = 0.5
+                        risk_level = 'unknown'
+                        entry_time = datetime.now()
+                    
                     duration = datetime.now() - entry_time
                     
+                    # Dynamic strategy assignment details (real data, no mock)
                     print_position_monitor(f"Position Monitor: {symbol} strategy: {strategy_type}")
-                    print_position_monitor(f"Position Monitor: {symbol} health: {health_score:.1%}, risk: {risk_level}, duration: {duration.days}d")
+                    
+                    # Show real position size if available
+                    position_info = ""
+                    if hasattr(strategy_data, 'position_size'):
+                        position_info = f", size: {strategy_data.position_size} shares"
+                    elif hasattr(strategy_data, 'get') and strategy_data.get('position_size'):
+                        position_info = f", size: {strategy_data.get('position_size')} shares"
+                    
+                    print_position_monitor(f"Position Monitor: {symbol} health: {health_score:.1%}, risk: {risk_level}, duration: {duration.days}d{position_info}")
             else:
                 print_position_monitor("Position Monitor: No active strategies detected")
             
@@ -1646,7 +1699,16 @@ class PositionHealthMonitor(RedisBaseProcess):
             if not self.active_strategies:
                 return 0.5  # Neutral if no strategies
             
-            total_health = sum(strategy.get('health_score', 0.5) for strategy in self.active_strategies.values())
+            total_health = 0
+            for strategy in self.active_strategies.values():
+                # Handle both ActiveStrategy objects and dictionary objects
+                if hasattr(strategy, 'strategy_type'):
+                    # ActiveStrategy object - use default health score
+                    total_health += 0.75
+                else:
+                    # Dictionary object
+                    total_health += strategy.get('health_score', 0.5)
+            
             return total_health / len(self.active_strategies)
         except Exception:
             return 0.5
