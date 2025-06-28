@@ -371,6 +371,13 @@ class FinBERTSentimentProcess(RedisBaseProcess):
                 self._start_batch_timer()
             except AttributeError as e:
                 self.logger.warning(f"Could not start batch timer: {e}")
+                # Add defensive initialization for missing attributes
+                if not hasattr(self, 'batch_timeout'):
+                    self.batch_timeout = 5
+                    self.logger.warning("batch_timeout missing, using default: 5 seconds")
+                if not hasattr(self, 'batch_timer'):
+                    self.batch_timer = None
+                    self.logger.warning("batch_timer missing, set to None")
                 # Continue without batch timer for now
                 self.logger.info("Continuing without batch timer")
 
@@ -609,7 +616,7 @@ class FinBERTSentimentProcess(RedisBaseProcess):
 
         # Process if oldest item has been waiting too long
         oldest_task = self.processing_queue[0]
-        wait_time = time.time() - oldest_task['received_time']
+        wait_time = time.time() - oldest_task['timestamp']
 
         return wait_time >= self.batch_timeout
 
