@@ -306,18 +306,19 @@ def load_dynamic_watchlist(logger):
         # Step 3: Combine holdings + opportunities
         dynamic_symbols = holding_symbols + opportunity_symbols
 
-        # Fallback to default if database is empty
+        # Check if database is empty
         if not dynamic_symbols:
-            logger.warning("Database watchlist empty - using fallback symbols")
-            dynamic_symbols = ['AAPL', 'GOOGL', 'MSFT', 'TSLA', 'NVDA']
+            logger.error("CRITICAL: Database watchlist empty - no symbols available for trading")
+            logger.error("Please add symbols to the watchlist database or check database connection")
+            return []  # Return empty list instead of hardcoded fallback
 
         logger.info(f"Dynamic Watchlist Complete: {len(dynamic_symbols)} total symbols")
         return dynamic_symbols
 
     except Exception as e:
         logger.error(f"Error loading dynamic watchlist: {e}")
-        logger.warning("Using fallback static watchlist")
-        return ['AAPL', 'GOOGL', 'MSFT', 'TSLA', 'NVDA']
+        logger.error("CRITICAL: Cannot load symbols from database - system cannot operate without symbols")
+        return []  # Return empty list instead of hardcoded fallback
 
 def refresh_watchlist_after_trade(orchestrator, trade_symbol, logger):
     """
@@ -756,8 +757,13 @@ def run_trading_system():
                     if hasattr(orchestrator, 'redis_manager') and orchestrator.redis_manager:
                         queue_status = orchestrator.redis_manager.get_queue_status()
                         for queue_name, queue_info in queue_status.items():
-                            if queue_info['size'] > 0:
-                                logger.info(f"ACTIVE QUEUE {queue_name}: {queue_info['size']} messages")
+                            # DEFENSIVE FIX: Handle different queue_info formats
+                            if isinstance(queue_info, dict):
+                                size = queue_info.get('size', 0)
+                                if size > 0:
+                                    logger.info(f"ACTIVE QUEUE {queue_name}: {size} messages")
+                            elif isinstance(queue_info, (int, float)) and queue_info > 0:
+                                logger.info(f"ACTIVE QUEUE {queue_name}: {queue_info} messages")
 
                 # FIXED: Sleep in smaller chunks to check shutdown flag more frequently
                 sleep_duration = 30  # Total sleep time
@@ -900,6 +906,108 @@ def emergency_atexit_cleanup():
     except Exception:
         pass  # Silent cleanup - don't crash on exit
 
+def validate_critical_dependencies(logger):
+    """
+    Validate all critical dependencies at startup to prevent runtime failures.
+    Fails fast with clear error messages if any required component is missing.
+    """
+    validation_errors = []
+    
+    logger.info("=== CRITICAL DEPENDENCY VALIDATION ===")
+    
+    # 1. Validate FinBERT Dependencies
+    try:
+        import torch
+        import transformers
+        from transformers import BertTokenizer, BertForSequenceClassification
+        logger.info("AVAILABLE: FinBERT dependencies (torch, transformers)")
+    except ImportError as e:
+        error_msg = f"MISSING: FinBERT dependencies: {e}"
+        logger.critical(error_msg)
+        validation_errors.append(error_msg)
+    
+    # 2. Validate XGBoost Dependencies
+    try:
+        import xgboost as xgb
+        import numpy as np
+        import pandas as pd
+        logger.info("AVAILABLE: XGBoost dependencies (xgboost, numpy, pandas)")
+    except ImportError as e:
+        error_msg = f"MISSING: XGBoost dependencies: {e}"
+        logger.critical(error_msg)
+        validation_errors.append(error_msg)
+    
+    # 3. Validate Alpaca Dependencies
+    try:
+        from alpaca.trading.client import TradingClient
+        from alpaca.data.historical import StockHistoricalDataClient
+        logger.info("AVAILABLE: Alpaca dependencies (alpaca-py)")
+    except ImportError as e:
+        error_msg = f"MISSING: Alpaca dependencies: {e}"
+        logger.critical(error_msg)
+        validation_errors.append(error_msg)
+    
+    # 4. Validate News API Dependencies
+    try:
+        import requests
+        import feedparser
+        logger.info("AVAILABLE: News API dependencies (requests, feedparser) - AVAILABLE")
+    except ImportError as e:
+        error_msg = f"MISSING: News API dependencies: {e}"
+        logger.critical(error_msg)
+        validation_errors.append(error_msg)
+    
+    # 5. Validate Database Dependencies
+    try:
+        import psycopg2
+        import psycopg2.extras
+        logger.info("AVAILABLE: Database dependencies (psycopg2)")
+    except ImportError as e:
+        error_msg = f"MISSING: Database dependencies: {e}"
+        logger.critical(error_msg)
+        validation_errors.append(error_msg)
+    
+    # 6. Validate Redis Dependencies
+    try:
+        import redis
+        logger.info("AVAILABLE: Redis dependencies (redis)")
+    except ImportError as e:
+        error_msg = f"MISSING: Redis dependencies: {e}"
+        logger.critical(error_msg)
+        validation_errors.append(error_msg)
+    
+    # 7. Validate Environment Variables
+    required_env_vars = ['ALPACA_API_KEY', 'ALPACA_SECRET_KEY', 'DATABASE_URL']
+    for var in required_env_vars:
+        if not os.environ.get(var):
+            error_msg = f"MISSING: Required environment variable: {var}"
+            logger.critical(error_msg)
+            validation_errors.append(error_msg)
+        else:
+            logger.info(f"AVAILABLE: Environment variable {var}")
+    
+    # 8. Validate XGBoost Model Files
+    model_files = ['models/demo_xgb_model.json', 'models/demo_xgb_model.pkl']
+    for model_file in model_files:
+        if not os.path.exists(model_file):
+            error_msg = f"MISSING: XGBoost model file: {model_file}"
+            logger.critical(error_msg)
+            validation_errors.append(error_msg)
+        else:
+            logger.info(f"AVAILABLE: XGBoost model file {model_file}")
+    
+    # Fail fast if any critical dependencies are missing
+    if validation_errors:
+        logger.critical("=== DEPENDENCY VALIDATION FAILED ===")
+        logger.critical("SYSTEM CANNOT START: Critical dependencies missing")
+        for error in validation_errors:
+            logger.critical(f"  {error}")
+        logger.critical("Please install missing dependencies and configure environment variables")
+        raise RuntimeError(f"Critical dependencies missing: {len(validation_errors)} errors found. System cannot start.")
+    
+    logger.info("=== DEPENDENCY VALIDATION PASSED ===")
+    logger.info("All critical dependencies available - system ready for production")
+
 def main():
     """Main entry point with comprehensive error handling"""
     global shutdown_requested
@@ -921,14 +1029,16 @@ def main():
         header("FRIREN TRADING SYSTEM STARTUP")
         progress("Initializing trading system...")
 
+        # Setup enhanced logging
+        logger = setup_enhanced_logging()
+
+        # CRITICAL: Validate all dependencies before starting system
+        validate_critical_dependencies(logger)
+
         # DEVELOPMENT: Start 10-minute auto-shutdown timer
         timeout_thread = threading.Thread(target=development_timeout_handler, daemon=True)
         timeout_thread.start()
         warning(f"[DEVELOPMENT] Auto-shutdown timer started - system will stop in {DEVELOPMENT_TIMEOUT//60} minutes")
-
-        # Setup enhanced logging
-        setup_enhanced_logging()
-        logger = logging.getLogger('main')
         logger.info("=== TRADING SYSTEM STARTUP ===")
 
         # CRITICAL: Check system requirements before proceeding
