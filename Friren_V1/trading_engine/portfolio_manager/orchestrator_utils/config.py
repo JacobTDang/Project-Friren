@@ -38,17 +38,17 @@ class SystemConfig:
     """System-wide configuration"""
     # Trading configuration
     trading_mode: TradingMode = TradingMode.PAPER_TRADING
-    symbols: List[str] = field(default_factory=lambda: ['AAPL', 'MSFT', 'GOOGL'])
+    symbols: List[str] = field(default_factory=list)  # No hardcoded defaults - load from database/environment
     max_positions: int = 5
     portfolio_value: float = 100000.0
 
-    # Process configuration
+    # Process configuration - OPTIMIZED for responsive news collection
     process_restart_policy: str = "on_failure"
-    health_check_interval: int = 300  # seconds - increased from 10 to 300 to reduce database load (5 minutes)
-    decision_cycle_interval: int = 60  # seconds
+    health_check_interval: int = 60   # seconds - 1 minute for responsive monitoring
+    decision_cycle_interval: int = 60  # seconds - 1 minute for responsive decisions
 
     # Resource limits (for t3.micro) - Loosened for better performance
-    max_memory_mb: int = 950  # Use 950MB of 1GB (leaving 50MB buffer)
+    max_memory_mb: int = 850  # Use 950MB of 1GB (leaving 50MB buffer)
     max_cpu_percent: float = 90.0  # Increased from 80% to 90%
     api_rate_limit_buffer: float = 0.9  # Increased from 0.8 to 0.9 (use 90% of API limits)
 

@@ -49,11 +49,13 @@ class Colors:
 
 # Import MainTerminalBridge for colored business output with Redis fallback
 def send_colored_business_output(process_id, message, output_type):
-    """Send colored business output with Redis communication fallback"""
+    """Send colored business output with multiple fallback methods"""
+    success = False
     try:
         # Method 1: Try direct main terminal bridge import
         from main_terminal_bridge import send_colored_business_output as bridge_output
         bridge_output(process_id, message, output_type)
+        success = True
     except ImportError:
         try:
             # Method 2: Use Redis direct communication (same as subprocess wrapper)
@@ -76,12 +78,22 @@ def send_colored_business_output(process_id, message, output_type):
                 redis_client = getattr(redis_manager, 'redis_client', None)
                 if redis_client:
                     redis_client.rpush("terminal_output", json.dumps(message_data))
-            else:
-                # Fallback to print
-                print(f"[{process_id.upper()}] {message}")
+                    success = True
         except Exception:
-            # Final fallback
-            print(f"[{process_id.upper()}] {message}")
+            pass
+    
+    if not success:
+        # Enhanced fallback with colored output based on type
+        if output_type == "news":
+            print(f"\033[96m[NEWS] {message}\033[0m")  # Cyan
+        elif output_type == "finbert":
+            print(f"\033[93m[FINBERT] {message}\033[0m")  # Yellow
+        elif output_type == "xgboost":
+            print(f"\033[92m[XGBOOST] {message}\033[0m")  # Green  
+        elif output_type == "recommendation":
+            print(f"\033[95m[RECOMMENDATION] {message}\033[0m")  # Magenta
+        else:
+            print(f"\033[94m[{process_id.upper()}] {message}\033[0m")  # Blue
 
 # Import path resolution
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -127,18 +139,18 @@ class MarketRegime(Enum):
 @dataclass
 class PipelineConfig:
     """Configuration for the news pipeline process"""
-    # Process settings
-    cycle_interval_minutes: int = 2  # Fast cycle for responsive news collection
+    # Process settings - OPTIMIZED for continuous collection
+    cycle_interval_minutes: int = 1  # Ultra-fast cycle for responsive news collection
     batch_size: int = 4  # Max articles to process in one batch
     max_memory_mb: int = 800  # Increased memory limit for news collection and FinBERT analysis
 
     # XGBoost model settings - REQUIRED for production
     model_path: str = "models/demo_xgb_model.json"  # Path to trained XGBoost model file
 
-    # News collection settings
-    max_articles_per_symbol: int = 12
-    hours_back: int = 24  # Increased from 6 to 24 hours to ensure we find articles
-    quality_threshold: float = 0.7
+    # News collection settings - OPTIMIZED for comprehensive coverage
+    max_articles_per_symbol: int = 15  # Increased for better coverage
+    hours_back: int = 12  # Optimized 12 hours for fresh news with good coverage
+    quality_threshold: float = 0.6  # Slightly lower threshold for more articles
 
     # FinBERT settings
     finbert_batch_size: int = 4
@@ -672,14 +684,14 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
             self.logger.info(f"Final state: {self.state.value}")
             self.logger.info(f"All components initialized successfully")
 
-            # SMART NEWS SCHEDULING: Initialize collection state tracking
-            self._collection_active = False      # Start in scheduled mode, not continuous
-            self._idle_mode = True              # Start in idle mode for proper intervals
-            self._last_collection_start = None  # Track when collection started
+            # CONTINUOUS NEWS COLLECTION: Initialize always-active collection state
+            self._collection_active = True       # Start in active mode for continuous collection
+            self._idle_mode = False             # Start in active mode, not idle
+            self._last_collection_start = datetime.now()  # Track when collection started
             self._collection_duration_minutes = 3  # Default collection duration
             
-            self.logger.info("SMART_NEWS: Initialized SCHEDULED collection mode")
-            self.logger.info("SMART_NEWS: COLLECTION SCHEDULED - will run every 2 minutes, not continuously")
+            self.logger.info("CONTINUOUS_NEWS: Initialized CONTINUOUS collection mode")
+            self.logger.info("CONTINUOUS_NEWS: COLLECTION ACTIVE - will run continuously for immediate news")
             
         except Exception as e:
             self.logger.error(f"=== ENHANCED NEWS PIPELINE INITIALIZATION FAILED: {self.process_id} ===")
@@ -704,7 +716,9 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
         return self.finbert_analyzer
 
     def _process_cycle(self):
-        # Add immediate colored output for business execution visibility
+        # Add immediate colored output for business execution visibility - ALWAYS VISIBLE
+        print(f"\033[96m[NEWS PIPELINE] STARTING: News collection and analysis cycle for {len(self.watchlist_symbols)} symbols\033[0m")
+        
         try:
             # Route through terminal bridge for main process visibility
             from main_terminal_bridge import send_colored_business_output
@@ -714,6 +728,7 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
             print("BUSINESS LOGIC: Enhanced news pipeline executing")
 
         self.logger.critical("BUSINESS LOGIC: News pipeline main loop running - collecting/processing news")
+        print(f"\033[93m[BUSINESS LOGIC] News pipeline main loop running - collecting/processing news\033[0m")
 
         # BUSINESS LOGIC VERIFICATION: Test Redis communication and news collection capability
         try:
@@ -852,7 +867,24 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
                                     print(f"{Colors.BLUE}[BUSINESS LOGIC] Starting news collection and processing cycle...{Colors.RESET}")
 
                                 # Execute pipeline only during active collection
-                                self._run_full_pipeline()
+                                self.logger.info("QUEUE ACTIVATION: Running complete news pipeline...")
+                                start_time = datetime.now()
+                                import asyncio
+                                try:
+                                    try:
+                                        loop = asyncio.get_event_loop()
+                                    except RuntimeError:
+                                        loop = asyncio.new_event_loop()
+                                        asyncio.set_event_loop(loop)
+                                    results = loop.run_until_complete(self._run_complete_pipeline())
+                                    processing_time = (datetime.now() - start_time).total_seconds() * 1000
+                                    self._update_pipeline_metrics(results, processing_time)
+                                    self._send_results_to_decision_engine(results)
+                                    self.last_cycle_time = datetime.now()
+                                    self.logger.info("QUEUE ACTIVATION: Complete pipeline executed successfully")
+                                except Exception as e:
+                                    self.logger.error(f"QUEUE ACTIVATION: Pipeline execution failed: {e}")
+                                    self.error_count += 1
                             else:
                                 self.logger.info("QUEUE ACTIVATION: Skipping execution - collection not active (idle mode)")
                                 print(f"{Colors.GRAY}[SMART NEWS] Skipping cycle - in idle mode{Colors.RESET}")
@@ -868,34 +900,21 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
                     self.logger.debug(f"Queue check error: {e}")
                     pass
 
-            # SMART NEWS SCHEDULING: Execute only during active collection periods
+            # CONTINUOUS NEWS COLLECTION: Always run pipeline if not processing messages
             if not message_processed:
-                # Check if it's time to start a new collection cycle
-                if self._should_start_collection_cycle():
-                    self.logger.info("SMART_NEWS: Starting new collection cycle")
-                    self._collection_active = True
-                    self._idle_mode = False
-                    self._last_collection_start = datetime.now()
+                # Enable continuous collection - no scheduling restrictions
+                self._collection_active = True
+                self._idle_mode = False
                 
-                if self._collection_active and not self._idle_mode:
-                    # Only run pipeline during scheduled collection periods
-                    should_run = self._should_run_pipeline()
-                    self.logger.info(f"SMART_NEWS: Collection active - checking if pipeline should run: {should_run}")
-                    print(f"{Colors.BLUE}[SMART NEWS] Active collection period - pipeline execution: {should_run}{Colors.RESET}")
-                    
-                    # Check if collection duration is complete
-                    if self._should_end_collection_cycle():
-                        self.logger.info("SMART_NEWS: Ending collection cycle, returning to idle")
-                        self._collection_active = False
-                        self._idle_mode = True
-                else:
-                    # Handle idle state - minimal processing
-                    self._handle_idle_state()
-                    should_run = False
+                # Always run pipeline for continuous news monitoring
+                should_run = self._should_run_pipeline()
+                self.logger.info(f"CONTINUOUS_NEWS: Pipeline execution enabled: {should_run}")
+                print(f"{Colors.BLUE}[CONTINUOUS NEWS] News collection active - pipeline running{Colors.RESET}")
                     
                 if should_run:
-                    # BUSINESS LOGIC COLORED OUTPUT
+                    # BUSINESS LOGIC COLORED OUTPUT - Immediate visibility
                     send_colored_business_output(self.process_id, "News collected: Starting real-time news gathering from MarketWatch, Reuters, Bloomberg...", "news")
+                    print(f"\033[96m[NEWS PIPELINE] ACTIVE: Starting news collection cycle for {len(self.watchlist_symbols)} symbols\033[0m")
 
                     self.logger.info("=== STARTING PIPELINE EXECUTION ===")
                     start_time = datetime.now()
@@ -1213,38 +1232,25 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
         return sentiment_results
 
     def _should_run_pipeline(self) -> bool:
-        """Check if pipeline should run with comprehensive debugging"""
-        self.logger.info("=== CHECKING PIPELINE CONDITIONS ===")
-
-        # Check if enough time has passed since last run
-        if self.last_cycle_time:
-            time_since_last = (datetime.now() - self.last_cycle_time).total_seconds() / 60
-            self.logger.info(f"Time since last run: {time_since_last:.2f} minutes")
-            self.logger.info(f"Required interval: {self.config.cycle_interval_minutes} minutes")
-
-            if time_since_last < self.config.cycle_interval_minutes:
-                self.logger.info(f"Not enough time passed ({time_since_last:.2f} < {self.config.cycle_interval_minutes})")
+        """UNIFIED: Check if pipeline should run - enables continuous collection"""
+        try:
+            # Always allow pipeline to run if process is active and not stopped
+            if not (self.state == ProcessState.RUNNING):
+                self.logger.debug(f"Pipeline not running - process state: {self.state.value}")
                 return False
-        else:
-            self.logger.info("No last cycle time recorded, allowing first run")
-
-        # Check if it's market hours (optional)
-        is_market_hours = self._is_market_hours()
-        self.logger.info(f"Market hours check: {is_market_hours}")
-
-        # Check if process is in running state
-        is_running = self.state == ProcessState.RUNNING
-        self.logger.info(f"Process state check: {self.state.value} (running: {is_running})")
-
-        # Check if stop event is not set
-        stop_event_set = self._stop_event.is_set() if self._stop_event else False
-        self.logger.info(f"Stop event check: {stop_event_set}")
-
-        # Final decision
-        should_run = is_running and not stop_event_set
-        self.logger.info(f"Final pipeline run decision: {should_run}")
-
-        return should_run
+                
+            if self._stop_event and self._stop_event.is_set():
+                self.logger.debug("Pipeline not running - stop event set")
+                return False
+            
+            # FIXED: Enable continuous news collection (no time restrictions)
+            # Remove cycle interval restrictions for responsive news monitoring
+            self.logger.debug("CONTINUOUS_NEWS: Pipeline enabled for continuous collection")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error in _should_run_pipeline: {e}")
+            return False
 
     def _is_market_hours(self) -> bool:
         """MODIFIED: Always return True for 24/7 news collection and sentiment analysis"""
@@ -1417,33 +1423,6 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
             self.shared_state.set(f"{self.process_id}_metrics", asdict(self.pipeline_metrics))
             self.shared_state.set(f"{self.process_id}_symbol_tracking", self.symbol_tracking)
 
-    def _should_run_pipeline(self) -> bool:
-        """Determine if pipeline should run during active collection period"""
-        try:
-            # Check if we're still within collection duration
-            if self._last_collection_start:
-                elapsed_minutes = (datetime.now() - self._last_collection_start).total_seconds() / 60
-                if elapsed_minutes > self._collection_duration_minutes:
-                    self.logger.info(f"SMART_NEWS: Collection period expired ({elapsed_minutes:.1f} > {self._collection_duration_minutes}min)")
-                    return False
-            
-            # Check memory pressure - don't run if system memory is high
-            try:
-                from Friren_V1.multiprocess_infrastructure.memory_threshold_controller import get_memory_threshold_controller
-                controller = get_memory_threshold_controller()
-                status = controller.get_status()
-                if status['mode'] in ['threshold', 'emergency']:
-                    self.logger.info(f"SMART_NEWS: Skipping pipeline due to memory pressure (mode: {status['mode']})")
-                    return False
-            except Exception as e:
-                self.logger.debug(f"Could not check memory status: {e}")
-            
-            # All checks passed - run the pipeline
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Error in _should_run_pipeline: {e}")
-            return False
 
     def _handle_idle_state(self):
         """Handle idle state when not actively collecting"""
@@ -1599,14 +1578,6 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
             
         return should_end
     
-    def _should_run_pipeline(self) -> bool:
-        """Check if pipeline should run during active collection period"""
-        if not self._collection_active or self._idle_mode:
-            return False
-            
-        # Always run pipeline during active collection periods
-        # This allows for multiple pipeline runs within the collection window
-        return True
     
     def _handle_idle_state(self):
         """Handle system behavior during idle state"""

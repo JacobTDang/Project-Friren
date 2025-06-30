@@ -31,13 +31,13 @@ class NewsScheduleMode(Enum):
 
 @dataclass
 class NewsScheduleConfig:
-    """Configuration for news scheduling"""
-    collection_interval_minutes: int = 20      # Collect every 20 minutes
-    collection_duration_minutes: int = 3       # Collect for 3 minutes
-    market_hours_only: bool = True             # Only during market hours
+    """Configuration for news scheduling - OPTIMIZED for continuous collection"""
+    collection_interval_minutes: int = 5       # Collect every 5 minutes (was 20)
+    collection_duration_minutes: int = 2       # Collect for 2 minutes (was 3)
+    market_hours_only: bool = False            # 24/7 collection (was True)
     market_buffer_hours: int = 1               # 1 hour buffer before/after market
-    memory_threshold_pause: bool = True        # Pause if memory threshold exceeded
-    weekend_collection: bool = False           # Collect on weekends
+    memory_threshold_pause: bool = False       # Don't pause for memory (was True)
+    weekend_collection: bool = True            # Collect on weekends (was False)
     
     # Market hours (EST)
     market_open_time: dt_time = dt_time(9, 30)    # 9:30 AM EST
@@ -192,27 +192,9 @@ class NewsScheduler:
         return False
     
     def _is_market_hours_appropriate(self, current_time: datetime) -> bool:
-        """Check if current time is appropriate for news collection"""
-        if not self.config.market_hours_only:
-            return True
-        
-        # Check if it's a weekend
-        if current_time.weekday() >= 5 and not self.config.weekend_collection:  # Saturday=5, Sunday=6
-            return False
-        
-        # Get current time
-        current_time_only = current_time.time()
-        
-        # Calculate market hours with buffer
-        buffer_delta = timedelta(hours=self.config.market_buffer_hours)
-        market_open_dt = datetime.combine(current_time.date(), self.config.market_open_time)
-        market_close_dt = datetime.combine(current_time.date(), self.config.market_close_time)
-        
-        effective_start = market_open_dt - buffer_delta
-        effective_end = market_close_dt + buffer_delta
-        
-        # Check if current time is within effective market hours
-        return effective_start <= current_time <= effective_end
+        """MODIFIED: Always return True for 24/7 news collection"""
+        # Enable continuous news monitoring regardless of market hours
+        return True
     
     def _is_memory_threshold_ok(self) -> bool:
         """Check if memory threshold allows news collection"""
