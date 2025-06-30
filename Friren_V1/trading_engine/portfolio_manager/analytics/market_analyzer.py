@@ -16,9 +16,9 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # Import your existing regime detectors
-from trading_engine.regime_detection.regime_market import EnhancedRegimeDetector, RegimeConfig
-from trading_engine.regime_detection.entropy_regime_detector import EntropyRegimeDetector, EntropyConfig
-from trading_engine.data.data_utils import StockDataTools
+from ...regime_detection.regime_market import EnhancedRegimeDetector, RegimeConfig
+from ...regime_detection.entropy_regime_detector import EntropyRegimeDetector, EntropyConfig
+from ...data.data_utils import StockDataTools
 
 @dataclass
 class MarketRegimeResult:

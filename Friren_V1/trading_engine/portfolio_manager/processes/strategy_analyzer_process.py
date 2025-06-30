@@ -158,8 +158,7 @@ class StrategyAnalyzerProcess(RedisBaseProcess):
 
     def _process_cycle(self):
         """Main processing cycle - orchestrates timing and communication"""
-        self.logger.critical("EMERGENCY: ENTERED MAIN LOOP for strategy_analyzer")
-        print("EMERGENCY: ENTERED MAIN LOOP for strategy_analyzer")
+        # Removed emergency debug messages - they were causing log spam
         
         # BUSINESS LOGIC OUTPUT: Strategy analyzer real-time
         try:
@@ -171,7 +170,11 @@ class StrategyAnalyzerProcess(RedisBaseProcess):
         try:
             # Check if it's time for analysis
             if not self._should_run_analysis():
-                time.sleep(10)  # Short sleep if not time yet
+                # Check for stop event before sleeping
+                for i in range(10):
+                    if self._stop_event.is_set():
+                        return
+                    time.sleep(1)  # Sleep 1 second at a time, checking stop event
                 return
 
             self.logger.info(f"Starting strategy analysis process cycle #{self.analysis_count + 1}")
@@ -251,9 +254,21 @@ class StrategyAnalyzerProcess(RedisBaseProcess):
     def _get_market_regime(self) -> str:
         """Get current market regime from Redis shared state (Layer 1)"""
         try:
-            # Use Redis shared state methods
-            regime = self.get_shared_state("market_regime", "market", "UNKNOWN")
-            return regime
+            # Get the market regime data dictionary from Redis
+            regime_data = self.get_shared_state("market_regime", "market", {})
+            
+            # Extract the actual regime from the data structure
+            if isinstance(regime_data, dict) and 'regime' in regime_data:
+                regime = regime_data['regime']
+                self.logger.debug(f"Retrieved market regime: {regime} (confidence: {regime_data.get('confidence', 0):.1f}%)")
+                return regime
+            elif isinstance(regime_data, str):
+                # Handle case where regime is stored directly as string
+                return regime_data
+            else:
+                self.logger.warning(f"Invalid market regime data structure: {type(regime_data)}")
+                return 'UNKNOWN'
+                
         except Exception as e:
             self.logger.warning(f"Failed to get market regime: {e}")
             return 'UNKNOWN'
@@ -268,7 +283,7 @@ class StrategyAnalyzerProcess(RedisBaseProcess):
             for symbol in symbols:
                 # Mock market data structure for now
                 market_data[symbol] = {
-                    'price': 150.0,
+                    'price': 0.0,  # No hardcoded price - should be fetched from market data
                     'volume': 1000000,
                     'timestamp': datetime.now(),
                     'symbol': symbol
@@ -281,37 +296,38 @@ class StrategyAnalyzerProcess(RedisBaseProcess):
             self.logger.error(f"Error fetching market data: {e}")
             return {}
 
-    def _fetch_market_data(self) -> Dict[str, Any]:
-        """Fetch market data using analytics component"""
-        try:
-            # Use the analytics component's data fetching capability
-            # This delegates to the existing StrategyAnalyzer which has the data fetcher
-            return self.strategy_analyzer._fetch_market_data()
-
-        except Exception as e:
-            self.logger.error(f"Error fetching market data: {e}")
-            return {}
+    # Duplicate _fetch_market_data method removed
 
     def _run_parallel_strategy_analysis(self, market_data_dict: Dict[str, Any], market_regime: str) -> List[TaskResult]:
-        """Run strategy analysis using generic multiprocess manager"""
+        """Run strategy analysis using generic multiprocess manager with pickle-safe data"""
         try:
-            # Create tasks for parallel execution
+            # Import pickle fix utilities
+            import sys
+            import os
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
+            if project_root not in sys.path:
+                sys.path.append(project_root)
+            from pickle_fix_utils import create_clean_task_for_worker
+            
+            # Create tasks for parallel execution with cleaned data
             tasks = []
             for symbol in self.symbols:
                 if symbol in market_data_dict:
-                    tasks.append({
-                        'task_id': f"strategy-{symbol}",
-                        'task_type': 'strategy_analysis',
-                        'symbol': symbol,
-                        'market_data': market_data_dict[symbol],
-                        'market_regime': market_regime
-                    })
+                    # Use the pickle-safe task creation
+                    clean_task = create_clean_task_for_worker(
+                        symbol=symbol,
+                        market_data=market_data_dict[symbol], 
+                        market_regime=market_regime,
+                        task_id=f"strategy-{symbol}"
+                    )
+                    clean_task['task_type'] = 'strategy_analysis'  # Ensure task_type is set
+                    tasks.append(clean_task)
 
             if not tasks:
                 self.logger.warning("No tasks created for strategy analysis")
                 return []
 
-            # Execute tasks in parallel using Layer 2 (generic manager)
+            # RESTORED: Execute tasks in parallel using Layer 2 (generic manager) with pickle-safe data
             results = self.multiprocess_manager.execute_tasks_parallel(
                 tasks, strategy_analysis_worker, timeout=60
             )

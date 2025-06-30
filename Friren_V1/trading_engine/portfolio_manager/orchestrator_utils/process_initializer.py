@@ -30,7 +30,7 @@ from Friren_V1.trading_engine.portfolio_manager.decision_engine.decision_engine 
 from Friren_V1.trading_engine.portfolio_manager.decision_engine.execution_orchestrator import ExecutionOrchestrator
 from Friren_V1.trading_engine.portfolio_manager.processes.position_health_monitor import PositionHealthMonitor
 from Friren_V1.trading_engine.portfolio_manager.processes.strategy_analyzer_process import StrategyAnalyzerProcess
-from Friren_V1.trading_engine.portfolio_manager.processes.finbert_sentiment_process import FinBERTSentimentProcess
+# REMOVED: FinBERTSentimentProcess (redundant - enhanced_news_pipeline handles FinBERT)
 from Friren_V1.trading_engine.portfolio_manager.processes.enhanced_news_pipeline_process import EnhancedNewsPipelineProcess, get_default_pipeline_config
 from Friren_V1.trading_engine.portfolio_manager.processes.market_regime_detector import MarketRegimeDetector
 TRADING_COMPONENTS_AVAILABLE = True
@@ -145,13 +145,13 @@ class ProcessInitializer:
             # PRODUCTION: Redis-based ProcessManager required
             self.logger.info("Creating Redis ProcessManager (production)")
             self.process_manager = RedisProcessManager(
-                max_processes=5,  # UPDATED: Max 5 processes to include enhanced news pipeline
-                enable_queue_rotation=False,  # CRITICAL FIX: Disable queue rotation for continuous business logic execution
-                cycle_time_seconds=30.0  # 30-second execution cycles per process
+                max_processes=5,  # ALLOW: 5 critical processes with queue rotation for memory management on t3.micro
+                enable_queue_rotation=True,   # ENABLE: Queue rotation for 850MB memory target on t3.micro
+                cycle_time_seconds=0.0   # Event-based rotation (0 = no time limits)
             )
             self.logger.info("Redis ProcessManager created successfully with CONTINUOUS execution enabled")
 
-            # MEMORY OPTIMIZED: Limit to 4 critical processes to reduce RAM usage
+            # MEMORY OPTIMIZED: Limit to 5 critical processes to reduce RAM usage
             self.logger.info("MEMORY OPTIMIZED MODE: Limiting to 5 most critical processes")
             self.logger.info("REASON: Enhanced news pipeline critical for sentiment analysis")
             self.logger.info("SOLUTION: Queue-based process execution with health monitor first, then rotating queue")
@@ -160,10 +160,10 @@ class ProcessInitializer:
             processes = [
                 ('position_health_monitor', PositionHealthMonitor),  # FIRST - provides system health data
                 ('decision_engine', MarketDecisionEngine),
-                ('enhanced_news_pipeline', EnhancedNewsPipelineProcess),  # ADDED - critical for news and sentiment
+                ('enhanced_news_pipeline', EnhancedNewsPipelineProcess),  # CRITICAL - has integrated FinBERT analysis
                 ('strategy_analyzer', StrategyAnalyzerProcess),
-                ('sentiment_analyzer', FinBERTSentimentProcess),
-                # QUEUED: market_regime_detector will be queued
+                ('market_regime_detector', MarketRegimeDetector),  # CRITICAL - provides market regime data for strategies
+                # REMOVED: sentiment_analyzer (redundant - enhanced_news_pipeline handles FinBERT)
             ]
 
             for process_id, process_class in processes:
@@ -192,7 +192,7 @@ class ProcessInitializer:
                         restart_delay_seconds=5,
                         health_check_interval=self.config.health_check_interval,
                         process_args={
-                            'check_interval': 3,  # Very fast execution - 3 seconds
+                            'check_interval': 60,  # Production interval - 60 seconds
                             'symbols': self.config.symbols
                         }
                     )
@@ -209,22 +209,7 @@ class ProcessInitializer:
                             'watchlist_symbols': self.config.symbols
                         }
                     )
-                elif process_id == 'sentiment_analyzer':
-                    # PRODUCTION: FinBERT sentiment analyzer needs longer startup for model loading
-                    config = ProcessConfig(
-                        process_class=process_class,
-                        process_id=process_id,
-                        restart_policy=RestartPolicy.ON_FAILURE,
-                        max_restarts=3,
-                        restart_delay_seconds=5,
-                        health_check_interval=self.config.health_check_interval,
-                        startup_timeout=60,  # Reduced timeout - 1 minute
-                        process_args={
-                            'analysis_interval': 10,  # Faster execution 
-                            'confidence_threshold': 50.0,
-                            'symbols': self.config.symbols
-                        }
-                    )
+                # REMOVED: sentiment_analyzer configuration (redundant process)
                 elif process_id == 'decision_engine':
                     config = ProcessConfig(
                         process_class=process_class,
@@ -235,6 +220,20 @@ class ProcessInitializer:
                         health_check_interval=self.config.health_check_interval,
                         startup_timeout=45,  # Reduced timeout - 45 seconds
                         process_args={}
+                    )
+                elif process_id == 'market_regime_detector':
+                    # Market regime detector for strategy context
+                    config = ProcessConfig(
+                        process_class=process_class,
+                        process_id=process_id,
+                        restart_policy=RestartPolicy.ON_FAILURE,
+                        max_restarts=3,
+                        restart_delay_seconds=5,
+                        health_check_interval=self.config.health_check_interval,
+                        process_args={
+                            'check_interval': 300,  # 5 minutes - regime detection doesn't need high frequency
+                            'symbols': ['SPY', 'QQQ', 'IWM', '^VIX']  # Major market indices
+                        }
                     )
 
                 self.process_manager.register_process(config)
@@ -275,20 +274,20 @@ class ProcessInitializer:
             raise RuntimeError(f"System readiness validation failed: {issues}")
 
     def start_processes(self):
-        """Start all registered processes (limited to 4 for memory optimization)"""
+        """Start all registered processes (limited to 5 for memory optimization)"""
         if self.process_manager:
             # Define dependency order - decision engine should start first
             # INCLUDE NEWS PIPELINE - Critical for business logic execution
             dependency_order = [
                 'decision_engine',
                 'position_health_monitor',
-                'enhanced_news_pipeline',  # CRITICAL: This was missing!
-                'strategy_analyzer', 
-                'sentiment_analyzer'
+                'market_regime_detector',  # CRITICAL: Must start before strategy analyzer
+                'enhanced_news_pipeline',  # CRITICAL: Has built-in FinBERT analysis
+                'strategy_analyzer'
             ]
 
             self.process_manager.start_all_processes(dependency_order)
-            self.logger.info("All 5 critical processes started with news pipeline enabled")
+            self.logger.info("All 5 critical processes started with market regime detection and integrated news pipeline")
         else:
             self.logger.warning("Process manager not available")
 
