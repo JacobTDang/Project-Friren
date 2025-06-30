@@ -201,7 +201,7 @@ class RedisBaseProcess(ABC):
                     # Set flag to block queue rotation instead of shutdown
                     self._memory_high = True
                     # Try aggressive cleanup
-                    self.memory_monitor.cleanup_memory(aggressive=True)
+                    self.memory_monitor.cleanup_memory(force=True)
 
             self.memory_monitor.add_emergency_callback(emergency_callback)
 
