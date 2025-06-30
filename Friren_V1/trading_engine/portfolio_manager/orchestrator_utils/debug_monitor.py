@@ -237,16 +237,30 @@ class DetailedDebugMonitor:
                 queue_status = self.redis_manager.get_queue_status()
 
                 for queue_name, status in queue_status.items():
-                    size = status.get('size', 0)
-                    pending = status.get('pending_messages', 0)
-                    processed = status.get('messages_processed', 0)
-                    last_message = status.get('last_message_time', 'Never')
+                    # DEFENSIVE FIX: Handle case where status might be an int instead of dict
+                    if isinstance(status, dict):
+                        size = status.get('size', 0)
+                        pending = status.get('pending_messages', 0)
+                        processed = status.get('messages_processed', 0)
+                        last_message = status.get('last_message_time', 'Never')
+                    elif isinstance(status, (int, float)):
+                        # Handle simple numeric status values
+                        size = int(status)
+                        pending = 0
+                        processed = 0
+                        last_message = 'N/A'
+                    else:
+                        # Handle other status types
+                        size = 0
+                        pending = 0
+                        processed = 0
+                        last_message = f'Unknown status type: {type(status)}'
 
                     self.logger.info(f"REDIS QUEUE {queue_name}: Size={size} | Pending={pending} | "
                                    f"Processed={processed} | Last Message={last_message}")
 
-                    # Show pending message types if available
-                    if 'message_types' in status:
+                    # Show pending message types if available  
+                    if isinstance(status, dict) and 'message_types' in status:
                         types = status['message_types']
                         self.logger.info(f"  -> Message Types: {types}")
 
