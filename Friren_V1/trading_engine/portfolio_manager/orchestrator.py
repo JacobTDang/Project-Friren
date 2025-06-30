@@ -368,15 +368,21 @@ class MainOrchestrator:
 
             # Queue status
             if self.redis_manager:
-                # Get Redis queue status instead
-                queue_status = {
-                    'priority_queue_size': self.redis_manager.get_queue_size(),
-                    'health_queue_size': self.redis_manager.get_queue_size('health')
-                }
+                # Get Redis queue status using the proper method
+                queue_status = self.redis_manager.get_queue_status()
                 self.logger.info(f"QUEUES: {len(queue_status)} total")
                 for qname, qstatus in queue_status.items():
-                    size = qstatus.get('size', 0)
-                    self.logger.info(f"  -> {qname}: {size} messages")
+                    # DEFENSIVE FIX: Handle case where qstatus might be an int instead of dict
+                    if isinstance(qstatus, dict):
+                        size = qstatus.get('size', 0)
+                        self.logger.info(f"  -> {qname}: {size} messages")
+                        if qstatus.get('message_types'):
+                            self.logger.info(f"    Message types: {qstatus['message_types']}")
+                    elif isinstance(qstatus, (int, float)):
+                        # Fallback: qstatus is just the size
+                        self.logger.info(f"  -> {qname}: {qstatus} messages")
+                    else:
+                        self.logger.warning(f"  -> {qname}: Unknown queue info format: {type(qstatus)}")
 
             # Shared state
             if self.redis_manager:
