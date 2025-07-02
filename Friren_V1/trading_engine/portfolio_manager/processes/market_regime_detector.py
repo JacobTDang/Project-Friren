@@ -246,17 +246,18 @@ class MarketRegimeDetector(RedisBaseProcess):
                     'last_update': datetime.now().isoformat()
                 }
 
-                self.redis_manager.set_shared_state('market_regime', regime_data)
-                self.redis_manager.set_shared_state('last_regime_update', datetime.now().isoformat())
+                # FIXED: Set market regime with proper namespace to match strategy analyzer
+                self.redis_manager.set_shared_state('market_regime', regime_data, namespace='market')
+                self.redis_manager.set_shared_state('last_regime_update', datetime.now().isoformat(), namespace='market')
 
                 self.logger.debug(f"Updated Redis shared state with market regime: {regime_result.primary_regime}")
                 
-                # BUSINESS LOGIC VERIFICATION: Confirm Redis update worked
-                verification = self.redis_manager.get_shared_state('market_regime')
+                # BUSINESS LOGIC VERIFICATION: Confirm Redis update worked with correct namespace
+                verification = self.redis_manager.get_shared_state('market_regime', namespace='market')
                 if verification and verification.get('regime') == regime_result.primary_regime:
-                    self.logger.info("[SUCCESS] BUSINESS LOGIC: Market regime Redis update verified successfully")
+                    self.logger.info(f"[SUCCESS] BUSINESS LOGIC: Market regime Redis update verified: {regime_result.primary_regime}")
                 else:
-                    self.logger.error("[ERROR] BUSINESS LOGIC: Market regime Redis update verification failed")
+                    self.logger.error(f"[ERROR] BUSINESS LOGIC: Market regime Redis update verification failed - expected {regime_result.primary_regime}, got {verification}")
 
         except Exception as e:
             self.logger.error(f"Error updating Redis shared state: {e}")

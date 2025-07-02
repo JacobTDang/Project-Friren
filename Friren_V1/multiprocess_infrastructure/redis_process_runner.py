@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Redis process runner script
 
@@ -57,7 +56,9 @@ def create_redis_compatible_process(original_class, process_id: str, process_arg
         """Redis-compatible wrapper for existing process classes"""
 
         def __init__(self, process_id: str, heartbeat_interval: int = 30, **kwargs):
-            super().__init__(process_id, heartbeat_interval)
+            # CRITICAL FIX: Pass memory_limit_mb from kwargs to parent class
+            memory_limit_mb = kwargs.get('memory_limit_mb', 250)
+            super().__init__(process_id, heartbeat_interval, memory_limit_mb=memory_limit_mb)
 
             # CRITICAL FIX: Don't create original process instance since we ARE the process
             # The business classes inherit from RedisBaseProcess(ABC) and we're already inheriting from that
@@ -219,7 +220,19 @@ def create_redis_compatible_process(original_class, process_id: str, process_arg
                     self.active_strategies = {}
 
                 elif 'EnhancedNewsPipelineProcess' in class_name:
-                    self.watchlist_symbols = self.process_args.get('watchlist_symbols', ['AAPL'])
+                    self.watchlist_symbols = self.process_args.get('watchlist_symbols', [])
+                    # CRITICAL FIX: Add missing Enhanced News Pipeline attributes 
+                    from collections import deque
+                    self.processing_history = deque(maxlen=50)
+                    self.error_history = deque(maxlen=20)
+                    self.last_sentiment_results = []
+                    self.last_recommendations = {}
+                    self.symbol_tracking = {symbol: {
+                        'last_update': None,
+                        'recommendation_count': 0,
+                        'avg_confidence': 0.0,
+                        'last_recommendation': None
+                    } for symbol in self.watchlist_symbols}
 
                 elif 'DecisionEngine' in class_name:
                     self.decision_queue = []
@@ -244,25 +257,32 @@ def create_redis_compatible_process(original_class, process_id: str, process_arg
                 # Initialize config attribute that business logic expects - completely dynamic
                 config_dict = {}
                 
-                # Only add values that are actually provided
-                if hasattr(self, 'watchlist_symbols'):
-                    config_dict['watchlist_symbols'] = self.watchlist_symbols
-                if hasattr(self, 'symbols'):
-                    config_dict['symbols'] = self.symbols
-                if hasattr(self, 'analysis_interval'):
-                    config_dict['analysis_interval'] = self.analysis_interval
-                if hasattr(self, 'check_interval'):
-                    config_dict['check_interval'] = self.check_interval
+                # CRITICAL FIX: Check if config is provided as a nested dict in process_args
+                if 'config' in self.process_args and isinstance(self.process_args['config'], dict):
+                    # Use the provided config dict directly
+                    config_dict.update(self.process_args['config'])
+                    self.logger.info(f"Using provided config dict with {len(config_dict)} parameters")
+                else:
+                    # Fallback to building config from attributes
+                    if hasattr(self, 'watchlist_symbols'):
+                        config_dict['watchlist_symbols'] = self.watchlist_symbols
+                    if hasattr(self, 'symbols'):
+                        config_dict['symbols'] = self.symbols
+                    if hasattr(self, 'analysis_interval'):
+                        config_dict['analysis_interval'] = self.analysis_interval
+                    if hasattr(self, 'check_interval'):
+                        config_dict['check_interval'] = self.check_interval
+                    
+                    # Add any additional config from process_args (excluding nested config)
+                    for key, value in self.process_args.items():
+                        if key != 'config' and key not in config_dict and value is not None:
+                            config_dict[key] = value
+                    
+                    # Add common config parameters that business logic expects
+                    if 'hours_back' not in config_dict:
+                        config_dict['hours_back'] = self.process_args.get('hours_back', 24)
                 
-                # Add any additional config from process_args
-                for key, value in self.process_args.items():
-                    if key not in config_dict and value is not None:
-                        config_dict[key] = value
-                
-                # Add common config parameters that business logic expects
-                if 'hours_back' not in config_dict:
-                    config_dict['hours_back'] = self.process_args.get('hours_back', 24)
-                
+                # Create config object that supports both dict and attribute access
                 self.config = type('Config', (), config_dict)()
 
                 # Note: Business objects like news_collector, pipeline_metrics, performance_tracker
@@ -303,25 +323,152 @@ def create_redis_compatible_process(original_class, process_id: str, process_arg
                 # Use Redis directly to send colored output messages to main terminal
                 from Friren_V1.multiprocess_infrastructure.trading_redis_manager import create_process_message, MessagePriority
                 
-                # Determine message content based on process type
-                if 'news' in self.process_id.lower():
-                    message_text = "News collection: Real articles collected and analyzed"
-                    color_type = "news"
-                elif 'decision' in self.process_id.lower():
-                    message_text = "Decision Engine: Real trading decisions processed"
-                    color_type = "decision"
-                elif 'position' in self.process_id.lower():
-                    message_text = "Position Monitor: Real portfolio health analysis completed"
-                    color_type = "position"
-                elif 'sentiment' in self.process_id.lower() or 'finbert' in self.process_id.lower():
-                    message_text = "Sentiment Analysis: Real FinBERT analysis executed"
-                    color_type = "sentiment"
-                elif 'strategy' in self.process_id.lower():
-                    message_text = "Strategy Analyzer: Real strategy analysis completed"
-                    color_type = "strategy"
-                else:
-                    message_text = "Business process executed successfully"
-                    color_type = "communication"
+                # Get REAL execution details from business instance
+                message_text = "Business process executed successfully"
+                color_type = "communication"
+                
+                # Extract real execution data from business instance
+                if hasattr(self, '_business_instance') and self._business_instance:
+                    try:
+                        if 'news' in self.process_id.lower() and 'enhanced_news_pipeline' not in self.process_id.lower():
+                            # Get real news collection data with enhanced details
+                            if hasattr(self._business_instance, 'last_collected_articles') and hasattr(self._business_instance, 'watchlist_symbols'):
+                                articles = getattr(self._business_instance, 'last_collected_articles', [])
+                                symbols = getattr(self._business_instance, 'watchlist_symbols', [])
+                                
+                                if articles:
+                                    # Show detailed article information
+                                    article_info = []
+                                    for art in articles[:2]:  # Show first 2 articles
+                                        title = getattr(art, 'title', 'Unknown Article')[:40]
+                                        symbol = getattr(art, 'symbol', 'MARKET')
+                                        source = getattr(art, 'source', 'Unknown Source')
+                                        article_info.append(f"'{title}' ({symbol} from {source})")
+                                    
+                                    if len(articles) == 1:
+                                        message_text = f"News collected: {article_info[0]}"
+                                    else:
+                                        message_text = f"News collected: {article_info[0]}, +{len(articles)-1} more"
+                                elif symbols:
+                                    symbols_str = ', '.join(symbols[:3]) if len(symbols) <= 3 else f"{', '.join(symbols[:2])}, +{len(symbols)-2} more"
+                                    message_text = f"News collection: Scanning {symbols_str} - no new articles found"
+                                else:
+                                    message_text = "News collection: No symbols configured for monitoring"
+                                    
+                            elif hasattr(self._business_instance, 'watchlist_symbols'):
+                                symbols = getattr(self._business_instance, 'watchlist_symbols', [])
+                                if symbols:
+                                    message_text = f"News pipeline: Processing {len(symbols)} symbols: {', '.join(symbols[:3])}"
+                                else:
+                                    message_text = "News pipeline: No symbols configured for processing"
+                            else:
+                                message_text = "News pipeline: Real collection cycle completed"
+                            color_type = "news"
+                            
+                        elif 'decision' in self.process_id.lower():
+                            # Get real decision engine data with enhanced details
+                            if hasattr(self._business_instance, 'last_decision'):
+                                decision = getattr(self._business_instance, 'last_decision', None)
+                                if decision and hasattr(decision, 'action') and hasattr(decision, 'symbol'):
+                                    confidence = getattr(decision, 'confidence', 0.0)
+                                    reasoning = getattr(decision, 'reasoning', '')[:30]
+                                    message_text = f"Decision: {decision.action} {decision.symbol} (confidence: {confidence:.1%}) - {reasoning}..."
+                                else:
+                                    message_text = "Decision Engine: Analysis cycle completed"
+                            elif hasattr(self._business_instance, 'last_sentiment_results'):
+                                # Show sentiment analysis results
+                                sentiment_results = getattr(self._business_instance, 'last_sentiment_results', [])
+                                if sentiment_results:
+                                    results_info = []
+                                    for result in sentiment_results[:2]:  # Show first 2 results
+                                        symbol = getattr(result, 'symbol', 'MARKET')
+                                        sentiment = getattr(result, 'classification', 'neutral')
+                                        confidence = getattr(result, 'confidence', 0.0)
+                                        results_info.append(f"{symbol}: {sentiment} ({confidence:.1%})")
+                                    message_text = f"FinBERT analysis: {', '.join(results_info)}"
+                                else:
+                                    message_text = "Decision Engine: Sentiment analysis completed"
+                            elif hasattr(self._business_instance, 'watchlist_symbols'):
+                                symbols = getattr(self._business_instance, 'watchlist_symbols', [])
+                                if symbols:
+                                    symbols_str = ', '.join(symbols[:3]) if len(symbols) <= 3 else f"{', '.join(symbols[:2])}, +{len(symbols)-2} more"
+                                    message_text = f"Decision Engine: Analyzing {symbols_str}"
+                                else:
+                                    message_text = "Decision Engine: No symbols configured for analysis"
+                            else:
+                                # PHASE 2 FIX: Reduce Decision Engine terminal spam - only show when actually processing
+                                message_text = ""  # Don't show generic "Real analysis completed" 
+                            color_type = "decision"
+                            
+                        elif 'position' in self.process_id.lower():
+                            # Get real position monitoring data
+                            if hasattr(self._business_instance, 'active_positions'):
+                                positions = getattr(self._business_instance, 'active_positions', {})
+                                if positions:
+                                    symbols = list(positions.keys())[:3]
+                                    message_text = f"Monitoring positions: {', '.join(symbols)}"
+                                else:
+                                    message_text = "Position Monitor: No active positions"
+                            elif hasattr(self._business_instance, 'watchlist_symbols'):
+                                symbols = getattr(self._business_instance, 'watchlist_symbols', [])
+                                message_text = f"Position Monitor: Checking {symbols}"
+                            else:
+                                message_text = "Position Monitor: Health check completed"
+                            color_type = "position"
+                            
+                        elif 'sentiment' in self.process_id.lower() or 'finbert' in self.process_id.lower():
+                            # Get real sentiment analysis data
+                            if hasattr(self._business_instance, 'last_sentiment_results'):
+                                results = getattr(self._business_instance, 'last_sentiment_results', [])
+                                if results:
+                                    symbols = [getattr(r, 'symbol', 'Unknown') for r in results[:3]]
+                                    message_text = f"Sentiment analyzed: {', '.join(symbols)}"
+                                else:
+                                    message_text = "Sentiment Analysis: No results generated"
+                            elif hasattr(self._business_instance, 'watchlist_symbols'):
+                                symbols = getattr(self._business_instance, 'watchlist_symbols', [])
+                                message_text = f"FinBERT Analysis: Processing {symbols}"
+                            else:
+                                message_text = "FinBERT Analysis: Real analysis completed"
+                            color_type = "sentiment"
+                            
+                        elif 'strategy' in self.process_id.lower():
+                            # Get real strategy analysis data
+                            if hasattr(self._business_instance, 'current_strategies'):
+                                strategies = getattr(self._business_instance, 'current_strategies', {})
+                                if strategies:
+                                    strategy_info = []
+                                    for symbol, strategy in list(strategies.items())[:3]:
+                                        strategy_name = getattr(strategy, 'strategy_type', 'Unknown') if hasattr(strategy, 'strategy_type') else str(strategy)
+                                        strategy_info.append(f"{symbol}: {strategy_name}")
+                                    message_text = f"Strategies active: {', '.join(strategy_info)}"
+                                else:
+                                    message_text = "Strategy Analyzer: No active strategies"
+                            elif hasattr(self._business_instance, 'watchlist_symbols'):
+                                symbols = getattr(self._business_instance, 'watchlist_symbols', [])
+                                message_text = f"Strategy Analyzer: Analyzing {symbols}"
+                            else:
+                                message_text = "Strategy Analyzer: Analysis completed"
+                            color_type = "strategy"
+                            
+                    except Exception as attr_error:
+                        self.logger.debug(f"Could not extract real execution details: {attr_error}")
+                        # Fallback to generic process-specific messages
+                        if 'news' in self.process_id.lower():
+                            message_text = "News pipeline: Collection cycle completed"
+                            color_type = "news"
+                        elif 'decision' in self.process_id.lower():
+                            message_text = "Decision Engine: Analysis cycle completed"
+                            color_type = "decision"
+                        elif 'position' in self.process_id.lower():
+                            message_text = "Position Monitor: Health check completed"
+                            color_type = "position"
+                        elif 'sentiment' in self.process_id.lower() or 'finbert' in self.process_id.lower():
+                            message_text = "FinBERT Analysis: Sentiment analysis completed"
+                            color_type = "sentiment"
+                        elif 'strategy' in self.process_id.lower():
+                            message_text = "Strategy Analyzer: Analysis completed"
+                            color_type = "strategy"
 
                 # Create message data for main terminal
                 message_data = {

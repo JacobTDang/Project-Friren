@@ -443,8 +443,21 @@ class SolidRiskManager:
                 size_calculation=size_calc
             )
 
-            self.logger.info(f" APPROVED: {resolved_decision.symbol} at {target_size_pct:.1%} "
+            self.logger.info(f"APPROVED: {resolved_decision.symbol} at {target_size_pct:.1%} "
                              f"(risk: {risk_level.value}, score: {risk_score:.0f})")
+
+            # BUSINESS LOGIC OUTPUT: Detailed risk check approval
+            try:
+                from terminal_color_system import print_risk_check
+                action = "BUY" if size_calc.is_buy else "SELL"
+                shares_count = int(abs(size_calc.shares_to_trade)) if size_calc.shares_to_trade else 0
+                risk_reason = warnings[0] if warnings else f"{risk_level.value.lower().replace('_', ' ')} risk level"
+                print_risk_check(f"{resolved_decision.symbol}: PASSED | decision: {action} {shares_count} shares | risk_score: {risk_score/100:.2f} | reason: '{risk_reason}'")
+            except ImportError:
+                action = "BUY" if size_calc.is_buy else "SELL"
+                shares_count = int(abs(size_calc.shares_to_trade)) if size_calc.shares_to_trade else 0
+                risk_reason = warnings[0] if warnings else f"{risk_level.value.lower().replace('_', ' ')} risk level"
+                print(f"[RISK CHECK] {resolved_decision.symbol}: PASSED | decision: {action} {shares_count} shares | risk_score: {risk_score/100:.2f} | reason: '{risk_reason}'")
 
             return result
 
@@ -742,7 +755,14 @@ class SolidRiskManager:
         """Create denial result with proper tracking"""
         self.validation_stats['denied_count'] += 1
 
-        self.logger.info(f" DENIED: {decision.symbol} - {reason}")
+        self.logger.info(f"DENIED: {decision.symbol} - {reason}")
+
+        # BUSINESS LOGIC OUTPUT: Risk check denial
+        try:
+            from terminal_color_system import print_risk_check
+            print_risk_check(f"FAILED - {decision.symbol}: {reason}")
+        except ImportError:
+            print(f"[RISK CHECK] FAILED - {decision.symbol}: {reason}")
 
         return RiskValidationResult(
             validation_result=result_type,

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 emergency_manager.py
 

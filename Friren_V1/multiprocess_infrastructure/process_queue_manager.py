@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 process_queue_manager.py
 
@@ -281,13 +280,13 @@ class ProcessQueueManager:
                 # Update statistics
                 self.total_cycles += 1
                 
-                # Short sleep to avoid busy waiting - much shorter since it's event-driven
-                time.sleep(5)  # Check every 5 seconds instead of 30+
+                # Sleep to avoid busy waiting - increased for production stability
+                time.sleep(30)  # Check every 30 seconds for production
                 
                 self.total_cycles += 1
                 
-                # Brief pause between cycles
-                time.sleep(1)
+                # Pause between cycles for production stability
+                time.sleep(5)
                 
         except Exception as e:
             self.logger.error(f"Error in queue rotation loop: {e}")

@@ -514,6 +514,12 @@ class ExecutionOrchestrator:
                 execution_result.average_price = current_price
                 execution_result.order_ids.append(str(order_id_or_error))
 
+                # BUSINESS LOGIC OUTPUT: Actual trade execution
+                action = "BUY" if size_calc.is_buy else "SELL"
+                total_value = shares_to_trade * current_price
+                self.logger.info(f"EXECUTION SUCCESS: {action} {shares_to_trade} {request.symbol} at ${current_price:.2f}")
+                print(f"[EXECUTION] {request.symbol}: EXECUTED {action} {shares_to_trade} shares at ${current_price:.2f} | order_id: {order_id_or_error} | value: ${total_value:,.2f}")
+
                 # Calculate slippage (simplified)
                 expected_price = size_calc.current_price
                 execution_result.execution_slippage = abs(current_price - expected_price) / expected_price

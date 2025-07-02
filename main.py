@@ -536,17 +536,17 @@ def run_trading_system():
         logger.info("=== INITIALIZING SMART NEWS SCHEDULING SYSTEM ===")
         from Friren_V1.multiprocess_infrastructure.news_scheduler import start_news_scheduling, NewsScheduleConfig
         
-        # Configure news scheduling
+        # Configure news scheduling - DISABLED FOR TESTING
         news_config = NewsScheduleConfig(
-            collection_interval_minutes=20,    # Every 20 minutes
-            collection_duration_minutes=3,     # Collect for 3 minutes
-            market_hours_only=True,            # Only during market hours + buffer
-            memory_threshold_pause=True        # Pause if memory high
+            collection_interval_minutes=999,   # Disable scheduled collection
+            collection_duration_minutes=1,     # Minimal duration
+            market_hours_only=False,           # Enable 24/7 news collection for testing  
+            memory_threshold_pause=False       # Disable memory pausing for testing
         )
         
-        # Start news scheduler
+        # Start news scheduler (disabled)
         news_scheduler = start_news_scheduling(news_config)
-        logger.info("SMART_NEWS: Scheduled news collection started (20min intervals)")
+        logger.info("SMART_NEWS: Scheduled news collection DISABLED for testing (999min intervals)")
         logger.info("SMART_NEWS: Expected 60% memory reduction from scheduled vs continuous collection")
 
         # Initialize main process memory monitoring (4GB limit for main process)

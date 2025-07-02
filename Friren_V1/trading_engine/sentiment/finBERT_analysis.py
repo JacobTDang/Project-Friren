@@ -319,6 +319,19 @@ class EnhancedFinBERT:
             'prediction_index': int(max_idx)
         }
 
+        # BUSINESS LOGIC OUTPUT: Detailed FinBERT analysis result
+        try:
+            from terminal_color_system import print_finbert
+            symbol_hint = article_id.split('_')[0] if '_' in article_id else 'UNKNOWN'
+            article_preview = text[:40] + '...' if len(text) > 40 else text
+            impact_score = abs(sentiment_score) * confidence  # Combined impact metric
+            print_finbert(f"{symbol_hint}: {classification} (confidence: {confidence*100:.1f}%) | article: '{article_preview}' | impact: {impact_score:.2f}")
+        except ImportError:
+            symbol_hint = article_id.split('_')[0] if '_' in article_id else 'UNKNOWN'
+            article_preview = text[:40] + '...' if len(text) > 40 else text
+            impact_score = abs(sentiment_score) * confidence  # Combined impact metric
+            print(f"[FINBERT] {symbol_hint}: {classification} (confidence: {confidence*100:.1f}%) | article: '{article_preview}' | impact: {impact_score:.2f}")
+
         return SentimentResult(
             article_id=article_id,
             text=text,

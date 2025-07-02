@@ -160,11 +160,17 @@ class SimpleAlpacaInterface:
 
         # Initialize clients
         self._initialize_clients()
+        
+        # CRITICAL: Add simulation mode warnings if detected
+        self._validate_trading_mode()
 
         self.logger.info("Alpaca interface initialized in PRODUCTION mode")
 
     def _initialize_clients(self):
-        """Initialize Alpaca trading and data clients"""
+        """Initialize Alpaca trading and data clients with production validation"""
+        if not HAS_ALPACA:
+            raise RuntimeError("CRITICAL: Alpaca library not available. Cannot initialize trading interface. Install alpaca-py library.")
+        
         try:
             # Create trading client for orders and account management
             self.trading_client = TradingClient(
@@ -183,13 +189,38 @@ class SimpleAlpacaInterface:
             account = self.trading_client.get_account()
             self.connected = True
 
-            self.logger.info(f" Alpaca API connected successfully")
+            self.logger.info(f"Alpaca API connected successfully")
             self.logger.info(f"Account: {account.account_number[:8]}... | "
                            f"Buying Power: ${float(account.buying_power):,.2f}")
 
         except Exception as e:
-            self.logger.error(f" Failed to initialize Alpaca API: {e}")
+            self.logger.error(f"Failed to initialize Alpaca API: {e}")
             self.connected = False
+            raise RuntimeError(f"Alpaca API initialization failed: {e}. Trading unavailable.")
+
+    def _validate_trading_mode(self):
+        """Validate trading mode and add critical warnings for simulation mode"""
+        # Check if we're using paper trading
+        if self.config.base_url and "paper" in self.config.base_url.lower():
+            self.logger.warning("PAPER TRADING MODE: Using Alpaca paper trading - trades are simulated but realistic")
+            self.logger.warning("PAPER TRADING: Portfolio changes will be tracked but NO REAL MONEY involved")
+        
+        # Check for test/demo credentials
+        if (self.config.api_key in ["test_key", "demo", "test"] or 
+            self.config.secret_key in ["test_secret", "demo", "test"]):
+            self.logger.error("DEMO CREDENTIALS DETECTED: Using test credentials - NO REAL TRADING POSSIBLE")
+            self.logger.error("PRODUCTION WARNING: Replace with real Alpaca API credentials for live trading")
+        
+        # Check if Alpaca library is missing
+        if not HAS_ALPACA:
+            self.is_simulation_mode = True
+            self.logger.error("CRITICAL: Alpaca library not available - ALL ORDERS WILL BE FAKE")
+            self.logger.error("INSTALL REQUIRED: pip install alpaca-py to enable real trading")
+        
+        # Validate API connectivity
+        if not self.connected:
+            self.logger.error("NO API CONNECTION: Trading interface not connected to Alpaca")
+            self.logger.error("CHECK: Verify API keys and network connectivity")
 
     def get_account_info(self) -> Optional[AlpacaAccount]:
         """
@@ -226,7 +257,7 @@ class SimpleAlpacaInterface:
 
     def submit_market_order(self, symbol: str, quantity: float, side: str) -> Tuple[bool, str]:
         """
-        Submit market order
+        Submit market order with simulation mode validation
 
         **Decision Engine Integration:**
         This is called by the execution engine when the risk manager approves a trade.
@@ -239,12 +270,22 @@ class SimpleAlpacaInterface:
         Returns:
             Tuple[bool, str]: (success, order_id_or_error_message)
         """
+        # CRITICAL: Check for simulation mode before submitting order
+        if self.is_simulation_mode or not HAS_ALPACA:
+            self.logger.error(f"SIMULATION MODE: Cannot submit real order for {side.upper()} {quantity} {symbol}")
+            self.logger.error(f"FAKE ORDER: This would be a {side.upper()} order but no real trade executed")
+            return False, "SIMULATION_MODE: Order blocked - not connected to real markets"
+        
         try:
             self.api_call_count += 1
             self.last_api_call = datetime.now()
 
             if not self.trading_client:
                 return False, "Trading client not available"
+
+            # Add paper trading warning
+            if "paper" in self.config.base_url.lower():
+                self.logger.warning(f"PAPER TRADING: Submitting {side.upper()} {quantity} {symbol} (simulated trade)")
 
             # Create market order request
             market_order_data = MarketOrderRequest(
@@ -257,7 +298,10 @@ class SimpleAlpacaInterface:
             # Submit order
             order = self.trading_client.submit_order(order_data=market_order_data)
 
-            self.logger.info(f" ORDER SUBMITTED: {side.upper()} {quantity} shares of {symbol} | ID: {order.id}")
+            self.logger.info(f"ORDER SUBMITTED: {side.upper()} {quantity} shares of {symbol} | ID: {order.id}")
+            if "paper" in self.config.base_url.lower():
+                self.logger.warning(f"PAPER TRADING: Order {order.id} is simulated - no real money involved")
+            
             return True, str(order.id)
 
         except Exception as e:
@@ -396,19 +440,32 @@ class SimpleAlpacaInterface:
 
     def close_position(self, symbol: str) -> Tuple[bool, str]:
         """
-        Close entire position for symbol
+        Close entire position for symbol with simulation mode validation
 
         **Emergency Controls:**
         Used by risk manager for emergency position closure.
         """
+        # CRITICAL: Check for simulation mode before closing position
+        if self.is_simulation_mode or not HAS_ALPACA:
+            self.logger.error(f"SIMULATION MODE: Cannot close real position for {symbol}")
+            self.logger.error(f"FAKE CLOSE: This would close {symbol} position but no real trade executed")
+            return False, "SIMULATION_MODE: Position close blocked - not connected to real markets"
+        
         try:
             if not self.trading_client:
                 return False, "Trading client not available"
 
+            # Add paper trading warning
+            if "paper" in self.config.base_url.lower():
+                self.logger.warning(f"PAPER TRADING: Closing {symbol} position (simulated trade)")
+
             # Close the position
             close_response = self.trading_client.close_position(symbol)
 
-            self.logger.info(f" POSITION CLOSED: {symbol}")
+            self.logger.info(f"POSITION CLOSED: {symbol}")
+            if "paper" in self.config.base_url.lower():
+                self.logger.warning(f"PAPER TRADING: Position close is simulated - no real money involved")
+            
             return True, str(close_response.id) if hasattr(close_response, 'id') else "CLOSED"
 
         except Exception as e:
@@ -429,8 +486,24 @@ class SimpleAlpacaInterface:
             'api_call_count': self.api_call_count,
             'last_api_call': self.last_api_call.isoformat() if self.last_api_call else None,
             'has_alpaca_library': HAS_ALPACA,
-            'config_loaded': bool(self.config.api_key and self.config.secret_key)
+            'config_loaded': bool(self.config.api_key and self.config.secret_key),
+            'trading_mode': 'PAPER' if 'paper' in self.config.base_url.lower() else 'UNKNOWN',
+            'ready_for_production': self._is_ready_for_production()
         }
+    
+    def _is_ready_for_production(self) -> bool:
+        """Check if interface is ready for production trading"""
+        if not HAS_ALPACA:
+            return False
+        if not self.connected:
+            return False
+        if self.is_simulation_mode:
+            return False
+        if not self.config.api_key or not self.config.secret_key:
+            return False
+        if self.config.api_key in ["test_key", "demo", "test"]:
+            return False
+        return True
 
     def reconnect(self) -> bool:
         """
@@ -448,7 +521,9 @@ class SimpleAlpacaInterface:
         else:
             self.is_simulation_mode = True
             self.connected = True  # Consider simulation as "connected"
-            self.logger.warning(" Running in SIMULATION MODE - no real trades will be executed")
+            self.logger.warning("CRITICAL WARNING: Running in SIMULATION MODE - NO REAL TRADES WILL BE EXECUTED")
+            self.logger.warning("SIMULATION MODE: All orders will be fake - system is NOT connected to real markets")
+            self.logger.warning("TO ENABLE REAL TRADING: Install alpaca-py library and provide valid API credentials")
             return True
 
 

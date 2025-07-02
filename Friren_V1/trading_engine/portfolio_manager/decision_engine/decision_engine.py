@@ -145,7 +145,7 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 # Import existing infrastructure - FAIL FAST: No fallback allowed
-from Friren_V1.multiprocess_infrastructure.redis_base_process import RedisBaseProcess
+# RedisBaseProcess already imported above, ProcessState imported above
 # Legacy queue imports - now using Redis ProcessMessage
 INFRASTRUCTURE_AVAILABLE = True
 
@@ -347,7 +347,8 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
             self.logger.info("LIFECYCLE_DEBUG: SolidRiskManager initialized.")
 
             self.logger.info("LIFECYCLE_DEBUG: Initializing ParameterAdapter...")
-            self.parameter_adapter = ParameterAdapter()
+            from .parameter_adapter import AdaptationLevel
+            self.parameter_adapter = ParameterAdapter(adaptation_level=AdaptationLevel.MODERATE)
             self.logger.info("LIFECYCLE_DEBUG: ParameterAdapter initialized.")
 
             self.logger.info("LIFECYCLE_DEBUG: Initializing ExecutionOrchestrator...")
@@ -378,19 +379,17 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
                 self.conflict_resolver = ConflictResolver(model_path=self._conflict_resolver_path)
                 self.logger.info("MEMORY_OPTIMIZATION: ConflictResolver loaded successfully")
             except Exception as e:
-                self.logger.error(f"Failed to lazy load ConflictResolver: {e}")
-                # Return a dummy resolver that always returns original decisions
-                class DummyResolver:
-                    def resolve_conflicts(self, decisions, *args, **kwargs):
-                        return decisions
-                self.conflict_resolver = DummyResolver()
+                self.logger.critical(f"CRITICAL ERROR: Failed to load ConflictResolver: {e}")
+                self.logger.critical("SYSTEM CANNOT OPERATE: ConflictResolver is required for safe trading decisions")
+                raise RuntimeError(f"Critical component ConflictResolver failed to load: {e}. System cannot make safe trading decisions without conflict resolution.")
         return self.conflict_resolver
 
     def _initialize_enhanced_components(self):
         """Initialize enhanced trading components with Redis-based infrastructure"""
         # Initialize proper enhanced components
+        from .parameter_adapter import AdaptationLevel
         self.risk_manager = SolidRiskManager()
-        self.parameter_adapter = ParameterAdapter()
+        self.parameter_adapter = ParameterAdapter(adaptation_level=AdaptationLevel.MODERATE)
         self.execution_orchestrator = ExecutionOrchestrator()
         self.conflict_resolver = ConflictResolver(model_path="models/demo_xgb_model.json")
         self.enhanced_init_status = {'done': True, 'error': None}
@@ -419,45 +418,58 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
         self._process_cycle()
 
     def _process_cycle(self):
-        # BUSINESS LOGIC COLORED OUTPUT
+        """FIXED: Event-driven Decision Engine - only processes when there are actual messages"""
         try:
-            from colored_print import success, info
-            from terminal_color_system import print_decision_engine
-            print_decision_engine("DECISION ENGINE: Analyzing trading signals and processing decisions...")
-            success("BUSINESS LOGIC: Decision engine main cycle executing")
-        except ImportError:
-            print("BUSINESS LOGIC: Decision engine main cycle executing")
-        
-        self.logger.critical("BUSINESS LOGIC: Decision engine main loop running - processing signals")
-        try:
-            messages_processed = 0
             cycle_start = time.time()
+            messages_processed = 0
 
             # Reset daily execution count if new day
             self._reset_daily_counters()
 
-            # Process all available messages aggressively (your existing logic)
-            while True:
-                message = self._get_next_message(timeout=0.1)
+            # FIXED: Only process if there are actual messages waiting
+            message = self._get_next_message(timeout=0.1)  # Slightly longer timeout
+            if message is None:
+                # No messages - sleep much longer to let other processes show output
+                time.sleep(30.0)  # Sleep 30 seconds when idle to reduce terminal spam
+                return
+
+            # Process the message we found
+            self._process_message(message)
+            messages_processed += 1
+
+            # Check for additional messages (but don't loop indefinitely)
+            additional_cycles = 0
+            while additional_cycles < 10:  # Max 10 additional messages per cycle
+                message = self._get_next_message(timeout=0.01)  # Very short timeout
                 if message is None:
                     break
-
+                
                 self._process_message(message)
                 messages_processed += 1
+                additional_cycles += 1
 
                 # Safety check for processing time
                 if time.time() - cycle_start > 2.0:
                     self.logger.warning(f"Processing cycle taking too long, processed {messages_processed} messages")
                     break
 
-            # After processing messages, make enhanced decisions
+            # BUSINESS LOGIC OUTPUT: Only when actually processing messages
             if messages_processed > 0:
+                try:
+                    from terminal_color_system import print_decision_engine
+                    print_decision_engine(f"Decision Engine: Processed {messages_processed} trading signals")
+                except ImportError:
+                    print(f"[DECISION ENGINE] Decision Engine: Processed {messages_processed} trading signals")
+
+                # After processing messages, make enhanced decisions
                 self._make_enhanced_trading_decisions()
 
-            # NEW: Periodic parameter adaptation
+                self.logger.info(f"BUSINESS LOGIC: Decision engine processed {messages_processed} signals")
+            
+            # NEW: Periodic parameter adaptation (only occasionally)
             self._maybe_adapt_parameters()
 
-            # Periodic maintenance
+            # Periodic maintenance (less frequent)
             self._periodic_maintenance()
 
             # Update metrics
@@ -465,10 +477,10 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
             self.metrics.processing_time_ms = cycle_time
 
             if messages_processed > 0:
-                self.logger.debug(f"Enhanced cycle: {messages_processed} messages in {cycle_time:.1f}ms")
+                self.logger.debug(f"Event-driven cycle: {messages_processed} messages in {cycle_time:.1f}ms")
 
         except Exception as e:
-            self.logger.error(f"Error in enhanced process cycle: {e}")
+            self.logger.error(f"Error in event-driven process cycle: {e}")
             self.error_count += 1
 
     def _process_message(self, message: ProcessMessage):

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 strategy_assignment_engine.py
 

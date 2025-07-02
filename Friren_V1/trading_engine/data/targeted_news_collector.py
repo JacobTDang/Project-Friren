@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Targeted News Collector - Event-Driven Single Stock Collection
 

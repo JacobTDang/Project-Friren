@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 message_router.py
 

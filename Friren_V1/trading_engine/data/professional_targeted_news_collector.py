@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Professional Targeted News Collector - Event-Driven Multi-Source Collection
 

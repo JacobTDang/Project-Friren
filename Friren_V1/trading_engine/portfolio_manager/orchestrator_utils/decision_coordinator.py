@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 decision_coordinator.py
 
@@ -69,7 +68,8 @@ class DecisionCoordinator:
                 # Process any pending decisions from symbol processes
                 self._process_pending_decisions()
 
-                time.sleep(self.config.decision_cycle_interval)
+                # EVENT-DRIVEN: Wait for messages instead of sleeping
+                self._wait_for_decision_trigger_messages()
 
             except Exception as e:
                 self.logger.error(f"Error in decision coordination loop: {e}")
@@ -139,13 +139,8 @@ class DecisionCoordinator:
     def _check_pending_decisions(self):
         """Check for pending decisions from decision engine"""
         try:
-            # Simulate decision engine queue management
-            if self._last_decision_check is not None:
-                time_since_last = time.time() - self._last_decision_check
-                if time_since_last < 300:  # Only check every 5 minutes
-                    return
-
-            self._last_decision_check = time.time()
+            # EVENT-DRIVEN: Process decisions immediately when triggered by messages
+            # Removed 300-second delay - decisions now processed on demand
 
             # REMOVED: Random task generation and simulation
             # Real trading decisions should only come from actual market signals and analysis
@@ -315,3 +310,65 @@ class DecisionCoordinator:
 
         except Exception as e:
             self.logger.error(f"Error processing pending decisions: {e}")
+
+    def _wait_for_decision_trigger_messages(self):
+        """EVENT-DRIVEN: Wait for messages that should trigger decision processing"""
+        try:
+            # Get process manager for Redis access
+            if not hasattr(self, 'process_manager') or not self.process_manager:
+                # Fallback to short sleep if no process manager
+                time.sleep(30)
+                return
+            
+            # Try to get Redis manager from process manager
+            redis_manager = getattr(self.process_manager, 'redis_manager', None)
+            if not redis_manager:
+                # Fallback to short sleep if no Redis manager
+                time.sleep(30)
+                return
+            
+            # EVENT-DRIVEN: Listen for decision trigger messages
+            # Messages that should trigger decision processing:
+            # - news_collected
+            # - sentiment_complete  
+            # - strategy_signal
+            # - risk_alert
+            
+            trigger_messages = [
+                'news_collected',
+                'sentiment_complete',
+                'strategy_signal', 
+                'risk_alert',
+                'decision_request'
+            ]
+            
+            # Wait for any trigger message (with timeout for safety)
+            message_received = False
+            timeout_seconds = 60  # Maximum wait time before checking anyway
+            start_time = time.time()
+            
+            while not message_received and (time.time() - start_time) < timeout_seconds:
+                try:
+                    # Check for messages from any trigger source
+                    for message_type in trigger_messages:
+                        message = redis_manager.get_message_from_queue(message_type, block=False)
+                        if message:
+                            self.logger.info(f"EVENT-DRIVEN: Decision triggered by {message_type} message")
+                            message_received = True
+                            break
+                    
+                    if not message_received:
+                        # Brief pause before checking again
+                        time.sleep(1)
+                        
+                except Exception as e:
+                    self.logger.debug(f"Message check error: {e}")
+                    time.sleep(1)
+            
+            if not message_received:
+                self.logger.debug("EVENT-DRIVEN: Timeout reached, processing anyway for safety")
+            
+        except Exception as e:
+            self.logger.error(f"Error in event-driven message waiting: {e}")
+            # Fallback to short sleep on error
+            time.sleep(30)

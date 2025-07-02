@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 redis_process_manager.py
 
@@ -614,17 +613,39 @@ class RedisProcessManager:
             uptime_seconds = (datetime.now() - status.last_start_time).total_seconds()
 
         # Determine if subprocess is running
-        subprocess_running = (
-            status.process is not None and
-            status.process.poll() is None
-        )
+        if status.process is None:
+            subprocess_running = False
+            self.logger.debug(f"Process {process_id}: No subprocess reference")
+        else:
+            poll_result = status.process.poll()
+            subprocess_running = (poll_result is None)
+            if not subprocess_running:
+                self.logger.debug(f"Process {process_id}: Subprocess poll returned {poll_result} (process ended)")
+            else:
+                self.logger.debug(f"Process {process_id}: Subprocess running (poll=None)")
 
         # Determine health status more intelligently
         is_healthy = self._determine_process_health(process_id, health_data, subprocess_running, uptime_seconds)
 
-        # A process is considered "running" if the subprocess is alive
-        # Health is a separate metric that considers Redis heartbeat
-        is_running = subprocess_running
+        # A process is considered "running" if subprocess is alive OR Redis shows recent activity
+        # This handles cases where subprocess tracking fails but process is actually running
+        redis_active = health_data and health_data.get('last_heartbeat')
+        if redis_active:
+            try:
+                last_heartbeat = datetime.fromisoformat(health_data['last_heartbeat'].replace('Z', '+00:00'))
+                seconds_since_heartbeat = (datetime.now().replace(tzinfo=None) - last_heartbeat.replace(tzinfo=None)).total_seconds()
+                redis_recently_active = seconds_since_heartbeat < 60  # Active within last minute
+            except Exception as e:
+                self.logger.debug(f"Error parsing Redis heartbeat for {process_id}: {e}")
+                redis_recently_active = False
+        else:
+            redis_recently_active = False
+            
+        # Process is running if subprocess is alive OR Redis shows recent activity
+        is_running = subprocess_running or redis_recently_active
+        
+        if not subprocess_running and redis_recently_active:
+            self.logger.debug(f"Process {process_id}: Subprocess tracking failed but Redis shows recent activity")
 
         return {
             'process_id': process_id,

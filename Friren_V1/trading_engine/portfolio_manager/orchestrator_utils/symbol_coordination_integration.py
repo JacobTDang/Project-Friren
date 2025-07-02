@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 symbol_coordination_integration.py
 

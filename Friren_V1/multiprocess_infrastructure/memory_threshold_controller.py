@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 memory_threshold_controller.py
 
@@ -54,9 +53,9 @@ class MemoryThresholdController:
     """
     
     def __init__(self, 
-                 memory_threshold_mb: float = 800,    # Pause threshold
-                 memory_resume_mb: float = 600,       # Resume threshold  
-                 emergency_threshold_mb: float = 950,  # Emergency threshold
+                 memory_threshold_mb: float = 1800,    # Pause threshold (increased for production)
+                 memory_resume_mb: float = 1400,       # Resume threshold (increased for production)
+                 emergency_threshold_mb: float = 2200,  # Emergency threshold (increased for production)
                  check_interval: int = 10):            # Check every 10 seconds
         
         self.memory_threshold_mb = memory_threshold_mb

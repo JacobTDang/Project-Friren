@@ -96,6 +96,24 @@ class SimpleExecutionEngine:
                  db_manager: TradingDBManager):
         self.logger = logging.getLogger("execution_engine")
 
+        # PRODUCTION VALIDATION: Ensure all dependencies are properly initialized
+        if not order_manager:
+            raise ValueError("SimpleOrderManager is required for production execution")
+        if not alpaca_interface:
+            raise ValueError("SimpleAlpacaInterface is required for production execution")
+        if not db_manager:
+            raise ValueError("TradingDBManager is required for production execution")
+        
+        # Validate Alpaca interface is properly configured
+        try:
+            # Test basic connectivity without making trades
+            account_info = alpaca_interface.get_account_info()
+            if not account_info:
+                raise RuntimeError("Alpaca interface failed account validation - cannot execute trades")
+            self.logger.info("Alpaca interface validated successfully")
+        except Exception as e:
+            raise RuntimeError(f"Alpaca interface validation failed: {e}. Trading execution unavailable.")
+
         # Tool integrations
         self.order_manager = order_manager
         self.alpaca_interface = alpaca_interface
@@ -105,10 +123,12 @@ class SimpleExecutionEngine:
         self.stats = {
             'total_executions': 0,
             'successful_executions': 0,
-            'total_volume': 0.0
+            'total_volume': 0.0,
+            'validation_errors': 0,
+            'alpaca_errors': 0
         }
 
-        self.logger.info("SimpleExecutionEngine initialized")
+        self.logger.info("SimpleExecutionEngine initialized with validated dependencies")
 
     def execute_trade(self, request: SimpleExecutionRequest) -> SimpleExecutionResult:
         """
@@ -144,47 +164,80 @@ class SimpleExecutionEngine:
             return self._create_error_result(request, str(e))
 
     def _execute_market_order(self, request: SimpleExecutionRequest, start_time: float) -> SimpleExecutionResult:
-        """Execute simple market order"""
+        """Execute simple market order with comprehensive error handling"""
         try:
-            # Get current price
-            current_price = self.alpaca_interface.get_current_price(request.symbol)
-            if not current_price:
-                return self._create_error_result(request, "Cannot get current price")
+            # VALIDATION: Pre-flight checks
+            validation_error = self._validate_execution_prerequisites(request)
+            if validation_error:
+                self.stats['validation_errors'] += 1
+                return self._create_error_result(request, f"Validation failed: {validation_error}")
+
+            # Get current price with specific error handling
+            try:
+                current_price = self.alpaca_interface.get_current_price(request.symbol)
+                if not current_price or current_price <= 0:
+                    raise ValueError(f"Invalid price received: {current_price}")
+            except Exception as e:
+                self.stats['alpaca_errors'] += 1
+                return self._create_error_result(request, f"Price fetch failed: {str(e)}")
 
             # Determine order side
             side = OrderSide.BUY if request.execution_type == ExecutionType.BUY else OrderSide.SELL
 
-            # Create order
-            order_request = OrderRequest(
-                symbol=request.symbol,
-                side=side,
-                quantity=request.quantity,
-                order_type=OrderType.MARKET,
-                strategy_name=request.strategy_name,
-                confidence_score=request.confidence_score
-            )
+            # Create order with validation
+            try:
+                order_request = OrderRequest(
+                    symbol=request.symbol,
+                    side=side,
+                    quantity=request.quantity,
+                    order_type=OrderType.MARKET,
+                    strategy_name=request.strategy_name,
+                    confidence_score=request.confidence_score
+                )
+            except Exception as e:
+                return self._create_error_result(request, f"Order request creation failed: {str(e)}")
 
-            # Submit order
-            order_success, order_or_error = self.order_manager.create_order(order_request, current_price)
-            if not order_success:
-                return self._create_error_result(request, f"Order creation failed: {order_or_error}")
+            # Submit order to order manager with specific error handling
+            try:
+                order_success, order_or_error = self.order_manager.create_order(order_request, current_price)
+                if not order_success:
+                    return self._create_error_result(request, f"Order creation failed: {order_or_error}")
+                order = order_or_error
+            except Exception as e:
+                return self._create_error_result(request, f"Order manager error: {str(e)}")
 
-            order = order_or_error
-
-            # Submit to Alpaca
-            alpaca_success, alpaca_id_or_error = self.alpaca_interface.submit_order(order)
-            if not alpaca_success:
-                return self._create_error_result(request, f"Alpaca submission failed: {alpaca_id_or_error}")
+            # Submit to Alpaca with comprehensive error handling
+            try:
+                alpaca_success, alpaca_id_or_error = self.alpaca_interface.submit_order(order)
+                if not alpaca_success:
+                    self.stats['alpaca_errors'] += 1
+                    # Try to cancel the order in order manager
+                    try:
+                        self.order_manager.cancel_order(order)
+                    except Exception:
+                        pass  # Best effort cleanup
+                    return self._create_error_result(request, f"Alpaca submission failed: {alpaca_id_or_error}")
+            except Exception as e:
+                self.stats['alpaca_errors'] += 1
+                return self._create_error_result(request, f"Alpaca interface error: {str(e)}")
 
             # Mark as submitted
-            self.order_manager.submit_order(order)
+            try:
+                self.order_manager.submit_order(order)
+            except Exception as e:
+                self.logger.warning(f"Failed to mark order as submitted: {e}")
+                # Continue execution as order was already submitted to Alpaca
 
-            # Wait for fill (simplified - just assume it fills at market price)
+            # Wait for fill (simplified - assume market fill)
             fill_price = current_price
             filled_quantity = request.quantity
 
-            # Update position in database
-            self._update_position(request.symbol, filled_quantity, fill_price, side)
+            # Update position in database with error handling
+            try:
+                self._update_position(request.symbol, filled_quantity, fill_price, side)
+            except Exception as e:
+                self.logger.error(f"Failed to update position in database: {e}")
+                # Continue as trade was executed, just DB update failed
 
             # Update stats
             self.stats['successful_executions'] += 1
@@ -192,7 +245,11 @@ class SimpleExecutionEngine:
 
             execution_time = time.time() - start_time
 
-            self.logger.info(f"Executed {side.value} {filled_quantity} {request.symbol} @ {fill_price}")
+            self.logger.info(f"EXECUTION: {side.value} {filled_quantity} {request.symbol} @ ${fill_price:.2f}")
+            
+            # BUSINESS LOGIC OUTPUT - Real execution details
+            order_value = filled_quantity * fill_price
+            print(f"[EXECUTION] {request.symbol}: EXECUTED {side.value.upper()} {filled_quantity} shares at ${fill_price:.2f} | order_id: {alpaca_id_or_error} | value: ${order_value:,.2f}")
 
             return SimpleExecutionResult(
                 symbol=request.symbol,
@@ -204,8 +261,8 @@ class SimpleExecutionEngine:
             )
 
         except Exception as e:
-            self.logger.error(f"Market order execution error: {e}")
-            return self._create_error_result(request, str(e))
+            self.logger.error(f"Unexpected market order execution error: {e}")
+            return self._create_error_result(request, f"Unexpected error: {str(e)}")
 
     def _execute_close(self, request: SimpleExecutionRequest, start_time: float) -> SimpleExecutionResult:
         """Execute position close"""
@@ -298,12 +355,48 @@ class SimpleExecutionEngine:
             self.logger.error(f"Error updating position: {e}")
 
     def _validate_request(self, request: SimpleExecutionRequest) -> bool:
-        """Simple validation"""
+        """Basic request validation"""
         if not request.symbol or request.quantity <= 0:
             return False
         if request.max_slippage_percent < 0 or request.max_slippage_percent > 20:
             return False
         return True
+    
+    def _validate_execution_prerequisites(self, request: SimpleExecutionRequest) -> Optional[str]:
+        """Comprehensive validation before execution"""
+        # Basic request validation
+        if not self._validate_request(request):
+            return "Invalid request parameters"
+        
+        # Symbol validation
+        if not request.symbol or len(request.symbol) < 1 or len(request.symbol) > 5:
+            return f"Invalid symbol format: {request.symbol}"
+        
+        # Quantity validation
+        if request.quantity <= 0 or request.quantity > 10000:
+            return f"Invalid quantity: {request.quantity}"
+        
+        # Strategy validation
+        if not request.strategy_name or len(request.strategy_name) < 2:
+            return "Strategy name is required"
+        
+        # Confidence score validation
+        if request.confidence_score < 0 or request.confidence_score > 1:
+            return f"Invalid confidence score: {request.confidence_score}"
+        
+        # Check if Alpaca interface is available
+        if not self.alpaca_interface:
+            return "Alpaca interface not available"
+        
+        # Check if order manager is available
+        if not self.order_manager:
+            return "Order manager not available"
+        
+        # Check if database manager is available
+        if not self.db_manager:
+            return "Database manager not available"
+        
+        return None  # No validation errors
 
     def _create_error_result(self, request: SimpleExecutionRequest, error: str) -> SimpleExecutionResult:
         """Create error result"""
@@ -319,29 +412,76 @@ class SimpleExecutionEngine:
         return self.stats.copy()
 
     def force_close_all_positions(self) -> List[SimpleExecutionResult]:
-        """Emergency close all positions"""
+        """Emergency close all positions with comprehensive error handling"""
+        results = []
+        
         try:
-            self.logger.warning("Force closing all positions")
+            self.logger.warning("EMERGENCY: Force closing all positions")
 
-            positions = self.alpaca_interface.get_positions()
-            results = []
+            # Validate Alpaca interface availability
+            if not self.alpaca_interface:
+                self.logger.error("Cannot force close: Alpaca interface not available")
+                return []
+            
+            # Get positions with error handling
+            try:
+                positions = self.alpaca_interface.get_positions()
+                if not positions:
+                    self.logger.info("No positions to close")
+                    return []
+            except Exception as e:
+                self.logger.error(f"Failed to get positions for force close: {e}")
+                return []
 
+            self.logger.warning(f"Found {len(positions)} positions to force close")
+            
+            # Close each position individually with error isolation
             for position in positions:
-                if abs(position.quantity) > 0.001:
-                    request = SimpleExecutionRequest(
-                        symbol=position.symbol,
+                try:
+                    if abs(position.quantity) > 0.001:
+                        self.logger.warning(f"Force closing {position.symbol}: {position.quantity} shares")
+                        
+                        request = SimpleExecutionRequest(
+                            symbol=position.symbol,
+                            execution_type=ExecutionType.FORCE_CLOSE,
+                            quantity=abs(position.quantity),
+                            strategy_name="emergency_close",
+                            max_slippage_percent=15.0  # Higher slippage tolerance for emergency
+                        )
+                        
+                        result = self.execute_trade(request)
+                        results.append(result)
+                        
+                        if result.success:
+                            self.logger.warning(f"Force closed {position.symbol}")
+                        else:
+                            self.logger.error(f"Failed to force close {position.symbol}: {result.error_message}")
+                    else:
+                        self.logger.info(f"Skipping {position.symbol}: position too small ({position.quantity})")
+                        
+                except Exception as e:
+                    self.logger.error(f"Error force closing {getattr(position, 'symbol', 'unknown')}: {e}")
+                    # Create error result for this position
+                    error_result = SimpleExecutionResult(
+                        symbol=getattr(position, 'symbol', 'unknown'),
                         execution_type=ExecutionType.FORCE_CLOSE,
-                        quantity=abs(position.quantity),
-                        strategy_name="emergency_close"
+                        success=False,
+                        error_message=str(e)
                     )
-                    result = self.execute_trade(request)
-                    results.append(result)
+                    results.append(error_result)
+                    continue
 
+            # Log summary
+            successful_closes = sum(1 for r in results if r.success)
+            failed_closes = len(results) - successful_closes
+            
+            self.logger.warning(f"Force close complete: {successful_closes} successful, {failed_closes} failed")
+            
             return results
 
         except Exception as e:
-            self.logger.error(f"Force close all error: {e}")
-            return []
+            self.logger.error(f"Critical error in force close all: {e}")
+            return results  # Return partial results if any
 
 
 # Utility functions - much simpler

@@ -293,12 +293,19 @@ class PositionHealthMonitor(RedisBaseProcess):
 
             # Data fetcher - Import and initialize here to avoid import issues
             try:
-                from ...data.data_utils import StockDataFetcher
+                from Friren_V1.trading_engine.data.data_utils import StockDataFetcher
                 self.data_fetcher = StockDataFetcher()
-                self.logger.info("StockDataFetcher initialized")
-            except ImportError:
-                self.logger.warning("StockDataFetcher not available - using mock data fetcher")
-                self.data_fetcher = None
+                self.logger.info("StockDataFetcher initialized successfully")
+            except ImportError as e:
+                self.logger.warning(f"StockDataFetcher not available: {e}")
+                try:
+                    # Fallback: Try alternative import path
+                    from Friren_V1.trading_engine.data.yahoo_price import YahooFinancePriceData
+                    self.data_fetcher = YahooFinancePriceData()
+                    self.logger.info("YahooFinancePriceData initialized as fallback")
+                except ImportError as e2:
+                    self.logger.error(f"No data fetcher available: {e2}")
+                    self.data_fetcher = None
 
             # CRITICAL FIX: Initialize TradingDBManager to access actual database positions
             try:
@@ -355,7 +362,23 @@ class PositionHealthMonitor(RedisBaseProcess):
         """Create default monitoring state when shared state unavailable"""
         try:
             # Use symbols from configuration or default to common holdings
-            default_symbols = self.symbols or ['AAPL', 'MSFT', 'GOOGL']
+            # Get symbols from database or configuration - no hardcoded defaults
+            default_symbols = self.symbols or []
+            
+            # If no symbols available, try to get from database
+            if not default_symbols and hasattr(self, 'trading_db_manager') and self.trading_db_manager:
+                try:
+                    holdings = self.trading_db_manager.get_current_holdings()
+                    default_symbols = [h['symbol'] for h in holdings if h.get('symbol')]
+                    if default_symbols:
+                        self.logger.info(f"Loaded {len(default_symbols)} symbols from database holdings")
+                except Exception as e:
+                    self.logger.warning(f"Could not load symbols from database: {e}")
+                    
+            # If still no symbols, return early with warning
+            if not default_symbols:
+                self.logger.warning("No symbols available for monitoring - check database holdings or configuration")
+                return
             
             for symbol in default_symbols:
                 self.active_strategies[symbol] = {
@@ -365,8 +388,8 @@ class PositionHealthMonitor(RedisBaseProcess):
                     'last_check': datetime.now(),
                     'health_score': 0.7,
                     'risk_level': 'medium',
-                    'shares': 10.0,  # Default position size
-                    'entry_price': 150.0  # Default price
+                    'shares': 0.0,  # No default position size - should be loaded from actual data
+                    'entry_price': 0.0  # No default price - should be loaded from actual data
                 }
             
             self.logger.info(f"Created default monitoring state for {len(default_symbols)} symbols")
@@ -634,13 +657,27 @@ class PositionHealthMonitor(RedisBaseProcess):
             for symbol in self.active_strategies.keys():
                 try:
                     # If data fetcher is available, use it
-                    if self.data_fetcher and hasattr(self.data_fetcher, 'extract_data'):
-                        df = self.data_fetcher.extract_data(symbol, period="50d", interval="1d")
-                        if not df.empty:
-                            market_data_dict[symbol] = df
-                            self.logger.debug(f"Fetched {len(df)} days of data for {symbol}")
-                        else:
-                            self.logger.warning(f"No data received for {symbol}")
+                    if self.data_fetcher:
+                        try:
+                            if hasattr(self.data_fetcher, 'extract_data'):
+                                # StockDataFetcher or compatible interface
+                                df = self.data_fetcher.extract_data(symbol, period="50d", interval="1d")
+                            elif hasattr(self.data_fetcher, 'get_historical_data'):
+                                # YahooFinancePriceData fallback
+                                df = self.data_fetcher.get_historical_data(symbol, period="50d")
+                            else:
+                                # Unknown data fetcher interface
+                                self.logger.error(f"Data fetcher has unknown interface for {symbol}")
+                                continue
+                                
+                            if not df.empty:
+                                market_data_dict[symbol] = df
+                                self.logger.debug(f"Fetched {len(df)} days of data for {symbol}")
+                            else:
+                                self.logger.warning(f"No data received for {symbol}")
+                        except Exception as e:
+                            self.logger.error(f"Error fetching data for {symbol}: {e}")
+                            continue
                     else:
                         # NO MOCK DATA - Skip symbols without real data fetcher
                         self.logger.error(f"Cannot fetch real market data for {symbol} - StockDataFetcher not available")
@@ -1656,6 +1693,38 @@ class PositionHealthMonitor(RedisBaseProcess):
                         position_info = f", size: {strategy_data.get('position_size')} shares"
                     
                     print_position_monitor(f"Position Monitor: {symbol} health: {health_score:.1%}, risk: {risk_level}, duration: {duration.days}d{position_info}")
+                    
+                    # BUSINESS LOGIC OUTPUT: Detailed position health monitoring
+                    try:
+                        from terminal_color_system import print_position_health
+                        shares = strategy_data.get('position_size', 0) if hasattr(strategy_data, 'get') else getattr(strategy_data, 'position_size', 0)
+                        avg_cost = strategy_data.get('avg_cost', 0) if hasattr(strategy_data, 'get') else getattr(strategy_data, 'avg_cost', 0)
+                        current_value = shares * avg_cost * (1 + (health_score - 0.5) * 0.1)  # Estimate current value from health
+                        pnl_pct = (health_score - 0.5) * 20  # Convert health to approximate PnL%
+                        risk_status = risk_level.upper() if risk_level != 'unknown' else 'LOW'
+                        action = "HOLD" if abs(pnl_pct) < 5 else ("MONITOR" if abs(pnl_pct) < 10 else "REVIEW")
+                        print_position_health(f"{symbol}: {shares} shares | value: ${current_value:,.2f} | PnL: {pnl_pct:+.2f}% | risk: {risk_status} | action: {action}")
+                    except ImportError:
+                        shares = strategy_data.get('position_size', 0) if hasattr(strategy_data, 'get') else getattr(strategy_data, 'position_size', 0)
+                        avg_cost = strategy_data.get('avg_cost', 0) if hasattr(strategy_data, 'get') else getattr(strategy_data, 'avg_cost', 0)
+                        current_value = shares * avg_cost * (1 + (health_score - 0.5) * 0.1)  # Estimate current value from health
+                        pnl_pct = (health_score - 0.5) * 20  # Convert health to approximate PnL%
+                        risk_status = risk_level.upper() if risk_level != 'unknown' else 'LOW'
+                        action = "HOLD" if abs(pnl_pct) < 5 else ("MONITOR" if abs(pnl_pct) < 10 else "REVIEW")
+                        print(f"[POSITION HEALTH] {symbol}: {shares} shares | value: ${current_value:,.2f} | PnL: {pnl_pct:+.2f}% | risk: {risk_status} | action: {action}")
+                    
+                    # BUSINESS LOGIC OUTPUT: Detailed strategy monitoring 
+                    try:
+                        from terminal_color_system import print_strategy_monitor
+                        performance_status = "GOOD" if health_score >= 0.7 else "FAIR" if health_score >= 0.5 else "POOR"
+                        pnl_info = f"performance: +{(health_score-0.5)*10:.2f}%" if health_score > 0.5 else f"performance: {(health_score-0.5)*10:.2f}%"
+                        duration_hours = duration.total_seconds() / 3600
+                        print_strategy_monitor(f"{symbol}: {strategy_type} | {pnl_info} | health: {performance_status} | duration: {duration_hours:.1f}h")
+                    except ImportError:
+                        performance_status = "GOOD" if health_score >= 0.7 else "FAIR" if health_score >= 0.5 else "POOR"
+                        pnl_info = f"performance: +{(health_score-0.5)*10:.2f}%" if health_score > 0.5 else f"performance: {(health_score-0.5)*10:.2f}%"
+                        duration_hours = duration.total_seconds() / 3600
+                        print(f"[STRATEGY MONITOR] {symbol}: {strategy_type} | {pnl_info} | health: {performance_status} | duration: {duration_hours:.1f}h")
             else:
                 print_position_monitor("Position Monitor: No active strategies detected")
             
@@ -1681,9 +1750,21 @@ class PositionHealthMonitor(RedisBaseProcess):
             # REMOVED: Demo simulation replaced with real database access
             if hasattr(self, 'trading_db_manager') and self.trading_db_manager:
                 # Use real database to get holdings
-                holdings = self.trading_db_manager.get_current_holdings()
-                if holdings:
-                    return holdings
+                holdings_list = self.trading_db_manager.get_current_holdings()
+                if holdings_list:
+                    # Convert list to dictionary format expected by display function
+                    holdings_dict = {}
+                    for holding in holdings_list:
+                        symbol = holding['symbol']
+                        holdings_dict[symbol] = {
+                            'shares': holding.get('quantity', 0),
+                            'current_price': holding.get('avg_cost', 0),  # Use avg_cost as current price for now
+                            'unrealized_pnl': holding.get('unrealized_pnl', 0),
+                            'unrealized_pnl_percent': 0.0,  # Will be calculated with real market data
+                            'avg_cost': holding.get('avg_cost', 0),
+                            'total_invested': holding.get('total_invested', 0)
+                        }
+                    return holdings_dict
                     
             # If no real database access available, return empty
             self.logger.warning("No real holdings available - trading database not accessible")

@@ -315,6 +315,30 @@ class ConflictResolver:
                            f"{resolved.get_recommendation()} ({resolved.get_confidence_level()}) "
                            f"via {resolved.resolution_method.value}")
 
+            # BUSINESS LOGIC OUTPUT: Recommendation generated
+            try:
+                from terminal_color_system import print_recommendation
+                # Try to get article context from signal
+                article_context = ""
+                if hasattr(aggregated_signal, 'news_articles') and aggregated_signal.news_articles:
+                    first_article = aggregated_signal.news_articles[0]
+                    article_title = first_article.title[:50] + "..." if len(first_article.title) > 50 else first_article.title
+                    article_context = f" | Article: '{article_title}'"
+                
+                print_recommendation(f"{aggregated_signal.symbol}: {resolved.get_recommendation()} "
+                                   f"(confidence: {resolved.get_confidence_level()})"
+                                   f"{article_context}")
+            except ImportError:
+                article_context = ""
+                if hasattr(aggregated_signal, 'news_articles') and aggregated_signal.news_articles:
+                    first_article = aggregated_signal.news_articles[0]
+                    article_title = first_article.title[:50] + "..." if len(first_article.title) > 50 else first_article.title
+                    article_context = f" | Article: '{article_title}'"
+                
+                print(f"[RECOMMENDATION] {aggregated_signal.symbol}: {resolved.get_recommendation()} "
+                      f"(confidence: {resolved.get_confidence_level()})"
+                      f"{article_context}")
+
             return resolved
 
         except Exception as e:
@@ -598,15 +622,36 @@ class ConflictResolver:
         return features
 
     def _predict_with_xgboost(self, features: Dict[str, float], symbol: str) -> MLDecision:
-        """Make prediction using XGBoost model"""
+        """Make prediction using XGBoost model with validation"""
 
+        # VALIDATION: Check model availability and health
         if not self.xgb_model:
-            # Fallback if no model
+            self.logger.warning(f"NO XGBOOST MODEL: Cannot make ML prediction for {symbol} - using rule-based fallback")
             return MLDecision(
                 predicted_direction=0.0,
                 ml_confidence=0.0,
                 feature_importance={},
                 model_version="none"
+            )
+        
+        # VALIDATION: Check XGBoost library availability
+        if not HAS_XGBOOST:
+            self.logger.error(f"XGBOOST LIBRARY MISSING: Cannot make prediction for {symbol}")
+            return MLDecision(
+                predicted_direction=0.0,
+                ml_confidence=0.0,
+                feature_importance={},
+                model_version="xgboost_library_missing"
+            )
+            
+        # VALIDATION: Validate input features
+        if not features or len(features) == 0:
+            self.logger.warning(f"NO FEATURES: Cannot make XGBoost prediction for {symbol} without features")
+            return MLDecision(
+                predicted_direction=0.0,
+                ml_confidence=0.0,
+                feature_importance={},
+                model_version="xgboost_no_features"
             )
 
         try:
@@ -733,37 +778,126 @@ class ConflictResolver:
         )
 
     def _load_ml_model(self, model_path: str):
-        """Load XGBoost model and setup SHAP explainer"""
+        """Load XGBoost model with comprehensive validation and health checks"""
         try:
+            # VALIDATION: Check XGBoost availability before attempting load
+            if not HAS_XGBOOST:
+                self.logger.error("XGBOOST NOT AVAILABLE: Cannot load trading model - install xgboost library")
+                self.xgb_model = None
+                return
+            
+            # VALIDATION: Check model file exists and is readable
+            if not os.path.exists(model_path):
+                self.logger.error(f"MODEL FILE NOT FOUND: {model_path} - XGBoost decisions unavailable")
+                self.xgb_model = None
+                return
+            
+            # Check file size and modification time for basic validation
+            file_stat = os.stat(model_path)
+            if file_stat.st_size == 0:
+                self.logger.error(f"MODEL FILE EMPTY: {model_path} - corrupted model file")
+                self.xgb_model = None
+                return
+            
             # Try loading as sklearn XGBoost model first (for demo model)
             try:
                 import joblib
                 self.xgb_model = joblib.load(model_path.replace('.json', '.pkl'))
                 self.logger.info("Loaded sklearn XGBoost model")
-            except:
-                # Fallback to native XGBoost format
-                self.xgb_model = xgb.Booster()
-                self.xgb_model.load_model(model_path)
-                self.logger.info("Loaded native XGBoost model")
+                model_type = "sklearn"
+            except Exception as sklearn_error:
+                try:
+                    # Fallback to native XGBoost format
+                    self.xgb_model = xgb.Booster()
+                    self.xgb_model.load_model(model_path)
+                    self.logger.info("Loaded native XGBoost model")
+                    model_type = "native"
+                except Exception as native_error:
+                    self.logger.error(f"MODEL LOAD FAILED: sklearn error: {sklearn_error}, native error: {native_error}")
+                    self.xgb_model = None
+                    return
+
+            # VALIDATION: Perform model health checks
+            model_validation_result = self._validate_model_health()
+            if not model_validation_result:
+                self.logger.error("MODEL VALIDATION FAILED: XGBoost model failed health checks")
+                self.xgb_model = None
+                return
 
             # Load feature names if available
             feature_names_path = Path(model_path).parent / "feature_names.pkl"
             if feature_names_path.exists():
-                with open(feature_names_path, 'rb') as f:
-                    self.feature_names = pickle.load(f)
+                try:
+                    with open(feature_names_path, 'rb') as f:
+                        self.feature_names = pickle.load(f)
+                    self.logger.info(f"Loaded {len(self.feature_names)} feature names")
+                except Exception as e:
+                    self.logger.warning(f"Failed to load feature names: {e}")
+                    self.feature_names = None
+            else:
+                self.logger.warning("Feature names file not found - using default names")
 
-            # Setup SHAP explainer with lazy loading
+            # Setup SHAP explainer with lazy loading and validation
             shap_module = get_shap()
             if shap_module:
-                self.shap_explainer = shap_module.TreeExplainer(self.xgb_model)
+                try:
+                    self.shap_explainer = shap_module.TreeExplainer(self.xgb_model)
+                    self.logger.info("SHAP explainer initialized for model transparency")
+                except Exception as e:
+                    self.logger.warning(f"SHAP explainer setup failed: {e}")
+                    self.shap_explainer = None
             else:
                 self.shap_explainer = None
+                self.logger.warning("SHAP not available - explainability will be limited")
 
-            self.logger.info(f"Loaded XGBoost model from {model_path}")
+            # Log successful initialization
+            self.logger.info(f"XGBoost model successfully loaded and validated from {model_path}")
+            self.logger.info(f"Model type: {model_type}, Features: {len(self.feature_names) if self.feature_names else 'unknown'}")
+            self.logger.info(f"SHAP available: {self.shap_explainer is not None}")
 
         except Exception as e:
-            self.logger.error(f"Failed to load XGBoost model: {e}")
+            self.logger.error(f"CRITICAL: XGBoost model loading failed: {e}")
             self.xgb_model = None
+            # Don't raise exception - fall back to rule-based decisions
+
+    def _validate_model_health(self) -> bool:
+        """Perform comprehensive model health checks"""
+        if not self.xgb_model:
+            return False
+        
+        try:
+            # Test prediction with dummy data
+            test_features = np.array([[0.5, 0.3, -0.2, 0.1, 0.0]]).reshape(1, -1)
+            
+            # Try prediction based on model type
+            if hasattr(self.xgb_model, 'predict_proba'):
+                # Sklearn interface
+                prediction = self.xgb_model.predict_proba(test_features)
+                if prediction is None or len(prediction) == 0:
+                    self.logger.error("Model health check failed: predict_proba returned invalid result")
+                    return False
+            elif hasattr(self.xgb_model, 'predict'):
+                # Sklearn or native interface
+                prediction = self.xgb_model.predict(test_features)
+                if prediction is None or len(prediction) == 0:
+                    self.logger.error("Model health check failed: predict returned invalid result")
+                    return False
+            else:
+                self.logger.error("Model health check failed: no prediction method available")
+                return False
+            
+            # Check feature importance availability
+            if hasattr(self.xgb_model, 'feature_importances_'):
+                importance = self.xgb_model.feature_importances_
+                if importance is None or len(importance) == 0:
+                    self.logger.warning("Model health check warning: no feature importances available")
+            
+            self.logger.info("XGBoost model passed health checks")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Model health check failed with exception: {e}")
+            return False
 
     def _load_config(self, config: Optional[Dict]) -> Dict:
         """Load configuration with defaults"""

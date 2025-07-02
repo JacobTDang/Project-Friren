@@ -16,6 +16,7 @@ import threading
 
 try:
     # Import all news sources
+    from Friren_V1.trading_engine.data.news.yahoo_news import YahooFinanceNews
     from Friren_V1.trading_engine.data.news.marketaux_api import MarketauxNews
     from Friren_V1.trading_engine.data.news.alpha_vintage_api import AlphaVantageNews
     from Friren_V1.trading_engine.data.news.fmp_api import FMPNews
@@ -25,6 +26,7 @@ try:
 except ImportError as e:
     # Fallback for direct execution - try relative imports
     try:
+        from .news.yahoo_news import YahooFinanceNews
         from .news.marketaux_api import MarketauxNews
         from .news.alpha_vintage_api import AlphaVantageNews
         from .news.fmp_api import FMPNews
@@ -32,25 +34,9 @@ except ImportError as e:
         from .news.reddit_api import RedditNews
         from .news.base import NewsArticle
     except ImportError as e2:
-        print(f"Error importing news sources: {e}, {e2}")
-        # Define minimal fallback classes
-        class NewsArticle:
-            def __init__(self, title="", description="", url="", source="", published_date=None):
-                print("[CRITICAL ERROR] Fallback NewsArticle used! This should never happen. Check your imports.")
-                import logging
-                logging.critical("Fallback NewsArticle used! This should never happen. Check your imports.")
-                assert False, "Fallback NewsArticle used! This should never happen. Check your imports."
-                self.title = title
-                self.description = description
-                self.url = url
-                self.source = source
-                self.published_date = published_date
-
-        MarketauxNews = None
-        AlphaVantageNews = None
-        FMPNews = None
-        NewsAPIData = None
-        RedditNews = None
+        print(f"CRITICAL ERROR: Required news source dependencies failed to import: {e}, {e2}")
+        print("SYSTEM CANNOT OPERATE: News collection requires proper news source imports")
+        raise ImportError(f"Critical news source import failure: {e}, {e2}. System cannot continue without proper news sources.")
 
 # ULTRA ADDITION: Stock discovery symbols for broad market scanning
 DISCOVERY_SYMBOLS = [
@@ -115,11 +101,12 @@ class EnhancedNewsCollector:
 
         # Initialize source weights for sentiment calculation
         self.source_weights = {
-            'alpha_vantage': 0.30,    # Market-moving news with sentiment
-            'fmp': 0.25,              # Earnings, analyst actions
-            'reddit': 0.20,           # Social sentiment
-            'newsapi': 0.15,          # Professional business news
-            'marketaux': 0.10         # Supporting market news
+            'yahoo': 0.25,            # Free professional financial news
+            'alpha_vantage': 0.25,    # Market-moving news with sentiment
+            'fmp': 0.20,              # Earnings, analyst actions
+            'reddit': 0.15,           # Social sentiment
+            'newsapi': 0.10,          # Professional business news
+            'marketaux': 0.05         # Supporting market news
         }
 
         # Quality thresholds
@@ -264,6 +251,17 @@ class EnhancedNewsCollector:
                         if articles:
                             symbol_articles.extend(articles)
                             self.logger.info(f"Got {len(articles)} articles from {source_name} for {symbol}")
+                            
+                            # BUSINESS LOGIC OUTPUT: Live news collection for each article
+                            try:
+                                from terminal_color_system import print_news_collector
+                                for article in articles:
+                                    article_title = article.title[:60] + "..." if len(article.title) > 60 else article.title
+                                    print_news_collector(f"{symbol}: '{article_title}' from {source_name}")
+                            except ImportError:
+                                for article in articles:
+                                    article_title = article.title[:60] + "..." if len(article.title) > 60 else article.title
+                                    print(f"[NEWS COLLECTOR] {symbol}: '{article_title}' from {source_name}")
                         else:
                             self.logger.debug(f"No articles from {source_name} for {symbol}")
                     else:
@@ -297,6 +295,7 @@ class EnhancedNewsCollector:
 
         # Full source list - try all sources with graceful fallback
         source_classes = {
+            'yahoo': YahooFinanceNews,
             'alpha_vantage': AlphaVantageNews,
             'fmp': FMPNews,
             'reddit': RedditNews,
@@ -392,9 +391,20 @@ class EnhancedNewsCollector:
                     all_articles.extend(articles)
                     sources_used.append(source_name)
                     source_article_counts[source_name] = len(articles)
-                    self.logger.debug(f"Got {len(articles)} articles from {source_name}")
+                    self.logger.info(f"Got {len(articles)} articles from {source_name} for {symbol}")
+                    
+                    # BUSINESS LOGIC OUTPUT: Show collected articles like discovery does
+                    try:
+                        from terminal_color_system import print_news_collector
+                        for article in articles:
+                            article_title = article.title[:60] + "..." if len(article.title) > 60 else article.title
+                            print_news_collector(f"{symbol}: '{article_title}' from {source_name}")
+                    except ImportError:
+                        for article in articles:
+                            article_title = article.title[:60] + "..." if len(article.title) > 60 else article.title
+                            print(f"[NEWS COLLECTOR] {symbol}: '{article_title}' from {source_name}")
                 else:
-                    self.logger.debug(f"No articles from {source_name} for {symbol}")
+                    self.logger.info(f"No articles from {source_name} for {symbol}")
 
             except Exception as e:
                 self.logger.warning(f"Error collecting from {source_name} for {symbol}: {e}")
@@ -406,7 +416,11 @@ class EnhancedNewsCollector:
 
         # Deduplicate articles across sources
         unique_articles = self.deduplicate_articles(all_articles)
-        self.logger.info(f"Found {len(all_articles)} total articles, {len(unique_articles)} unique for {symbol}")
+        self.logger.info(f"REAL NEWS: {symbol} - {len(unique_articles)} unique articles after deduplication")
+        
+        # Show sources used for visibility
+        if sources_used:
+            self.logger.info(f"NEWS SOURCES: {symbol} collected from {sources_used}")
 
         # Process into decision-ready format
         processed_data = self._process_articles_to_data(

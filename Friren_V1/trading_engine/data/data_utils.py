@@ -24,7 +24,7 @@ class StockDataFetcher:
         Returns:
             DataFrame with OHLCV data
         """
-        return self.yahoo_data.get_historical_data(symbol, period)
+        return self.yahoo_data.extract_data(symbol, period)
     
     def get_historical_data(self, symbol: str, period: str = "1y") -> pd.DataFrame:
         """Alias for fetch_data for compatibility"""

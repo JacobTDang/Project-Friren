@@ -168,10 +168,11 @@ class YahooFinanceNews(NewsDataSource):
         unique_articles = self._remove_duplicates(all_articles)
         return unique_articles[:max_articles]
 
-    def get_symbol_news(self, symbol: str, max_articles: int = 20) -> List[NewsArticle]:
+    def get_symbol_news(self, symbol: str, hours_back: int = 24, max_articles: int = 20) -> List[NewsArticle]:
         """Get news specifically for a symbol - FIXED URLs"""
         try:
             self.logger.info(f"Fetching news for {symbol}")
+            cutoff_time = datetime.now() - timedelta(hours=hours_back)
 
             # Try multiple Yahoo Finance URLs for symbol news
             urls_to_try = [
@@ -197,7 +198,7 @@ class YahooFinanceNews(NewsDataSource):
                     continue
 
             # Also search in general news for symbol mentions
-            general_articles = self.collect_news(hours_back=24, max_articles=50)
+            general_articles = self.collect_news(hours_back=hours_back, max_articles=50)
 
             # Filter general articles for symbol mentions
             symbol_filtered = []
@@ -215,25 +216,32 @@ class YahooFinanceNews(NewsDataSource):
 
                     symbol_filtered.append(article)
 
-            # Combine all articles
+            # Combine all articles and filter by time
             all_symbol_articles = all_articles + symbol_filtered
-            unique_articles = self._remove_duplicates(all_symbol_articles)
+            
+            # Filter by cutoff time
+            recent_articles = [
+                article for article in all_symbol_articles
+                if article.published_date >= cutoff_time
+            ]
+            
+            unique_articles = self._remove_duplicates(recent_articles)
 
-            self.logger.info(f"Found {len(unique_articles)} articles for {symbol}")
+            self.logger.info(f"Found {len(unique_articles)} recent articles for {symbol} (last {hours_back}h)")
             return unique_articles[:max_articles]
 
         except Exception as e:
             self.logger.error(f"Error getting news for {symbol}: {e}")
             return []
 
-    def get_watchlist_news(self, symbols: List[str], max_articles_per_symbol: int = 10) -> Dict[str, List[NewsArticle]]:
+    def get_watchlist_news(self, symbols: List[str], hours_back: int = 24, max_articles_per_symbol: int = 10) -> Dict[str, List[NewsArticle]]:
         """Get news for multiple symbols (watchlist) - FIXED for decision engine"""
         watchlist_news = {}
 
         # Get general news once to avoid repeated scraping
         try:
             self.logger.info(f"Collecting general news for watchlist filtering...")
-            general_articles = self.collect_news(hours_back=24, max_articles=100)
+            general_articles = self.collect_news(hours_back=hours_back, max_articles=100)
 
             for symbol in symbols:
                 try:

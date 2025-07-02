@@ -266,11 +266,61 @@ class MultiprocessManager:
             if 'task_type' not in task:
                 task['task_type'] = 'generic'
 
-            self.task_queue.put(task)
-            task_count += 1
+            # Clean task data for pickle compatibility
+            try:
+                cleaned_task = self._clean_task_for_pickle(task)
+                self.task_queue.put(cleaned_task)
+                task_count += 1
+            except Exception as e:
+                self.logger.warning(f"Failed to clean task {i} for pickle: {e}")
+                # Try submitting original task anyway
+                self.task_queue.put(task)
+                task_count += 1
 
         self.logger.debug(f"Submitted {task_count} tasks to queue")
         return task_count
+
+    def _clean_task_for_pickle(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        """Clean task data to avoid pickle serialization errors"""
+        import pandas as pd
+        import copy
+        
+        cleaned_task = copy.deepcopy(task)
+        
+        # Clean any pandas DataFrames in the task
+        for key, value in cleaned_task.items():
+            if isinstance(value, pd.DataFrame):
+                # Create clean DataFrame without weak references
+                cleaned_task[key] = pd.DataFrame(
+                    data=value.values,
+                    index=value.index.copy(),
+                    columns=value.columns.copy()
+                )
+            elif isinstance(value, dict):
+                # Recursively clean nested dictionaries
+                cleaned_task[key] = self._clean_dict_for_pickle(value)
+        
+        return cleaned_task
+    
+    def _clean_dict_for_pickle(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Recursively clean dictionary data for pickle compatibility"""
+        import pandas as pd
+        import copy
+        
+        cleaned = {}
+        for key, value in data.items():
+            if isinstance(value, pd.DataFrame):
+                cleaned[key] = pd.DataFrame(
+                    data=value.values,
+                    index=value.index.copy(),
+                    columns=value.columns.copy()
+                )
+            elif isinstance(value, dict):
+                cleaned[key] = self._clean_dict_for_pickle(value)
+            else:
+                cleaned[key] = copy.deepcopy(value)
+        
+        return cleaned
 
     def _collect_results(self, expected_count: int, timeout: int) -> List[TaskResult]:
         """Collect results from workers"""

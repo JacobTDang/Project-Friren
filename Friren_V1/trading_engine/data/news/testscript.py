@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Reddit News Test - Test Reddit integration only
 """

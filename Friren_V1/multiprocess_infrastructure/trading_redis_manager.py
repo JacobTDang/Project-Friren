@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 TradingRedisManager - Centralized Redis Interface for Trading System
 
@@ -57,10 +56,10 @@ class TradingRedisManager:
             port=port,
             db=db,
             decode_responses=True,
-            socket_connect_timeout=10,
-            socket_timeout=10,
+            socket_connect_timeout=5,    # Faster timeout for news collection responsiveness
+            socket_timeout=5,           # Faster timeout for news collection responsiveness
             retry_on_timeout=True,
-            health_check_interval=30
+            health_check_interval=15    # More frequent health checks
         )
 
         # Test connection
