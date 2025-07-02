@@ -96,7 +96,22 @@ class StrategyAnalyzerProcess(RedisBaseProcess):
 
         self.analysis_interval = analysis_interval
         self.confidence_threshold = confidence_threshold
-        self.symbols = symbols or ['AAPL', 'GOOGL', 'MSFT', 'AMZN', 'TSLA']  # Reduced for Phase 1
+        # Load symbols dynamically from database or use provided list
+        self.symbols = symbols or []
+        
+        # Validate symbol list - try to load from database if empty
+        if not self.symbols:
+            try:
+                from Friren_V1.trading_engine.portfolio_manager.tools.db_utils import load_dynamic_watchlist
+                dynamic_symbols = load_dynamic_watchlist()
+                if dynamic_symbols:
+                    self.symbols = dynamic_symbols
+                    print(f"Strategy Analyzer: Loaded {len(self.symbols)} symbols from database")
+                else:
+                    raise ValueError("No symbols available from database")
+            except Exception as e:
+                print(f"Strategy Analyzer: Failed to load symbols from database: {e}")
+                raise ValueError(f"Strategy Analyzer requires symbols to operate: {e}")
 
         # Layer 2: Task parallelization (initialized in _initialize)
         self.multiprocess_manager = None
@@ -109,7 +124,8 @@ class StrategyAnalyzerProcess(RedisBaseProcess):
         self.signals_sent_count = 0
         self.analysis_count = 0
 
-        self._safe_log("info", f"StrategyAnalyzerProcess configured - interval: {analysis_interval}s, threshold: {confidence_threshold}%")
+        # Note: Logger initialization happens in parent class, so we use print for now
+        print(f"StrategyAnalyzerProcess configured - interval: {analysis_interval}s, threshold: {confidence_threshold}%")
 
     def _initialize(self):
         self.logger.critical("EMERGENCY: ENTERED _initialize for strategy_analyzer")
@@ -125,10 +141,11 @@ class StrategyAnalyzerProcess(RedisBaseProcess):
             )
             self.logger.info("Generic MultiprocessManager initialized")
 
-            # Analytics: Initialize strategy analyzer component
+            # Analytics: Initialize strategy analyzer component with Redis integration
             self.strategy_analyzer = StrategyAnalyzer(
                 confidence_threshold=self.confidence_threshold,
-                symbols=self.symbols
+                symbols=self.symbols,
+                redis_manager=self.redis_manager  # Pass Redis manager for targeted news
             )
 
             # Initialize the analytics component
@@ -266,7 +283,8 @@ class StrategyAnalyzerProcess(RedisBaseProcess):
                 # Handle case where regime is stored directly as string
                 return regime_data
             else:
-                self.logger.warning(f"Invalid market regime data structure: {type(regime_data)}")
+                # FIXED: Remove noisy warning - code handles various data types correctly
+                self.logger.debug(f"Market regime data type: {type(regime_data)}, using fallback")
                 return 'UNKNOWN'
                 
         except Exception as e:
@@ -274,22 +292,46 @@ class StrategyAnalyzerProcess(RedisBaseProcess):
             return 'UNKNOWN'
 
     def _fetch_market_data(self) -> Dict[str, Any]:
-        """Fetch market data for strategy analysis"""
+        """Fetch market data for strategy analysis - NO HARDCODED DATA"""
         try:
-            # Default market data for configured symbols
             market_data = {}
-            symbols = getattr(self, 'symbols', ['AAPL'])
+            symbols = getattr(self, 'symbols', [])
             
-            for symbol in symbols:
-                # Mock market data structure for now
-                market_data[symbol] = {
-                    'price': 0.0,  # No hardcoded price - should be fetched from market data
-                    'volume': 1000000,
-                    'timestamp': datetime.now(),
-                    'symbol': symbol
-                }
+            if not symbols:
+                self.logger.warning("No symbols configured for market data fetch")
+                return {}
             
-            self.logger.info(f"Fetched market data for {len(market_data)} symbols")
+            # Use YahooFinancePriceData for real market data
+            try:
+                from ...data.yahoo_price import YahooFinancePriceData
+                price_fetcher = YahooFinancePriceData()
+                
+                for symbol in symbols:
+                    try:
+                        # Fetch real market data - NO HARDCODING
+                        current_price = price_fetcher.get_real_time_price(symbol)
+                        if current_price:
+                            # Get basic info from ticker
+                            ticker_info = price_fetcher.get_ticker_info(symbol, use_cache=True)
+                            market_data[symbol] = {
+                                'price': current_price,
+                                'volume': ticker_info.get('volume', 0),
+                                'timestamp': datetime.now(),
+                                'symbol': symbol,
+                                'change': ticker_info.get('regularMarketChange', 0.0),
+                                'change_percent': ticker_info.get('regularMarketChangePercent', 0.0)
+                            }
+                        else:
+                            self.logger.warning(f"No price data available for {symbol}")
+                    except Exception as e:
+                        self.logger.error(f"Error fetching data for {symbol}: {e}")
+                        continue
+                        
+            except ImportError:
+                self.logger.error("YahooFinancePriceData not available - cannot fetch real market data")
+                return {}
+            
+            self.logger.info(f"Fetched real market data for {len(market_data)} symbols")
             return market_data
             
         except Exception as e:

@@ -175,7 +175,22 @@ class EnhancedNewsCollectorProcess(RedisBaseProcess):
         super().__init__(process_id)
 
         # Configuration
-        self.watchlist_symbols = watchlist_symbols or ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA']
+        # Load symbols dynamically from database or use provided watchlist
+        self.watchlist_symbols = watchlist_symbols or []
+        
+        # Validate symbol list - try to load from database if empty
+        if not self.watchlist_symbols:
+            try:
+                from Friren_V1.trading_engine.portfolio_manager.tools.db_utils import load_dynamic_watchlist
+                dynamic_symbols = load_dynamic_watchlist()
+                if dynamic_symbols:
+                    self.watchlist_symbols = dynamic_symbols
+                    print(f"News Collector: Loaded {len(self.watchlist_symbols)} symbols from database")
+                else:
+                    raise ValueError("No symbols available from database")
+            except Exception as e:
+                print(f"News Collector: Failed to load symbols from database: {e}")
+                raise ValueError(f"News Collector requires symbols to operate: {e}")
         self.precache_interval = precache_interval_minutes * 60  # Convert to seconds
 
         # Components (initialized in _initialize)

@@ -206,7 +206,22 @@ class ProcessInitializer:
                         restart_delay_seconds=5,
                         health_check_interval=self.config.health_check_interval,
                         process_args={
-                            'watchlist_symbols': self.config.symbols
+                            'watchlist_symbols': self.config.symbols,
+                            'memory_limit_mb': 1200,  # CRITICAL FIX: Set 1200MB for FinBERT + XGBoost + News Collection
+                            'config': {  # CRITICAL FIX: Add missing config dict with all required parameters
+                                'cycle_interval_minutes': 1,  # Run every 1 minute for testing
+                                'batch_size': 4,
+                                'max_memory_mb': 1200,  # Match memory_limit_mb
+                                'max_articles_per_symbol': 12,
+                                'hours_back': 6,
+                                'quality_threshold': 0.7,
+                                'finbert_batch_size': 4,
+                                'min_confidence_threshold': 0.6,
+                                'enable_xgboost': True,
+                                'recommendation_threshold': 0.65,
+                                'enable_caching': True,
+                                'cache_ttl_minutes': 30
+                            }
                         }
                     )
                 # REMOVED: sentiment_analyzer configuration (redundant process)
@@ -304,11 +319,13 @@ class ProcessInitializer:
             initial_status = symbol_coordinator.get_coordination_status()
             self.logger.info(f"Symbol coordinator status before sync: {initial_status}")
 
-            if 'symbols' in initial_status and 'AAPL' in initial_status['symbols']:
-                aapl_before = initial_status['symbols']['AAPL']
-                self.logger.info(f"AAPL position before sync: {aapl_before.get('position', 'NOT FOUND')}")
+            # Debug active symbols before sync
+            if 'symbols' in initial_status:
+                active_symbols_before = [symbol for symbol, data in initial_status['symbols'].items() 
+                                       if data.get('position', 0) > 0]
+                self.logger.info(f"Active positions before sync: {active_symbols_before}")
             else:
-                self.logger.info("AAPL not found in symbol coordinator before sync")
+                self.logger.info("No symbols found in symbol coordinator before sync")
 
             # Get database holdings
             holdings = self.account_manager.db_manager.get_holdings(active_only=True)
@@ -322,11 +339,8 @@ class ProcessInitializer:
             after_sync_status = symbol_coordinator.get_coordination_status()
             self.logger.info(f"Symbol coordinator status after sync: {after_sync_status}")
 
-            if 'symbols' in after_sync_status and 'AAPL' in after_sync_status['symbols']:
-                aapl_after = after_sync_status['symbols']['AAPL']
-                self.logger.info(f"AAPL position after sync: {aapl_after.get('position', 'NOT FOUND')}")
-
-                # Test the monitoring logic
+            # Analyze symbol coordinator status after sync
+            if 'symbols' in after_sync_status:
                 active_symbols = []
                 pending_decisions = 0
 
@@ -340,9 +354,9 @@ class ProcessInitializer:
                         pending_decisions += 1
 
                 self.logger.info(f"DEBUG MONITORING OUTPUT: SYMBOL COORDINATOR: Active={len(active_symbols)} | Pending={pending_decisions}")
-                self.logger.info(f"Active symbols: {active_symbols}")
+                self.logger.info(f"Active symbols after sync: {active_symbols}")
             else:
-                self.logger.info("AAPL not found in symbol coordinator after sync")
+                self.logger.info("No symbols found in symbol coordinator after sync")
 
             self.logger.info("=== POSITION SYNC DEBUG END ===")
             self.logger.info("Successfully synced positions to symbol coordinator")

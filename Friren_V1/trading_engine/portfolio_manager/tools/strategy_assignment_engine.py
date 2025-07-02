@@ -15,7 +15,7 @@ from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from enum import Enum
-import random
+# random import removed - using real data only
 
 from .strategies import AVAILABLE_STRATEGIES
 from .strategy_selector import StrategySelector
@@ -145,8 +145,22 @@ class StrategyAssignmentEngine:
             # Step 7: Record assignment
             self._record_assignment(assignment)
             
-            self.logger.info(f"✅ Strategy assigned to {symbol}: {best_strategy} ({confidence:.1f}% confidence)")
+            self.logger.info(f"Strategy assigned to {symbol}: {best_strategy} ({confidence:.1f}% confidence)")
             self.logger.info(f"   Reason: {reason.value}, Market: {assignment.market_regime}")
+            
+            # BUSINESS LOGIC OUTPUT: Detailed strategy assignment decision
+            try:
+                from terminal_color_system import print_strategy_assignment
+                previous_info = f"previous: {current_strategy}" if current_strategy else "new position"
+                reason_desc = reason.value.replace('_', ' ')
+                print_strategy_assignment(f"{symbol}: assigned {best_strategy} | confidence: {confidence:.1f}% | {previous_info} | reason: '{reason_desc.title()}'")
+            except ImportError:
+                previous_info = f"previous: {current_strategy}" if current_strategy else "new position"
+                reason_desc = reason.value.replace('_', ' ')
+                print(f"[STRATEGY ASSIGNMENT] {symbol}: assigned {best_strategy} | confidence: {confidence:.1f}% | {previous_info} | reason: '{reason_desc.title()}'")
+            
+            # REDIS MESSAGING: Send strategy assignment to decision engine
+            self._send_strategy_assignment_to_decision_engine(assignment)
             
             return assignment
             
@@ -258,15 +272,15 @@ class StrategyAssignmentEngine:
             # Use strategy selector to analyze market regime
             market_data = self.strategy_selector.analyze_market_regime()
             
-            # Add symbol-specific analysis
+            # Add symbol-specific analysis using real market data
             analysis = {
                 'regime': market_data.get('primary_regime', 'UNKNOWN'),
-                'volatility': random.uniform(0.15, 0.35),  # Mock volatility for now
-                'trend_strength': random.uniform(0.3, 0.8),
-                'risk_score': random.uniform(30, 70),
-                'liquidity_score': random.uniform(80, 95),  # AAPL is highly liquid
-                'sector': 'technology',  # Could be dynamic
-                'market_cap': 'large_cap'
+                'volatility': self._get_real_volatility(symbol),
+                'trend_strength': self._get_real_trend_strength(symbol),
+                'risk_score': self._get_real_risk_score(symbol),
+                'liquidity_score': self._get_real_liquidity_score(symbol),
+                'sector': self._get_symbol_sector(symbol),
+                'market_cap': self._get_symbol_market_cap(symbol)
             }
             
             return analysis
@@ -299,8 +313,8 @@ class StrategyAssignmentEngine:
                 
                 strategy_scores[strategy_name] = {
                     'fitness_score': fitness_score,
-                    'expected_return': fitness_score * 0.001,  # Mock expected return
-                    'risk_score': random.uniform(20, 80),
+                    'expected_return': self._calculate_strategy_expected_return(strategy_name, symbol),
+                    'risk_score': self._calculate_strategy_risk_score(strategy_name, symbol),
                     'complexity': self._get_strategy_complexity(strategy_name)
                 }
                 
@@ -512,8 +526,20 @@ class StrategyAssignmentEngine:
     
     def _get_historical_performance_bonus(self, strategy_name: str, symbol: str) -> float:
         """Get performance bonus based on historical data"""
-        # Placeholder for historical performance lookup
-        return random.uniform(-5, 10)  # -5 to +10 point bonus
+        try:
+            # Get real historical performance from database
+            performance_data = self._get_historical_strategy_performance(strategy_name, symbol)
+            if performance_data:
+                # Convert performance to bonus points (-5 to +10 range)
+                performance_pct = performance_data.get('total_return', 0.0)
+                # Scale: 0% = 0 bonus, 10% = +10 bonus, -5% = -5 bonus
+                bonus = max(-5.0, min(10.0, performance_pct * 100))
+                return float(bonus)
+            else:
+                return 0.0  # No bonus if no historical data
+        except Exception as e:
+            self.logger.error(f"Error calculating performance bonus: {e}")
+            return 0.0  # No bonus on error
     
     def _get_strategy_complexity(self, strategy_name: str) -> str:
         """Get strategy complexity rating"""
@@ -546,3 +572,216 @@ class StrategyAssignmentEngine:
         """Check if it's time for periodic rebalancing"""
         days_since_assignment = (datetime.now() - last_assignment.assignment_time).days
         return days_since_assignment >= 30  # Monthly rebalancing
+
+    def _get_real_volatility(self, symbol: str) -> float:
+        """Get real volatility from market data"""
+        try:
+            from Friren_V1.trading_engine.data.yahoo_price import YahooFinancePriceData
+            price_fetcher = YahooFinancePriceData()
+            
+            # Get 30 days of price data for volatility calculation
+            data = price_fetcher.extract_data(symbol, period="30d")
+            if data is not None and len(data) > 1:
+                # Calculate daily returns
+                returns = data['Close'].pct_change().dropna()
+                # Annualized volatility
+                volatility = returns.std() * (252 ** 0.5)  # 252 trading days
+                return float(volatility)
+            else:
+                self.logger.warning(f"No price data available for {symbol}, using default volatility")
+                return 0.25  # Default moderate volatility
+        except Exception as e:
+            self.logger.error(f"Error calculating volatility for {symbol}: {e}")
+            return 0.25  # Default moderate volatility
+
+    def _get_real_trend_strength(self, symbol: str) -> float:
+        """Get real trend strength from technical analysis"""
+        try:
+            from Friren_V1.trading_engine.data.yahoo_price import YahooFinancePriceData
+            price_fetcher = YahooFinancePriceData()
+            
+            # Get recent price data for trend analysis
+            data = price_fetcher.extract_data(symbol, period="60d")
+            if data is not None and len(data) > 20:
+                # Simple trend strength using price vs moving averages
+                close_price = data['Close'].iloc[-1]
+                ma_20 = data['Close'].rolling(20).mean().iloc[-1]
+                ma_50 = data['Close'].rolling(50).mean().iloc[-1] if len(data) >= 50 else ma_20
+                
+                # Trend strength based on price relative to moving averages
+                trend_strength = abs((close_price - ma_20) / ma_20) + abs((ma_20 - ma_50) / ma_50)
+                return min(1.0, float(trend_strength))  # Cap at 1.0
+            else:
+                return 0.5  # Default moderate trend strength
+        except Exception as e:
+            self.logger.error(f"Error calculating trend strength for {symbol}: {e}")
+            return 0.5  # Default moderate trend strength
+
+    def _get_real_risk_score(self, symbol: str) -> float:
+        """Get real risk score based on market metrics"""
+        try:
+            volatility = self._get_real_volatility(symbol)
+            trend_strength = self._get_real_trend_strength(symbol)
+            
+            # Risk score based on volatility and trend consistency
+            # Higher volatility = higher risk, inconsistent trends = higher risk
+            risk_score = (volatility * 100) + ((1 - trend_strength) * 50)
+            return min(100.0, max(0.0, float(risk_score)))
+        except Exception as e:
+            self.logger.error(f"Error calculating risk score for {symbol}: {e}")
+            return 50.0  # Default moderate risk
+
+    def _get_real_liquidity_score(self, symbol: str) -> float:
+        """Get real liquidity score from volume data"""
+        try:
+            from Friren_V1.trading_engine.data.yahoo_price import YahooFinancePriceData
+            price_fetcher = YahooFinancePriceData()
+            
+            # Get recent volume data
+            data = price_fetcher.extract_data(symbol, period="30d")
+            if data is not None and 'Volume' in data.columns:
+                avg_volume = data['Volume'].mean()
+                # Rough liquidity scoring based on average volume
+                if avg_volume > 50_000_000:  # Very high volume
+                    return 95.0
+                elif avg_volume > 10_000_000:  # High volume
+                    return 85.0
+                elif avg_volume > 1_000_000:  # Moderate volume
+                    return 70.0
+                elif avg_volume > 100_000:  # Low volume
+                    return 50.0
+                else:
+                    return 30.0  # Very low volume
+            else:
+                return 60.0  # Default moderate liquidity
+        except Exception as e:
+            self.logger.error(f"Error calculating liquidity score for {symbol}: {e}")
+            return 60.0  # Default moderate liquidity
+
+    def _get_symbol_sector(self, symbol: str) -> str:
+        """Get symbol sector - placeholder for real sector lookup"""
+        # TODO: Integrate with real sector data source (Yahoo Finance info, API, etc.)
+        sector_mapping = {
+            'AAPL': 'technology', 'MSFT': 'technology', 'GOOGL': 'technology', 'AMZN': 'consumer_discretionary',
+            'TSLA': 'consumer_discretionary', 'NVDA': 'technology', 'META': 'communication_services',
+            'NFLX': 'communication_services', 'SPY': 'etf', 'QQQ': 'etf'
+        }
+        return sector_mapping.get(symbol.upper(), 'unknown')
+
+    def _get_symbol_market_cap(self, symbol: str) -> str:
+        """Get symbol market cap category"""
+        # TODO: Integrate with real market cap data source
+        large_cap_symbols = {'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'NVDA', 'META', 'NFLX', 'SPY', 'QQQ'}
+        if symbol.upper() in large_cap_symbols:
+            return 'large_cap'
+        else:
+            return 'unknown'  # Default until real data integration
+
+    def _calculate_strategy_expected_return(self, strategy_name: str, symbol: str) -> float:
+        """Calculate expected return for strategy based on market conditions"""
+        try:
+            # Get market conditions and calculate expected return based on strategy type
+            volatility = self._get_real_volatility(symbol)
+            trend_strength = self._get_real_trend_strength(symbol)
+            
+            # Different strategies have different expected returns based on market conditions
+            strategy_multipliers = {
+                'momentum': trend_strength * 0.02,  # Momentum works better in trending markets
+                'mean_reversion': (1 - trend_strength) * 0.015,  # Mean reversion works in ranging markets
+                'rsi_contrarian': (1 - trend_strength) * 0.01,
+                'bollinger_bands': volatility * 0.015,  # Volatility strategies benefit from volatility
+                'moving_average': trend_strength * 0.012,
+                'buy_and_hold': 0.008  # Conservative baseline
+            }
+            
+            base_return = strategy_multipliers.get(strategy_name, 0.005)  # Default 0.5%
+            
+            # Adjust for historical performance
+            performance_bonus = self._get_historical_performance_bonus(strategy_name, symbol)
+            expected_return = base_return + (performance_bonus * 0.001)  # Convert bonus to decimal
+            
+            return max(-0.05, min(0.20, expected_return))  # Cap between -5% and 20%
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating expected return for {strategy_name}: {e}")
+            return 0.005  # Default 0.5% expected return
+
+    def _calculate_strategy_risk_score(self, strategy_name: str, symbol: str) -> float:
+        """Calculate risk score for strategy based on market conditions"""
+        try:
+            volatility = self._get_real_volatility(symbol)
+            
+            # Different strategies have different risk profiles
+            strategy_risk_multipliers = {
+                'momentum': 1.2,  # Momentum strategies are riskier
+                'mean_reversion': 0.8,  # Mean reversion generally lower risk
+                'rsi_contrarian': 0.9,
+                'bollinger_bands': 1.1,  # Volatility strategies are moderately risky
+                'moving_average': 0.7,  # Simple moving average is conservative
+                'buy_and_hold': 0.6  # Lowest risk strategy
+            }
+            
+            base_risk = volatility * 100  # Convert volatility to risk score
+            strategy_multiplier = strategy_risk_multipliers.get(strategy_name, 1.0)
+            risk_score = base_risk * strategy_multiplier
+            
+            return max(10.0, min(90.0, risk_score))  # Keep in reasonable range
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating risk score for {strategy_name}: {e}")
+            return 50.0  # Default moderate risk
+
+    def _get_historical_strategy_performance(self, strategy_name: str, symbol: str) -> dict:
+        """Get historical performance data for strategy on symbol"""
+        try:
+            # TODO: Integrate with real database lookup for historical performance
+            # For now, return None to indicate no historical data available
+            # In production, this would query the trading_strategies or performance tables
+            return None
+        except Exception as e:
+            self.logger.error(f"Error getting historical performance: {e}")
+            return None
+
+    def _send_strategy_assignment_to_decision_engine(self, assignment: StrategyAssignment):
+        """Send strategy assignment to decision engine via Redis"""
+        try:
+            from Friren_V1.multiprocess_infrastructure.trading_redis_manager import get_trading_redis_manager, create_process_message, MessagePriority
+            
+            redis_manager = get_trading_redis_manager()
+            if not redis_manager:
+                self.logger.warning("Redis manager not available - strategy assignment not sent to decision engine")
+                return
+            
+            # Create message data for strategy assignment
+            message_data = {
+                'symbol': assignment.symbol,
+                'strategy': assignment.strategy_name,
+                'confidence': assignment.confidence,
+                'reason': assignment.reason.value,
+                'market_regime': assignment.market_regime,
+                'assignment_time': assignment.assignment_time.isoformat(),
+                'expected_return': assignment.expected_return,
+                'risk_score': assignment.risk_score,
+                'previous_strategy': getattr(assignment, 'previous_strategy', None)
+            }
+            
+            # Create Redis message
+            message = create_process_message(
+                sender="strategy_assignment_engine",
+                recipient="decision_engine",
+                message_type="STRATEGY_ASSIGNMENT",
+                data=message_data,
+                priority=MessagePriority.HIGH  # Strategy assignments are high priority
+            )
+            
+            # Send message to decision engine
+            success = redis_manager.send_message(message, queue_name="market_decision_engine")
+            
+            if success:
+                self.logger.info(f"Strategy assignment sent to decision engine: {assignment.symbol} -> {assignment.strategy_name}")
+            else:
+                self.logger.error(f"Failed to send strategy assignment to decision engine for {assignment.symbol}")
+                
+        except Exception as e:
+            self.logger.error(f"Error sending strategy assignment to decision engine: {e}")
+            # Don't raise - strategy assignment should still complete even if messaging fails

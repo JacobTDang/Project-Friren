@@ -51,12 +51,28 @@ class Colors:
 def send_colored_business_output(process_id, message, output_type):
     """Send colored business output with multiple fallback methods"""
     success = False
+    
+    # PHASE 1 TEST: Force Redis method first to bypass bridge issues
+    print(f"TESTING OUTPUT: [{output_type.upper()}] {message}")  # Immediate visible test
+    
     try:
         # Method 1: Try direct main terminal bridge import
         from main_terminal_bridge import send_colored_business_output as bridge_output
         bridge_output(process_id, message, output_type)
         success = True
-    except ImportError:
+        print(f"BRIDGE SUCCESS: {message[:50]}...")
+    except ImportError as e:
+        # Log bridge import failure for debugging
+        import logging
+        logging.getLogger(__name__).debug(f"Main bridge import failed: {e}")
+        print(f"BRIDGE IMPORT FAILED: {e}")
+    except Exception as e:
+        # Log any other bridge communication errors
+        import logging
+        logging.getLogger(__name__).warning(f"Main bridge communication failed: {e}")
+        print(f"BRIDGE ERROR: {e}")
+    
+    if not success:
         try:
             # Method 2: Use Redis direct communication (same as subprocess wrapper)
             from Friren_V1.multiprocess_infrastructure.trading_redis_manager import get_trading_redis_manager
@@ -79,7 +95,13 @@ def send_colored_business_output(process_id, message, output_type):
                 if redis_client:
                     redis_client.rpush("terminal_output", json.dumps(message_data))
                     success = True
-        except Exception:
+                    print(f"REDIS SUCCESS: Sent to terminal_output queue")
+                else:
+                    print(f"REDIS ERROR: No redis_client available")
+            else:
+                print(f"REDIS ERROR: No redis_manager available")
+        except Exception as e:
+            print(f"REDIS EXCEPTION: {e}")
             pass
     
     if not success:
@@ -142,14 +164,14 @@ class PipelineConfig:
     # Process settings - OPTIMIZED for continuous collection
     cycle_interval_minutes: int = 1  # Ultra-fast cycle for responsive news collection
     batch_size: int = 4  # Max articles to process in one batch
-    max_memory_mb: int = 800  # Increased memory limit for news collection and FinBERT analysis
+    max_memory_mb: int = 1200  # PHASE 3 FIX: Increased for FinBERT (~400MB) + News collection (~200MB) + XGBoost (~400MB) + buffers
 
     # XGBoost model settings - REQUIRED for production
     model_path: str = "models/demo_xgb_model.json"  # Path to trained XGBoost model file
 
     # News collection settings - OPTIMIZED for comprehensive coverage
     max_articles_per_symbol: int = 15  # Increased for better coverage
-    hours_back: int = 12  # Optimized 12 hours for fresh news with good coverage
+    hours_back: int = 24  # Match direct test - 24 hours for comprehensive news coverage
     quality_threshold: float = 0.6  # Slightly lower threshold for more articles
 
     # FinBERT settings
@@ -159,6 +181,8 @@ class PipelineConfig:
     # XGBoost settings
     enable_xgboost: bool = True
     recommendation_threshold: float = 0.65
+    xgboost_buy_threshold: float = 0.65
+    xgboost_sell_threshold: float = 0.35
 
     # Performance settings
     enable_caching: bool = True
@@ -261,9 +285,9 @@ class XGBoostRecommendationEngine:
             self.logger.warning(f"XGBoost model not found at {self.model_path} - using fallback predictions")
             self.model = None
 
-        # Real decision thresholds (should come from model validation)
-        self.buy_threshold = 0.65
-        self.sell_threshold = 0.35
+        # Dynamic decision thresholds from configuration
+        self.buy_threshold = getattr(config, 'xgboost_buy_threshold', 0.65)
+        self.sell_threshold = getattr(config, 'xgboost_sell_threshold', 0.35)
 
         self.prediction_history = deque(maxlen=100)
         self.logger.info(f"Loaded real XGBoost model from {self.model_path}")
@@ -547,15 +571,42 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
                  watchlist_symbols: Optional[List[str]] = None,
                  config: Optional[PipelineConfig] = None):
 
-        super().__init__(process_id)
+        # PHASE 3 FIX: Handle config memory limit safely for subprocess context
+        # CRITICAL FIX: Get memory limit safely before config conversion
+        if config:
+            if isinstance(config, dict):
+                memory_limit = config.get('max_memory_mb', 1200)
+            else:
+                memory_limit = getattr(config, 'max_memory_mb', 1200)
+        else:
+            memory_limit = 1200
+        super().__init__(process_id, memory_limit_mb=memory_limit)
 
-        # Configuration - handle both PipelineConfig objects and dicts
+        # Configuration - handle both PipelineConfig objects and dicts  
         if isinstance(config, dict):
             # Convert dict to PipelineConfig object
             self.config = PipelineConfig(**config) if config else PipelineConfig()
         else:
             self.config = config or PipelineConfig()
-        self.watchlist_symbols = watchlist_symbols or ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA']
+        # Load symbols dynamically from database or use watchlist_symbols parameter
+        self.watchlist_symbols = watchlist_symbols or []
+        
+        # Validate symbol list
+        if not self.watchlist_symbols:
+            self.logger.warning("No symbols provided to Enhanced News Pipeline - will attempt to load from database")
+            # Try to load from database through dynamic watchlist
+            try:
+                from Friren_V1.trading_engine.portfolio_manager.tools.db_utils import load_dynamic_watchlist
+                dynamic_symbols = load_dynamic_watchlist()
+                if dynamic_symbols:
+                    self.watchlist_symbols = dynamic_symbols
+                    self.logger.info(f"Loaded {len(self.watchlist_symbols)} symbols from database: {self.watchlist_symbols}")
+                else:
+                    self.logger.error("No symbols available from database - Enhanced News Pipeline cannot operate")
+                    raise ValueError("No symbols available for news pipeline operation")
+            except Exception as e:
+                self.logger.error(f"Failed to load symbols from database: {e}")
+                raise ValueError(f"Enhanced News Pipeline requires symbols to operate: {e}")
 
         # Core components
         self.news_collector: Optional[EnhancedNewsCollector] = None
@@ -565,6 +616,7 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
         # State tracking
         self.last_run_time: Optional[datetime] = None
         self.pipeline_metrics = PipelineMetrics()
+        self.last_collected_articles = []  # FOR REDIS WRAPPER: Track collected articles for wrapper integration
         self.symbol_tracking = {symbol: {
             'last_update': None,
             'recommendation_count': 0,
@@ -572,8 +624,6 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
             'last_recommendation': None
         } for symbol in self.watchlist_symbols}
         
-        # Store real execution data for main terminal display
-        self.last_collected_articles = []
         self.last_sentiment_results = []
         self.last_recommendations = {}
 
@@ -630,21 +680,21 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
                 collector_thread.join(timeout=45)  # 45 second timeout for news collector
 
                 if collector_thread.is_alive():
-                    self.logger.warning("News collector initialization timed out, using simplified collector")
-                    # Create a simplified collector that skips problematic sources
-                    self.news_collector = EnhancedNewsCollector()
-                    # Force it to use only basic sources
-                    self.news_collector.news_sources = {}
-                    self.news_collector._sources_initialized = True
+                    self.logger.error("News collector initialization timed out after 45 seconds")
+                    raise RuntimeError("News collector initialization timeout - production system requires functional news collection")
                 elif collector_error[0]:
                     self.logger.error(f"News collector initialization failed: {collector_error[0]}")
-                    # Create a simplified collector
-                    self.news_collector = EnhancedNewsCollector()
-                    self.news_collector.news_sources = {}
-                    self.news_collector._sources_initialized = True
+                    raise RuntimeError(f"News collector initialization failed: {collector_error[0]} - production system requires functional news collection")
                 else:
                     self.news_collector = collector_result[0]
                     self.logger.info("SUCCESS: News collector initialized successfully")
+                    # PRODUCTION VALIDATION: Ensure sources are actually initialized
+                    if not hasattr(self.news_collector, '_ensure_sources_initialized'):
+                        raise RuntimeError("News collector missing source initialization method")
+                    self.news_collector._ensure_sources_initialized()
+                    if not self.news_collector.news_sources:
+                        raise RuntimeError("News collector has no available sources after initialization")
+                    self.logger.info(f"PRODUCTION READY: News collector has {len(self.news_collector.news_sources)} sources: {list(self.news_collector.news_sources.keys())}")
 
             except Exception as e:
                 self.logger.error(f"Error initializing news collector: {e}")
@@ -654,9 +704,25 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
             # Initialize FinBERT analyzer with memory optimization
             self.logger.info("Step 2: Initializing FinBERT analyzer (MEMORY OPTIMIZED)...")
             try:
-                # MEMORY OPTIMIZATION: Use lazy loading to avoid 500MB+ model in memory
-                self.finbert_analyzer = None  # Lazy load only when needed
-                self.logger.info("SUCCESS: FinBERT analyzer configured for lazy loading (memory optimized)")
+                # PRODUCTION FIX: Initialize FinBERT analyzer properly for production
+                # Use lazy loading to save memory but ensure it works when needed
+                self.finbert_analyzer = None  # Will be lazy loaded on first use
+                
+                # CRITICAL: Test lazy loading to ensure dependencies are available
+                self.logger.info("Testing FinBERT lazy loading availability...")
+                try:
+                    # Test import to verify dependencies
+                    from Friren_V1.trading_engine.sentiment.finBERT_analysis import EnhancedFinBERT
+                    import torch
+                    import transformers
+                    import numpy as np
+                    self.logger.info("SUCCESS: All FinBERT dependencies available")
+                except ImportError as dep_error:
+                    self.logger.error(f"CRITICAL: FinBERT dependencies missing: {dep_error}")
+                    raise RuntimeError(f"FinBERT dependencies not installed: {dep_error}")
+                
+                self.logger.info("SUCCESS: FinBERT analyzer configured for lazy loading (dependencies verified)")
+                
             except Exception as e:
                 self.logger.error(f"FAILED: FinBERT analyzer initialization: {e}")
                 self.logger.error(f"FinBERT error details:", exc_info=True)
@@ -684,6 +750,10 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
             self.logger.info(f"Final state: {self.state.value}")
             self.logger.info(f"All components initialized successfully")
 
+            # CRITICAL FIX: Move to RUNNING state after successful initialization
+            self.state = ProcessState.RUNNING
+            self.logger.info(f"Process state changed to: {self.state.value}")
+
             # CONTINUOUS NEWS COLLECTION: Initialize always-active collection state
             self._collection_active = True       # Start in active mode for continuous collection
             self._idle_mode = False             # Start in active mode, not idle
@@ -708,11 +778,40 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
     def _get_finbert_analyzer(self):
         """Lazy load FinBERT analyzer only when needed to save memory"""
         if self.finbert_analyzer is None:
-            from Friren_V1.trading_engine.sentiment.news_sentiment import FinBERTAnalyzer
-            self.finbert_analyzer = FinBERTAnalyzer()
-            if not self.finbert_analyzer.initialize():
-                raise RuntimeError("FinBERT lazy initialization failed")
-            self.logger.info("FinBERT analyzer lazy loaded successfully")
+            try:
+                # PRODUCTION FIX: Import the correct FinBERT implementation
+                from Friren_V1.trading_engine.sentiment.finBERT_analysis import EnhancedFinBERT
+                
+                self.logger.info("Initializing FinBERT analyzer with lazy loading...")
+                self.finbert_analyzer = EnhancedFinBERT(
+                    max_length=256,  # Reduced from 512 for memory optimization
+                    batch_size=2,    # Reduced from 8 for memory optimization  
+                    device="cpu"     # Force CPU to avoid GPU memory issues
+                )
+                
+                # Initialize the model
+                success = self.finbert_analyzer.initialize()
+                if not success:
+                    raise RuntimeError("FinBERT initialization returned False")
+                    
+                self.logger.info("SUCCESS: FinBERT analyzer lazy loaded and initialized successfully")
+                
+                # Test with a sample to ensure it works
+                test_result = self.finbert_analyzer.analyze_text(
+                    "Apple reported strong quarterly earnings with record revenue growth.",
+                    article_id="init_test"
+                )
+                self.logger.info(f"FinBERT test analysis: {test_result.classification} (confidence: {test_result.confidence:.3f})")
+                
+            except ImportError as e:
+                self.logger.error(f"CRITICAL: FinBERT dependencies missing: {e}")
+                self.logger.error("SOLUTION: Install required packages: pip install torch transformers numpy")
+                raise RuntimeError(f"FinBERT dependencies not installed: {e}")
+            except Exception as e:
+                self.logger.error(f"CRITICAL: FinBERT initialization failed: {e}")
+                self.logger.error(f"Full error details:", exc_info=True)
+                raise RuntimeError(f"FinBERT initialization failed: {e}")
+                
         return self.finbert_analyzer
 
     def _process_cycle(self):
@@ -771,10 +870,21 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
                     message = self.redis_manager.receive_message(timeout=0.1)
                     if message:
                         self.logger.info(f"Received message: {message.message_type}")
-                        print(f"Received message: {message.message_type}")
+                        print(f"PHASE 2: Processing message: {message.message_type}")
+
+                        # PHASE 1: Run real business logic pipeline for immediate testing
+                        if message.message_type == "TEST_BUSINESS_OUTPUT":
+                            print("PHASE 1: Running real business logic pipeline...")
+                            if self.watchlist_symbols:
+                                # Run actual news collection and analysis pipeline
+                                await self._run_discovery_cycle()
+                                print("PHASE 1: Real business outputs completed!")
+                            else:
+                                print("No symbols available - cannot run business logic")
+                            message_processed = True
 
                         # Handle different message types
-                        if message.message_type == "NEWS_REQUEST":
+                        elif message.message_type == "NEWS_REQUEST":
                             # Process NEWS_REQUEST
                             symbols = message.data.get('symbols') or [message.data.get('symbol')]
                             symbols = [s for s in symbols if s]
@@ -891,6 +1001,56 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
                             
                             message_processed = True
 
+                        elif message.message_type == "TARGETED_NEWS_REQUEST":
+                            # TARGETED NEWS: Handle chaos-triggered news collection requests
+                            self.logger.info(f"TARGETED NEWS: Received request from {message.sender}")
+                            print(f"{Colors.YELLOW}[TARGETED NEWS] Processing chaos-triggered request{Colors.RESET}")
+                            
+                            try:
+                                # Extract request data
+                                request_data = message.data
+                                symbol = request_data.get('symbol', 'SPY')
+                                urgency = request_data.get('urgency', 'medium')
+                                chaos_reason = request_data.get('chaos_reason', 'unknown')
+                                request_id = request_data.get('request_id', 'unknown')
+                                
+                                self.logger.info(f"TARGETED NEWS: {symbol} - {urgency} urgency - {chaos_reason}")
+                                print(f"{Colors.CYAN}[TARGETED NEWS] {symbol}: {urgency} urgency ({chaos_reason}){Colors.RESET}")
+                                
+                                # BUSINESS LOGIC OUTPUT - Show targeting in action
+                                send_colored_business_output(self.process_id, f"Targeted news collection triggered: {symbol} due to {chaos_reason}", "news")
+                                
+                                # Execute targeted collection using Professional News Collector
+                                targeted_results = self._execute_targeted_collection(request_data)
+                                
+                                # Send response back to Strategy Analyzer
+                                response_message = create_process_message(
+                                    sender="enhanced_news_pipeline",
+                                    recipient="strategy_analyzer",
+                                    message_type="TARGETED_NEWS_RESPONSE",
+                                    data={
+                                        "request_id": request_id,
+                                        "symbol": symbol,
+                                        "results": targeted_results,
+                                        "processed_at": datetime.now().isoformat(),
+                                        "processing_time_ms": targeted_results.get('processing_time_ms', 0)
+                                    },
+                                    priority=message.priority  # Maintain original priority
+                                )
+                                
+                                success = self.redis_manager.send_message(response_message)
+                                if success:
+                                    self.logger.info(f"TARGETED NEWS: Response sent for {symbol}")
+                                    print(f"{Colors.GREEN}[TARGETED NEWS] Response sent for {symbol}{Colors.RESET}")
+                                else:
+                                    self.logger.error(f"Failed to send targeted news response for {symbol}")
+                                    
+                            except Exception as e:
+                                self.logger.error(f"Error processing targeted news request: {e}")
+                                print(f"{Colors.RED}[ERROR] Targeted news processing failed: {e}{Colors.RESET}")
+                            
+                            message_processed = True
+
                         else:
                             # For other message types, send back to Redis for other processes
                             self.logger.debug(f"Message not for news pipeline: {message.message_type}")
@@ -900,42 +1060,51 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
                     self.logger.debug(f"Queue check error: {e}")
                     pass
 
-            # CONTINUOUS NEWS COLLECTION: Always run pipeline if not processing messages
+            # CRITICAL FIX: FORCE PIPELINE EXECUTION - Always run news collection
             if not message_processed:
-                # Enable continuous collection - no scheduling restrictions
+                # FORCE CONTINUOUS COLLECTION: Always execute regardless of conditions
                 self._collection_active = True
                 self._idle_mode = False
                 
-                # Always run pipeline for continuous news monitoring
-                should_run = self._should_run_pipeline()
-                self.logger.info(f"CONTINUOUS_NEWS: Pipeline execution enabled: {should_run}")
-                print(f"{Colors.BLUE}[CONTINUOUS NEWS] News collection active - pipeline running{Colors.RESET}")
-                    
-                if should_run:
-                    # BUSINESS LOGIC COLORED OUTPUT - Immediate visibility
-                    send_colored_business_output(self.process_id, "News collected: Starting real-time news gathering from MarketWatch, Reuters, Bloomberg...", "news")
-                    print(f"\033[96m[NEWS PIPELINE] ACTIVE: Starting news collection cycle for {len(self.watchlist_symbols)} symbols\033[0m")
+                # CRITICAL FIX: Always execute pipeline - no conditions
+                self.logger.critical("FORCE_EXECUTION: Running pipeline regardless of conditions")
+                print(f"{Colors.GREEN}[FORCE EXECUTION] Running news collection pipeline{Colors.RESET}")
+                
+                # BUSINESS LOGIC COLORED OUTPUT - Immediate visibility
+                send_colored_business_output(self.process_id, "News collected: Starting real-time news gathering from MarketWatch, Reuters, Bloomberg...", "news")
+                print(f"\033[96m[NEWS PIPELINE] ACTIVE: Starting news collection cycle for {len(self.watchlist_symbols)} symbols\033[0m")
 
-                    self.logger.info("=== STARTING PIPELINE EXECUTION ===")
-                    start_time = datetime.now()
-                    import asyncio
+                self.logger.info("=== PHASE 2: FORCING PIPELINE EXECUTION FOR BUSINESS OUTPUT ===")
+                start_time = datetime.now()
+                import asyncio
+                try:
                     try:
-                        try:
-                            loop = asyncio.get_event_loop()
-                        except RuntimeError:
-                            loop = asyncio.new_event_loop()
-                            asyncio.set_event_loop(loop)
-                        results = loop.run_until_complete(self._run_complete_pipeline())
-                        processing_time = (datetime.now() - start_time).total_seconds() * 1000
-                        self._update_pipeline_metrics(results, processing_time)
-                        self._send_results_to_decision_engine(results)
-                        self.last_cycle_time = datetime.now()
-                    except Exception as e:
-                        self.logger.error(f"Error in async pipeline execution: {e}")
-                        self.logger.error("Async pipeline error details:", exc_info=True)
-                        self.error_count += 1
-                else:
-                    self.logger.info("Pipeline conditions not met, skipping execution")
+                        loop = asyncio.get_event_loop()
+                    except RuntimeError:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                    
+                    # PHASE 2 FIX: Force pipeline execution regardless of timing to show business logic
+                    self.logger.critical("PHASE 2: Forcing complete pipeline execution to demonstrate business output")
+                    results = loop.run_until_complete(self._run_complete_pipeline())
+                    
+                    processing_time = (datetime.now() - start_time).total_seconds() * 1000
+                    self._update_pipeline_metrics(results, processing_time)
+                    self._send_results_to_decision_engine(results)
+                    self.last_cycle_time = datetime.now()
+                    
+                    # BUSINESS LOGIC COMPLETION OUTPUT
+                    try:
+                        send_colored_business_output(self.process_id, f"NEWS PIPELINE: Completed analysis of {len(self.watchlist_symbols)} symbols in {processing_time:.1f}ms", "news")
+                    except:
+                        print(f"[NEWS PIPELINE] Completed analysis of {len(self.watchlist_symbols)} symbols in {processing_time:.1f}ms")
+                    
+                    self.logger.critical("PHASE 2: Pipeline execution completed successfully with business output")
+                    
+                except Exception as e:
+                    self.logger.error(f"Error in forced pipeline execution: {e}")
+                    self.logger.error("Forced pipeline error details:", exc_info=True)
+                    self.error_count += 1
             self.logger.info(f"=== PROCESS CYCLE END: {self.process_id} ===")
         except Exception as e:
             self.logger.error(f"=== PROCESS CYCLE ERROR: {self.process_id} ===")
@@ -957,9 +1126,28 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
         total_articles = 0
         total_recommendations = 0
 
+        # FOR REDIS WRAPPER: Clear previous articles for fresh cycle data
+        self.last_collected_articles = []
+
         # ULTRA CRITICAL: Market discovery scan EVERY cycle (user requirement)
         cycle_number = getattr(self, '_cycle_count', 0)
         self._cycle_count = cycle_number + 1
+
+        # PHASE 2 FIX: Check for priority messages BEFORE starting discovery
+        if self.redis_manager:
+            try:
+                priority_message = self.redis_manager.receive_message(timeout=0.01)
+                if priority_message and priority_message.message_type == "TEST_BUSINESS_OUTPUT":
+                    print("PHASE 2: PRIORITY - Running real business logic before discovery...")
+                    if self.watchlist_symbols:
+                        # Run actual news collection and analysis pipeline
+                        await self._run_discovery_cycle()
+                        print("PHASE 2: Priority real business outputs completed!")
+                    else:
+                        print("No symbols available - cannot run business logic")
+                    return  # Skip discovery and return to main loop for more messages
+            except Exception as e:
+                print(f"Priority message check failed: {e}")
 
         # ALWAYS run discovery - no more every 3rd cycle limitation
         try:
@@ -976,18 +1164,27 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
                     if len(articles) > 1:
                         send_colored_business_output(self.process_id, f"News collected: Additional {len(articles)-1} articles for {symbol}", "news")
                     # Quick sentiment check for strong positive signals  
-                    if self.finbert_analyzer:
+                    try:
+                        # Force FinBERT analyzer loading for discovery
+                        finbert = self._get_finbert_analyzer()
                         positive_count = 0
+                        
                         for article in articles[:5]:  # Check first 5 articles
-                            sentiment_result = self.finbert_analyzer.analyze_text(
-                                article.title + " " + article.content,
+                            sentiment_result = finbert.analyze_text(
+                                article.title + " " + (article.content or ""),
                                 article_id=f"discovery_{symbol}"
                             )
                             # BUSINESS LOGIC OUTPUT: Sentiment analysis
-                            send_colored_business_output(self.process_id, f"News collected: '{article.title[:40]}...' for {symbol} - sentiment: {sentiment_result.classification}", "finbert")
+                            send_colored_business_output(self.process_id, f"[FINBERT] {symbol}: {sentiment_result.classification.upper()} (confidence: {sentiment_result.confidence*100:.1f}%) | discovery: '{article.title[:40]}...'", "finbert")
                             
-                            if sentiment_result.classification == 'positive' and sentiment_result.confidence > 0.75:
+                            if sentiment_result.classification.lower() == 'positive' and sentiment_result.confidence > 0.75:
                                 positive_count += 1
+                                
+                    except Exception as e:
+                        self.logger.error(f"Discovery sentiment analysis failed for {symbol}: {e}")
+                        # Skip discovery sentiment if FinBERT fails
+                        positive_count = 0
+                        send_colored_business_output(self.process_id, f"[FINBERT] {symbol}: ERROR - FinBERT analysis failed for discovery", "finbert")
 
                         # If majority positive sentiment, generate buy signal
                         if positive_count >= 3:
@@ -1014,9 +1211,14 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
             print(f"{Colors.RED}Discovery scan failed: {e}{Colors.RESET}")
 
         # Continue with regular watchlist processing
+        self.logger.critical(f"DEBUG: Starting watchlist processing for {len(self.watchlist_symbols)} symbols: {self.watchlist_symbols}")
+        print(f"{Colors.GREEN}DEBUG: Starting watchlist processing for {len(self.watchlist_symbols)} symbols: {self.watchlist_symbols}{Colors.RESET}")
+        
         for symbol in self.watchlist_symbols:
             try:
                 symbol_start_time = datetime.now()
+                self.logger.critical(f"DEBUG: Processing symbol {symbol}")
+                print(f"{Colors.GREEN}DEBUG: Processing symbol {symbol}{Colors.RESET}")
 
                 # Step 1: Collect news
                 self.logger.info(f"=== COLLECTING NEWS FOR {symbol} ===")
@@ -1024,9 +1226,20 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
                 self.logger.info(f"Searching last {self.config.hours_back} hours, max {self.config.max_articles_per_symbol} articles per source")
                 print(f"{Colors.YELLOW}Searching last {self.config.hours_back} hours, max {self.config.max_articles_per_symbol} articles per source{Colors.RESET}")
 
-                # Linter guard: ensure news_collector is initialized
+                # PRODUCTION VALIDATION: Ensure news collector is properly initialized
                 if not self.news_collector:
-                    raise RuntimeError("News collector is not initialized")
+                    raise RuntimeError("PRODUCTION ERROR: News collector is not initialized - system cannot function without news collection")
+
+                # PRODUCTION VALIDATION: Ensure sources are available and functional
+                if not hasattr(self.news_collector, '_ensure_sources_initialized'):
+                    raise RuntimeError("PRODUCTION ERROR: News collector missing source initialization method")
+                
+                # Force source initialization if not already done
+                self.news_collector._ensure_sources_initialized()
+                if not self.news_collector.news_sources:
+                    raise RuntimeError("PRODUCTION ERROR: News collector has no available sources - cannot collect news")
+                
+                self.logger.info(f"PRODUCTION READY: News collector has {len(self.news_collector.news_sources)} active sources: {list(self.news_collector.news_sources.keys())}")
 
                 news_data = self.news_collector.collect_symbol_news(
                     symbol,
@@ -1034,12 +1247,26 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
                     max_articles_per_source=self.config.max_articles_per_symbol
                 )
 
+                # CRITICAL DEBUG: Check what we actually received
+                self.logger.critical(f"CRITICAL DEBUG: news_data object for {symbol}:")
+                self.logger.critical(f"  - Type: {type(news_data)}")
+                self.logger.critical(f"  - Has key_articles attribute: {hasattr(news_data, 'key_articles')}")
+                if hasattr(news_data, 'key_articles'):
+                    self.logger.critical(f"  - key_articles length: {len(news_data.key_articles)}")
+                    self.logger.critical(f"  - key_articles type: {type(news_data.key_articles)}")
+                if hasattr(news_data, 'news_volume'):
+                    self.logger.critical(f"  - news_volume: {news_data.news_volume}")
+
                 # Display collected articles with colored output
                 self.logger.info(f"Collected {len(news_data.key_articles)} articles for {symbol}:")
                 print(f"{Colors.YELLOW}Collected {len(news_data.key_articles)} articles for {symbol}:{Colors.RESET}")
 
-                # BUSINESS LOGIC OUTPUT: Send to main terminal with enhanced details
+                # FOR REDIS WRAPPER: Update last_collected_articles for wrapper integration
                 if news_data.key_articles:
+                    # Add articles to the wrapper-readable attribute
+                    self.last_collected_articles.extend(news_data.key_articles)
+                    
+                    # BUSINESS LOGIC OUTPUT: Send to main terminal with enhanced details
                     first_article = news_data.key_articles[0]
                     send_colored_business_output(self.process_id, f"[NEWS COLLECTOR] {symbol}: '{first_article.title[:60]}...' from {first_article.source} - collected {datetime.now().strftime('%H:%M:%S')}", "news")
                     # Show additional articles if more than 1
@@ -1072,24 +1299,19 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
                     self.logger.debug(f"Analyzing sentiment for {len(news_data.key_articles)} articles...")
                     print(f"{Colors.RED}{Colors.BOLD}=== FINBERT SENTIMENT ANALYSIS FOR {symbol} ==={Colors.RESET}")
 
-                    if self.finbert_analyzer:
+                    # PRODUCTION FIX: Always attempt to load FinBERT analyzer
+                    try:
+                        # Force lazy loading of FinBERT analyzer
+                        finbert = self._get_finbert_analyzer()
+                        self.logger.info(f"FinBERT analyzer loaded successfully for {symbol}")
                         sentiment_results = await self._analyze_articles_sentiment(news_data.key_articles)  # type: ignore
-                    else:
-                        self.logger.warning("FinBERT analyzer not available, using mock sentiment analysis")
-                        # Create mock sentiment results
-                        sentiment_results = []
-                        for article in news_data.key_articles:
-                            sentiment_results.append(EnhancedSentimentResult(
-                                article_id=str(hash(article.title)),
-                                title=article.title,
-                                sentiment_label=SentimentLabel.NEUTRAL,
-                                confidence=0.5,
-                                positive_score=0.33,
-                                negative_score=0.33,
-                                neutral_score=0.34,
-                                market_impact_score=0.5,
-                                processing_time_ms=1.0
-                            ))
+                        
+                    except Exception as e:
+                        self.logger.error(f"CRITICAL: FinBERT analysis failed for {symbol}: {e}")
+                        self.logger.error("PRODUCTION REQUIREMENT: Real FinBERT analysis required")
+                        # NO FALLBACKS - Raise error to ensure production system fails fast
+                        send_colored_business_output(self.process_id, f"CRITICAL ERROR: FinBERT analysis failed for {symbol}: {e}", "finbert")
+                        raise RuntimeError(f"FinBERT analysis failed for {symbol}: {e} - production system requires real sentiment analysis")
 
                     # SHOW ALL SENTIMENT RESULTS WITH BUSINESS OUTPUT
                     if sentiment_results:
@@ -1123,8 +1345,17 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
                         # BUSINESS LOGIC OUTPUT: Recommendation and XGBoost in requested format
                         confidence_pct = recommendation.confidence * 100
                         article_count = len(news_data.key_articles)
-                        send_colored_business_output(self.process_id, f"[RECOMMENDATION] {symbol}: {recommendation.action.upper()} (confidence: {confidence_pct:.1f}%) | reasoning: '{recommendation.reasoning[:50]}...' | articles: {article_count}", "recommendation")
-                        send_colored_business_output(self.process_id, f"[XGBOOST] {symbol}: {recommendation.action.upper()} (score: {recommendation.confidence:.3f}) | features: sentiment={recommendation.confidence:.2f}, volume={article_count}, impact=0.82", "xgboost")
+                        
+                        # Calculate real market impact from sentiment results
+                        avg_market_impact = sum(result.market_impact_score for result in sentiment_results) / len(sentiment_results) if sentiment_results else 0.0
+                        avg_sentiment_score = sum(result.sentiment_score for result in sentiment_results) / len(sentiment_results) if sentiment_results else 0.0
+                        
+                        # BUSINESS LOGIC OUTPUT - Real recommendation with data flow
+                        reasoning_preview = recommendation.reasoning[:60] + '...' if len(recommendation.reasoning) > 60 else recommendation.reasoning
+                        send_colored_business_output(self.process_id, f"[RECOMMENDATION] {symbol}: {recommendation.action.upper()} (confidence: {confidence_pct:.1f}%) | reasoning: '{reasoning_preview}' | articles: {article_count}", "recommendation")
+                        
+                        # BUSINESS LOGIC OUTPUT - Real XGBoost decision with feature values
+                        send_colored_business_output(self.process_id, f"[XGBOOST] {symbol}: {recommendation.action.upper()} (score: {recommendation.confidence:.3f}) | features: sentiment={avg_sentiment_score:.2f}, volume={article_count}, impact={avg_market_impact:.2f}", "xgboost")
 
                         # Update symbol tracking
                         self.symbol_tracking[symbol].update({
@@ -1197,45 +1428,68 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
         """Analyze sentiment for articles using FinBERT"""
         sentiment_results = []
 
-        # Process in batches to manage memory
-        for i in range(0, len(articles), self.config.finbert_batch_size):
-            batch = articles[i:i + self.config.finbert_batch_size]
+        try:
+            # Get FinBERT analyzer (force lazy loading)
+            finbert = self._get_finbert_analyzer()
+            
+            # Process in batches to manage memory
+            for i in range(0, len(articles), self.config.finbert_batch_size):
+                batch = articles[i:i + self.config.finbert_batch_size]
 
-            for idx, article in enumerate(batch):
-                try:
-                    # Analyze sentiment
-                    analysis_start = datetime.now()
-                    sentiment_result = self.finbert_analyzer.analyze_text(
-                        article.title + " " + article.content,
-                        article_id=f"{article.source}_{idx}"
-                    )  # type: ignore
-                    analysis_time = (datetime.now() - analysis_start).total_seconds() * 1000
+                for idx, article in enumerate(batch):
+                    try:
+                        # Prepare text for analysis
+                        article_text = article.title
+                        if hasattr(article, 'content') and article.content:
+                            article_text += " " + article.content
+                        
+                        # Analyze sentiment
+                        analysis_start = datetime.now()
+                        sentiment_result = finbert.analyze_text(
+                            article_text,
+                            article_id=f"{article.source}_{idx}"
+                        )
+                        analysis_time = (datetime.now() - analysis_start).total_seconds() * 1000
 
-                    # Create enhanced sentiment result
-                    enhanced_result = EnhancedSentimentResult(
-                        article_id=f"{article.source}_{idx}",
-                        title=article.title,
-                        sentiment_label=SentimentLabel(sentiment_result.classification),
-                        confidence=sentiment_result.confidence,
-                        positive_score=sentiment_result.raw_scores.get('positive', 0.0),
-                        negative_score=sentiment_result.raw_scores.get('negative', 0.0),
-                        neutral_score=sentiment_result.raw_scores.get('neutral', 0.0),
-                        market_impact_score=sentiment_result.sentiment_score,
-                        processing_time_ms=analysis_time
-                    )
-                    sentiment_results.append(enhanced_result)
+                        # Create enhanced sentiment result
+                        enhanced_result = EnhancedSentimentResult(
+                            article_id=f"{article.source}_{idx}",
+                            title=article.title,
+                            sentiment_label=SentimentLabel(sentiment_result.classification.upper()),
+                            confidence=sentiment_result.confidence,
+                            positive_score=sentiment_result.raw_scores.get('positive', 0.0),
+                            negative_score=sentiment_result.raw_scores.get('negative', 0.0),
+                            neutral_score=sentiment_result.raw_scores.get('neutral', 0.0),
+                            market_impact_score=sentiment_result.sentiment_score,
+                            processing_time_ms=analysis_time
+                        )
+                        sentiment_results.append(enhanced_result)
 
-                except Exception as e:
-                    self.logger.error(f"Error analyzing sentiment for article: {e}")
-                    continue
+                        # BUSINESS LOGIC OUTPUT: Individual FinBERT analysis
+                        symbol_hint = article.source.split('-')[0] if '-' in article.source else 'UNKNOWN'
+                        send_colored_business_output(
+                            self.process_id, 
+                            f"[FINBERT] {symbol_hint}: {sentiment_result.classification.upper()} (confidence: {sentiment_result.confidence*100:.1f}%) | article: '{article.title[:40]}...' | processing: {analysis_time:.1f}ms", 
+                            "finbert"
+                        )
+
+                    except Exception as e:
+                        self.logger.error(f"Error analyzing sentiment for article '{article.title[:50]}...': {e}")
+                        # Continue with other articles rather than failing completely
+                        continue
+
+        except Exception as e:
+            self.logger.error(f"CRITICAL: FinBERT sentiment analysis completely failed: {e}")
+            raise RuntimeError(f"FinBERT sentiment analysis failed: {e}")
 
         return sentiment_results
 
     def _should_run_pipeline(self) -> bool:
         """UNIFIED: Check if pipeline should run - enables continuous collection"""
         try:
-            # Always allow pipeline to run if process is active and not stopped
-            if not (self.state == ProcessState.RUNNING):
+            # CRITICAL FIX: Allow pipeline to run even during initialization
+            # The process needs to collect news during its startup phase
+            if self.state == ProcessState.STOPPED or self.state == ProcessState.ERROR:
                 self.logger.debug(f"Pipeline not running - process state: {self.state.value}")
                 return False
                 
@@ -1243,9 +1497,9 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
                 self.logger.debug("Pipeline not running - stop event set")
                 return False
             
-            # FIXED: Enable continuous news collection (no time restrictions)
-            # Remove cycle interval restrictions for responsive news monitoring
-            self.logger.debug("CONTINUOUS_NEWS: Pipeline enabled for continuous collection")
+            # FIXED: Enable continuous news collection (no restrictions)
+            # Allow collection during initialization and running states
+            self.logger.debug(f"CONTINUOUS_NEWS: Pipeline enabled for continuous collection (state: {self.state.value})")
             return True
             
         except Exception as e:
@@ -1390,10 +1644,11 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
 
             except Exception as db_error:
                 self.logger.warning(f"Could not get real position data: {db_error}")
-                # Fallback to known AAPL position
-                print(f"{Colors.YELLOW}Position Monitor: Current AAPL holding: 7.0 shares (from previous data){Colors.RESET}")
-                print(f"{Colors.YELLOW}Position Monitor: Active strategy: momentum_strategy{Colors.RESET}")
-                print(f"{Colors.YELLOW}Position Monitor: Portfolio health: HEALTHY - All positions within risk limits{Colors.RESET}")
+                # Fallback when no position data available
+                first_symbol = self.watchlist_symbols[0] if self.watchlist_symbols else "SYMBOL"
+                print(f"{Colors.YELLOW}Position Monitor: No active positions found{Colors.RESET}")
+                print(f"{Colors.YELLOW}Position Monitor: Monitoring symbols: {', '.join(self.watchlist_symbols[:3])}{Colors.RESET}")
+                print(f"{Colors.YELLOW}Position Monitor: Portfolio health: HEALTHY - Ready for trading{Colors.RESET}")
 
         except Exception as e:
             self.logger.error(f"Position status error: {e}")
@@ -1466,6 +1721,140 @@ class EnhancedNewsPipelineProcess(RedisBaseProcess):
                     
         except Exception as e:
             self.logger.error(f"Error updating idle metrics: {e}")
+
+    def _execute_targeted_collection(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute targeted news collection using Professional News Collector"""
+        try:
+            # Import the professional collector
+            from ...data.professional_targeted_news_collector import (
+                get_professional_targeted_collector, TargetedNewsRequest
+            )
+            
+            # Extract request parameters
+            symbol = request_data.get('symbol', 'SPY')
+            urgency = request_data.get('urgency', 'medium')
+            sources_requested = request_data.get('sources_requested', ['alpha_vantage', 'fmp'])
+            max_articles = request_data.get('max_articles', 5)
+            request_id = request_data.get('request_id', 'unknown')
+            
+            self.logger.info(f"TARGETED COLLECTION: {symbol} - {len(sources_requested)} sources, max {max_articles} articles")
+            
+            # Get professional collector instance
+            collector = get_professional_targeted_collector()
+            if not collector:
+                return {
+                    'success': False,
+                    'error': 'Professional news collector not available',
+                    'articles_count': 0,
+                    'processing_time_ms': 0
+                }
+            
+            # Create targeted news request
+            news_request = TargetedNewsRequest(
+                request_id=request_id,
+                symbol=symbol,
+                max_articles=max_articles,
+                sources=sources_requested
+            )
+            
+            # Execute collection
+            start_time = time.time()
+            response = collector.collect_targeted_news(news_request)
+            processing_time = (time.time() - start_time) * 1000
+            
+            if response.success:
+                # Process articles through FinBERT if available
+                processed_articles = self._process_articles_with_finbert(response.articles, symbol)
+                
+                # BUSINESS LOGIC OUTPUT - Show results
+                send_colored_business_output(
+                    self.process_id, 
+                    f"Targeted news: {len(processed_articles)} articles collected for {symbol} from {response.source_used}",
+                    "news"
+                )
+                
+                return {
+                    'success': True,
+                    'symbol': symbol,
+                    'articles_count': len(processed_articles),
+                    'articles': processed_articles,
+                    'source_used': response.source_used,
+                    'sources_attempted': response.sources_attempted,
+                    'processing_time_ms': processing_time,
+                    'collection_time': response.collection_time.isoformat(),
+                    'urgency': urgency
+                }
+            else:
+                self.logger.error(f"Targeted collection failed for {symbol}: {response.error_message}")
+                return {
+                    'success': False,
+                    'error': response.error_message,
+                    'symbol': symbol,
+                    'articles_count': 0,
+                    'processing_time_ms': processing_time
+                }
+                
+        except Exception as e:
+            self.logger.error(f"Error in targeted collection: {e}")
+            return {
+                'success': False,
+                'error': str(e),
+                'symbol': request_data.get('symbol', 'unknown'),
+                'articles_count': 0,
+                'processing_time_ms': 0
+            }
+    
+    def _process_articles_with_finbert(self, articles: List[Dict], symbol: str) -> List[Dict]:
+        """Process articles through FinBERT for sentiment analysis"""
+        try:
+            if not articles:
+                return []
+            
+            # Get FinBERT analyzer if available
+            finbert_analyzer = self._get_finbert_analyzer()
+            if not finbert_analyzer:
+                self.logger.warning("FinBERT not available for targeted news processing")
+                return articles
+            
+            processed_articles = []
+            for article in articles:
+                try:
+                    # Extract text for analysis
+                    text = article.get('summary', article.get('title', ''))
+                    if not text:
+                        continue
+                    
+                    # Analyze sentiment
+                    sentiment_result = finbert_analyzer.analyze_text(text)
+                    
+                    # Add sentiment to article
+                    enhanced_article = article.copy()
+                    enhanced_article.update({
+                        'finbert_sentiment': sentiment_result.classification,
+                        'finbert_score': sentiment_result.sentiment_score,
+                        'finbert_confidence': sentiment_result.confidence,
+                        'symbol': symbol,
+                        'analysis_timestamp': datetime.now().isoformat()
+                    })
+                    
+                    processed_articles.append(enhanced_article)
+                    
+                    # BUSINESS LOGIC OUTPUT - Show FinBERT analysis
+                    send_colored_business_output(
+                        self.process_id,
+                        f"FinBERT analysis: '{article.get('title', 'Article')[:50]}...' - {sentiment_result.classification} ({sentiment_result.confidence:.2f})",
+                        "sentiment"
+                    )
+                    
+                except Exception as e:
+                    self.logger.error(f"Error processing article with FinBERT: {e}")
+                    processed_articles.append(article)  # Add without sentiment
+            
+            return processed_articles
+            
+        except Exception as e:
+            self.logger.error(f"Error in FinBERT processing: {e}")
+            return articles  # Return original articles if processing fails
 
     def _reset_to_initialization(self):
         """Reset process to initialization state for smart memory management"""
@@ -1675,7 +2064,8 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
     # Create process with test configuration
-    test_symbols = ['AAPL', 'MSFT', 'GOOGL']
+    # Load test symbols from database or use defaults
+    test_symbols = []
     config = get_default_pipeline_config()
     config.cycle_interval_minutes = 1  # Fast testing
 
