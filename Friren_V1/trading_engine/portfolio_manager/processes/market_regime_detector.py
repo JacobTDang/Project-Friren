@@ -57,6 +57,7 @@ class MarketRegimeDetector(RedisBaseProcess):
         self.current_regime = 'UNKNOWN'
         self.regime_confidence = 0.0
         self.last_regime_update = None
+        self.last_broadcast_regime = None  # Track last broadcasted regime to avoid spam
 
     def _initialize(self):
         self.logger.critical("EMERGENCY: ENTERED _initialize for market_regime_detector")
@@ -131,7 +132,8 @@ class MarketRegimeDetector(RedisBaseProcess):
             # Fetch market data for analysis
             market_data = self._fetch_market_data()
 
-            if not market_data:
+            # Fixed: Proper DataFrame validation to avoid ambiguous truth value error
+            if market_data is None or (isinstance(market_data, pd.DataFrame) and len(market_data) == 0):
                 self.logger.warning("No market data available for regime analysis")
                 time.sleep(60)
                 return
@@ -174,15 +176,36 @@ class MarketRegimeDetector(RedisBaseProcess):
             # Use data fetcher to get SPY data as the primary market indicator
             df = self.data_fetcher.extract_data("SPY", period="100d", interval="1d")
 
-            if df is None or df.empty:
-                self.logger.warning("No SPY data available")
+            # Fixed: Proper DataFrame validation to avoid ambiguous truth value error
+            if df is None:
+                self.logger.warning("No SPY data available - data fetcher returned None")
+                return None
+            
+            if not isinstance(df, pd.DataFrame):
+                self.logger.warning(f"Invalid data type returned: {type(df)}")
+                return None
+                
+            if len(df) == 0:
+                self.logger.warning("Empty SPY data returned")
                 return None
 
-            # Add technical indicators using data tools
-            df = self.data_tools.add_all_regime_indicators(df)
+            self.logger.debug(f"Successfully fetched {len(df)} days of SPY data")
 
-            self.logger.debug(f"Fetched {len(df)} days of SPY data for regime analysis")
-            return df
+            # Add technical indicators using data tools
+            try:
+                df_enhanced = self.data_tools.add_all_regime_indicators(df)
+                
+                if df_enhanced is None or len(df_enhanced) == 0:
+                    self.logger.warning("Failed to add regime indicators - using basic data")
+                    return df
+                    
+                self.logger.debug(f"Added regime indicators to {len(df_enhanced)} rows")
+                return df_enhanced
+                
+            except Exception as indicator_error:
+                self.logger.error(f"Error adding regime indicators: {indicator_error}")
+                # Return basic data if indicator addition fails
+                return df
 
         except Exception as e:
             self.logger.error(f"Error fetching market data: {e}")
@@ -258,9 +281,85 @@ class MarketRegimeDetector(RedisBaseProcess):
                     self.logger.info(f"[SUCCESS] BUSINESS LOGIC: Market regime Redis update verified: {regime_result.primary_regime}")
                 else:
                     self.logger.error(f"[ERROR] BUSINESS LOGIC: Market regime Redis update verification failed - expected {regime_result.primary_regime}, got {verification}")
+                
+                # CRITICAL FIX: Broadcast regime change notifications
+                self._broadcast_regime_change(regime_result, regime_data)
 
         except Exception as e:
             self.logger.error(f"Error updating Redis shared state: {e}")
+
+    def _broadcast_regime_change(self, regime_result: MarketRegimeResult, regime_data: Dict[str, Any]):
+        """
+        Broadcast regime change notifications to other processes
+        
+        CRITICAL FIX: Real-time regime change communication
+        Notifies all interested processes when market regime changes
+        """
+        try:
+            # Check if regime actually changed
+            if hasattr(self, 'last_broadcast_regime'):
+                if self.last_broadcast_regime == regime_result.primary_regime:
+                    # No change, don't spam processes
+                    return
+            
+            # Create regime change message for interested processes
+            regime_change_message = create_process_message(
+                sender_id="market_regime_detector",
+                recipient="broadcast",  # Broadcast to all processes
+                message_type="REGIME_CHANGE",
+                data={
+                    'new_regime': regime_result.primary_regime,
+                    'previous_regime': getattr(self, 'last_broadcast_regime', 'UNKNOWN'),
+                    'confidence': regime_result.regime_confidence,
+                    'trend': regime_result.trend,
+                    'trend_strength': regime_result.trend_strength,
+                    'volatility_regime': regime_result.volatility_regime,
+                    'market_stress_level': regime_result.market_stress_level,
+                    'change_timestamp': datetime.now().isoformat(),
+                    'regime_data': regime_data
+                },
+                priority=MessagePriority.HIGH
+            )
+            
+            # Send to specific processes that need regime updates
+            target_processes = [
+                "market_decision_engine",     # Decision engine needs regime for decisions
+                "strategy_analyzer",          # Strategy analyzer for signal adaptation  
+                "position_health_monitor",    # Position health for reassignment triggers
+                "strategy_assignment_engine"  # Strategy assignment for real-time updates
+            ]
+            
+            messages_sent = 0
+            for target_process in target_processes:
+                try:
+                    # Send individual message to each target process
+                    targeted_message = create_process_message(
+                        sender_id="market_regime_detector",
+                        recipient=target_process,
+                        message_type="REGIME_UPDATE",
+                        data=regime_change_message.data,
+                        priority=MessagePriority.HIGH
+                    )
+                    
+                    success = self.redis_manager.send_process_message(targeted_message)
+                    if success:
+                        messages_sent += 1
+                        self.logger.debug(f"REGIME BROADCAST: Sent regime update to {target_process}")
+                    else:
+                        self.logger.warning(f"REGIME BROADCAST: Failed to send regime update to {target_process}")
+                        
+                except Exception as e:
+                    self.logger.error(f"REGIME BROADCAST: Error sending to {target_process}: {e}")
+            
+            # Update last broadcast regime
+            self.last_broadcast_regime = regime_result.primary_regime
+            
+            # Log successful broadcast
+            self.logger.info(f"REGIME BROADCAST: {regime_result.primary_regime} regime change broadcasted to {messages_sent}/{len(target_processes)} processes")
+            print(f"[REGIME CHANGE] Market regime changed to {regime_result.primary_regime} | Broadcasted to {messages_sent} processes | Confidence: {regime_result.regime_confidence:.1f}%")
+            
+        except Exception as e:
+            self.logger.error(f"Error broadcasting regime change: {e}")
 
     def _cleanup(self):
         """Cleanup resources"""

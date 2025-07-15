@@ -53,15 +53,36 @@ class MemoryThresholdController:
     """
     
     def __init__(self, 
-                 memory_threshold_mb: float = 1800,    # Pause threshold (increased for production)
-                 memory_resume_mb: float = 1400,       # Resume threshold (increased for production)
-                 emergency_threshold_mb: float = 2200,  # Emergency threshold (increased for production)
-                 check_interval: int = 10):            # Check every 10 seconds
+                 memory_threshold_mb: Optional[float] = None,
+                 memory_resume_mb: Optional[float] = None,
+                 emergency_threshold_mb: Optional[float] = None,
+                 check_interval: Optional[int] = None):
         
-        self.memory_threshold_mb = memory_threshold_mb
-        self.memory_resume_mb = memory_resume_mb
-        self.emergency_threshold_mb = emergency_threshold_mb
-        self.check_interval = check_interval
+        # PRODUCTION: Get memory configuration - NO HARDCODED VALUES
+        try:
+            from Friren_V1.infrastructure.configuration_manager import get_memory_config, get_timing_config
+            memory_config = get_memory_config()
+            timing_config = get_timing_config()
+        except ImportError:
+            raise ImportError("CRITICAL: Configuration manager required for memory management. No hardcoded values allowed.")
+        
+        # Use configuration values
+        self.memory_threshold_mb = memory_threshold_mb if memory_threshold_mb is not None else memory_config['threshold_mb']
+        self.memory_resume_mb = memory_resume_mb if memory_resume_mb is not None else memory_config['resume_mb']
+        self.emergency_threshold_mb = emergency_threshold_mb if emergency_threshold_mb is not None else memory_config['emergency_mb']
+        self.check_interval = check_interval if check_interval is not None else timing_config['process_monitor_interval']
+        
+        # Validate configuration
+        if self.memory_threshold_mb <= 0:
+            raise ValueError("PRODUCTION: MEMORY_THRESHOLD_MB must be positive")
+        if self.memory_resume_mb <= 0:
+            raise ValueError("PRODUCTION: MEMORY_RESUME_MB must be positive")
+        if self.emergency_threshold_mb <= 0:
+            raise ValueError("PRODUCTION: MEMORY_EMERGENCY_MB must be positive")
+        if self.memory_resume_mb >= self.memory_threshold_mb:
+            raise ValueError("PRODUCTION: MEMORY_RESUME_MB must be less than MEMORY_THRESHOLD_MB")
+        if self.emergency_threshold_mb <= self.memory_threshold_mb:
+            raise ValueError("PRODUCTION: MEMORY_EMERGENCY_MB must be greater than MEMORY_THRESHOLD_MB")
         
         # Current system state - START IN INITIALIZATION MODE
         self.current_mode = MemoryMode.INITIALIZATION

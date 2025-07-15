@@ -14,6 +14,18 @@ from dataclasses import dataclass
 import numpy as np
 from datetime import datetime
 
+# Import configuration manager to eliminate ALL hardcoded values
+from Friren_V1.infrastructure.configuration_manager import get_config
+
+# Import API resilience system
+try:
+    from Friren_V1.infrastructure.api_resilience import (
+        APIServiceType, get_resilience_manager
+    )
+    HAS_RESILIENCE = True
+except ImportError:
+    HAS_RESILIENCE = False
+
 
 @dataclass
 class SentimentResult:
@@ -57,42 +69,90 @@ class EnhancedFinBERT:
     - Memory-aware processing for t3.micro
     """
 
-    def __init__(self, model_name: str = "ProsusAI/finbert",
-                 max_length: int = 512,
-                 batch_size: int = 8,
+    def __init__(self, model_name: Optional[str] = None,
+                 max_length: Optional[int] = None,
+                 batch_size: Optional[int] = None,
                  device: str = "cpu"):
-        self.model_name = model_name
-        self.max_length = max_length
-        self.batch_size = batch_size
+        
+        # PRODUCTION: Get FinBERT configuration - NO HARDCODED VALUES
+        try:
+            from Friren_V1.infrastructure.configuration_manager import get_finbert_config
+            finbert_config = get_finbert_config()
+        except ImportError:
+            raise ImportError("CRITICAL: Configuration manager required for FinBERT. No hardcoded values allowed.")
+        
+        # Use configuration values or provided parameters
+        self.model_name = model_name if model_name is not None else finbert_config['model_name']
+        self.max_length = max_length if max_length is not None else finbert_config['max_length']
+        self.batch_size = batch_size if batch_size is not None else finbert_config['batch_size']
         self.device = device
+        
+        # Validate critical configuration
+        if not self.model_name:
+            raise ValueError("PRODUCTION: FINBERT_MODEL_NAME must be configured")
+        if not self.max_length or self.max_length <= 0:
+            raise ValueError("PRODUCTION: FINBERT_MAX_LENGTH must be configured and positive")
+        if not self.batch_size or self.batch_size <= 0:
+            raise ValueError("PRODUCTION: FINBERT_BATCH_SIZE must be configured and positive")
 
         # Model components
         self.model = None
         self.tokenizer = None
         self.initialized = False
 
+        # Initialize logger IMMEDIATELY - CRITICAL: Must be first
+        self.logger = logging.getLogger("enhanced_finbert")
+        self.logger.info("FinBERT logger initialized successfully")
+
         # Performance tracking
         self.total_texts_processed = 0
         self.total_processing_time = 0.0
         self.error_count = 0
-        self.cache = {}  # Simple text -> result cache
 
-        # Configuration
-        self.enable_caching = True
-        self.cache_max_size = 1000
-        self.confidence_threshold = 0.5  # Minimum confidence for reliable results
+        # PRODUCTION: Memory-aware intelligent caching system
+        try:
+            from Friren_V1.infrastructure.memory_aware_cache import create_memory_aware_cache
+            from Friren_V1.infrastructure.configuration_manager import get_config
+            
+            # Determine environment for cache optimization
+            environment = get_config('FRIREN_ENVIRONMENT', 'production')
+            if environment == 'development':
+                cache_env = 'development'
+            elif any(keyword in str(get_config('MEMORY_THRESHOLD_MB', 2000)) for keyword in ['700', '800', '900']):
+                cache_env = 't3.micro'  # Detect t3.micro by low memory threshold
+            else:
+                cache_env = 'production'
+                
+            self.cache = create_memory_aware_cache("finbert", cache_env)
+            self.enable_caching = True
+            self.logger.info(f"Initialized memory-aware cache for {cache_env} environment")
+            
+        except ImportError:
+            # Fallback to basic caching if memory-aware cache not available
+            self.cache = {}
+            self.enable_caching = True
+            self.logger.warning("Memory-aware cache not available, using basic caching")
 
-        self.logger = logging.getLogger("enhanced_finbert")
-        self.logger.info(f"Enhanced FinBERT initialized - model: {model_name}, device: {device}")
+        # Configuration from config manager
+        self.confidence_threshold = finbert_config['confidence_threshold']
+
+        # Initialize API resilience manager
+        self.resilience_manager = get_resilience_manager() if HAS_RESILIENCE else None
+
+        if HAS_RESILIENCE:
+            self.logger.info(f"Enhanced FinBERT initialized with resilience protection - model: {self.model_name}, device: {device}")
+        else:
+            self.logger.info(f"Enhanced FinBERT initialized (basic error handling) - model: {self.model_name}, device: {device}")
 
     def initialize(self) -> bool:
         """
-        Initialize FinBERT model with proper error handling
+        Initialize FinBERT model with resilience protection
 
         Returns:
             bool: True if successful, False if fallback to mock
         """
-        try:
+        def _initialize_model():
+            """Internal function to initialize model (wrapped by resilience system)"""
             self.logger.info("Loading FinBERT model...")
 
             # Import here to avoid loading unless needed
@@ -100,17 +160,28 @@ class EnhancedFinBERT:
             from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
             # Load tokenizer
-            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+            tokenizer = AutoTokenizer.from_pretrained(self.model_name)
 
             # Load model
-            self.model = AutoModelForSequenceClassification.from_pretrained(self.model_name)
+            model = AutoModelForSequenceClassification.from_pretrained(self.model_name)
 
             # Move to device and set evaluation mode
-            self.model.to(self.device)
-            self.model.eval()
+            model.to(self.device)
+            model.eval()
+
+            return tokenizer, model
+
+        try:
+            if self.resilience_manager:
+                self.tokenizer, self.model = self.resilience_manager.resilient_call(
+                    _initialize_model, APIServiceType.FINBERT, "initialize_model",
+                    use_circuit_breaker=True, use_retry=True
+                )
+            else:
+                self.tokenizer, self.model = _initialize_model()
 
             self.initialized = True
-            self.logger.info(f"FinBERT model loaded successfully on {self.device}")
+            self.logger.info(f"FinBERT model loaded successfully on {self.device} with resilience protection")
 
             # Test with a sample text to ensure everything works
             test_result = self.analyze_text("The market is performing well today.")
@@ -145,23 +216,38 @@ class EnhancedFinBERT:
         if article_id is None:
             article_id = f"text_{hash(text) % 10000}"
 
-        # Check cache first
-        if self.enable_caching and text in self.cache:
-            cached_result = self.cache[text]
-            self.logger.debug(f"Cache hit for article {article_id}")
-
-            # Update article_id and return cached result
-            return SentimentResult(
-                article_id=article_id,
-                text=text,
-                sentiment_score=cached_result['sentiment_score'],
-                confidence=cached_result['confidence'],
-                classification=cached_result['classification'],
-                raw_scores=cached_result['raw_scores'],
-                processing_time=0.001,  # Cache access time
-                model_version=self.model_name,
-                is_reliable=cached_result['is_reliable']
-            )
+        # Check memory-aware cache first
+        if self.enable_caching:
+            cache_key = self._generate_cache_key(text)
+            
+            # Try to get from memory-aware cache
+            if hasattr(self.cache, 'get'):
+                cached_result = self.cache.get(cache_key)
+            else:
+                # Fallback to simple dict cache
+                cached_result = self.cache.get(text)
+            
+            if cached_result:
+                self.logger.debug(f"Cache hit for article {article_id}")
+                
+                # Handle both new cache format and old format
+                if isinstance(cached_result, dict):
+                    return SentimentResult(
+                        article_id=article_id,
+                        text=text,
+                        sentiment_score=cached_result['sentiment_score'],
+                        confidence=cached_result['confidence'],
+                        classification=cached_result['classification'],
+                        raw_scores=cached_result['raw_scores'],
+                        processing_time=0.001,  # Cache access time
+                        model_version=self.model_name,
+                        is_reliable=cached_result['is_reliable']
+                    )
+                else:
+                    # Direct SentimentResult object (advanced cache)
+                    cached_result.article_id = article_id
+                    cached_result.processing_time = 0.001
+                    return cached_result
 
         try:
             if not self.initialized:
@@ -169,7 +255,7 @@ class EnhancedFinBERT:
             
             result = self._analyze_with_finbert(text, article_id)
 
-            # Cache the result
+            # Cache the result with memory-aware caching
             if self.enable_caching:
                 self._cache_result(text, result)
 
@@ -319,15 +405,30 @@ class EnhancedFinBERT:
             'prediction_index': int(max_idx)
         }
 
-        # BUSINESS LOGIC OUTPUT: Detailed FinBERT analysis result
+        # BUSINESS LOGIC OUTPUT: Detailed FinBERT analysis result using OutputCoordinator
         try:
-            from terminal_color_system import print_finbert
-            symbol_hint = article_id.split('_')[0] if '_' in article_id else 'UNKNOWN'
+            # Use OutputCoordinator for consistent business logic output
+            from Friren_V1.trading_engine.output.output_coordinator import OutputCoordinator
+            symbol_hint = self._extract_symbol_from_article_id(article_id)
             article_preview = text[:40] + '...' if len(text) > 40 else text
             impact_score = abs(sentiment_score) * confidence  # Combined impact metric
-            print_finbert(f"{symbol_hint}: {classification} (confidence: {confidence*100:.1f}%) | article: '{article_preview}' | impact: {impact_score:.2f}")
+            
+            # Get or create OutputCoordinator instance (would be passed from parent in production)
+            if not hasattr(self, '_output_coordinator'):
+                self._output_coordinator = OutputCoordinator()
+            
+            # Use standardized FinBERT analysis output
+            self._output_coordinator.output_finbert_analysis(
+                symbol=symbol_hint,
+                sentiment=classification,
+                confidence=confidence*100,
+                article_snippet=article_preview,
+                impact=impact_score
+            )
+            
         except ImportError:
-            symbol_hint = article_id.split('_')[0] if '_' in article_id else 'UNKNOWN'
+            # Fallback to direct output only if OutputCoordinator not available
+            symbol_hint = self._extract_symbol_from_article_id(article_id)
             article_preview = text[:40] + '...' if len(text) > 40 else text
             impact_score = abs(sentiment_score) * confidence  # Combined impact metric
             print(f"[FINBERT] {symbol_hint}: {classification} (confidence: {confidence*100:.1f}%) | article: '{article_preview}' | impact: {impact_score:.2f}")
@@ -434,40 +535,97 @@ class EnhancedFinBERT:
         # Remove excessive whitespace
         text = " ".join(text.split())
 
-        # Remove very short texts
-        if len(text.strip()) < 10:
+        # Remove very short texts - FROM CONFIGURATION MANAGER
+        min_text_length = get_config('MIN_TEXT_LENGTH', 10)
+        if len(text.strip()) < min_text_length:
             return text
 
-        # Truncate if too long (leave room for tokenization)
-        max_chars = self.max_length * 3  # Rough estimate: ~3 chars per token
+        # Truncate if too long (leave room for tokenization) - FROM CONFIGURATION MANAGER
+        chars_per_token_ratio = get_config('FINBERT_CHARS_PER_TOKEN_RATIO', 3)
+        max_chars = self.max_length * chars_per_token_ratio  # Estimate from configuration
         if len(text) > max_chars:
             text = text[:max_chars] + "..."
 
         return text.strip()
 
+    def _generate_cache_key(self, text: str) -> str:
+        """Generate optimized cache key for text"""
+        import hashlib
+        
+        # Normalize text for consistent caching
+        normalized_text = text.strip().lower()
+        
+        # For very short texts, use the text itself
+        if len(normalized_text) <= 50:
+            return f"short_{normalized_text}"
+        
+        # For longer texts, use a hash to save memory
+        text_hash = hashlib.md5(normalized_text.encode('utf-8')).hexdigest()
+        return f"hash_{text_hash}_{len(text)}"
+    
     def _cache_result(self, text: str, result: SentimentResult):
-        """Cache result for future use"""
-        if len(self.cache) >= self.cache_max_size:
-            # Simple cache eviction - remove oldest entries
-            keys_to_remove = list(self.cache.keys())[:self.cache_max_size // 4]
-            for key in keys_to_remove:
-                del self.cache[key]
-
-        self.cache[text] = {
-            'sentiment_score': result.sentiment_score,
-            'confidence': result.confidence,
-            'classification': result.classification,
-            'raw_scores': result.raw_scores,
-            'is_reliable': result.is_reliable
-        }
+        """Cache result using memory-aware caching system"""
+        try:
+            cache_key = self._generate_cache_key(text)
+            
+            if hasattr(self.cache, 'put'):
+                # Use memory-aware cache with intelligent storage
+                cache_data = {
+                    'sentiment_score': result.sentiment_score,
+                    'confidence': result.confidence,
+                    'classification': result.classification,
+                    'raw_scores': result.raw_scores,
+                    'is_reliable': result.is_reliable,
+                    'model_version': result.model_version,
+                    'cached_at': datetime.now().isoformat()
+                }
+                
+                # Cache with TTL based on confidence (higher confidence = longer TTL)
+                confidence_ttl = int(1800 + (result.confidence * 1800))  # 30-60 minutes based on confidence
+                
+                success = self.cache.put(cache_key, cache_data, ttl_seconds=confidence_ttl)
+                if success:
+                    self.logger.debug(f"Cached result with key: {cache_key[:20]}... (TTL: {confidence_ttl}s)")
+                else:
+                    self.logger.warning(f"Failed to cache result - cache may be full")
+                    
+            else:
+                # Fallback to simple dict cache - FROM CONFIGURATION MANAGER
+                cache_size_limit = get_config('FINBERT_CACHE_SIZE_LIMIT', 1000)
+                cache_cleanup_count = get_config('FINBERT_CACHE_CLEANUP_COUNT', 250)
+                if len(self.cache) >= cache_size_limit:  # Size limit from configuration
+                    # Remove entries from configuration
+                    keys_to_remove = list(self.cache.keys())[:cache_cleanup_count]
+                    for key in keys_to_remove:
+                        del self.cache[key]
+                
+                self.cache[text] = {
+                    'sentiment_score': result.sentiment_score,
+                    'confidence': result.confidence,
+                    'classification': result.classification,
+                    'raw_scores': result.raw_scores,
+                    'is_reliable': result.is_reliable
+                }
+                
+        except Exception as e:
+            self.logger.error(f"Error caching result: {e}")
+            # Continue without caching rather than fail
 
     # REMOVED: Fallback result method completely eliminated per user requirements
     # NO fallback data allowed - system must use real FinBERT or fail
 
     def get_statistics(self) -> Dict[str, Any]:
-        """Get performance and usage statistics"""
+        """Get performance and usage statistics with memory-aware cache details"""
         avg_processing_time = (self.total_processing_time / self.total_texts_processed
                              if self.total_texts_processed > 0 else 0.0)
+
+        # Get cache statistics from memory-aware cache or fallback
+        cache_stats = {}
+        if hasattr(self.cache, 'get_statistics'):
+            cache_stats = self.cache.get_statistics()
+            cache_size = cache_stats.get('current_entry_count', 0)
+        else:
+            cache_size = len(self.cache)
 
         return {
             'initialized': self.initialized,
@@ -478,22 +636,103 @@ class EnhancedFinBERT:
             'average_processing_time': avg_processing_time,
             'error_count': self.error_count,
             'error_rate': self.error_count / max(1, self.total_texts_processed),
-            'cache_size': len(self.cache),
+            'cache_size': cache_size,
             'cache_enabled': self.enable_caching,
             'confidence_threshold': self.confidence_threshold,
-            'reliability_enforcement': True,  # New feature indicator
-            'processing_time_tracking': True  # New feature indicator
+            'reliability_enforcement': True,
+            'processing_time_tracking': True,
+            'memory_aware_caching': hasattr(self.cache, 'get_statistics'),
+            'cache_statistics': cache_stats
         }
 
     def clear_cache(self):
-        """Clear the result cache"""
-        self.cache.clear()
+        """Clear the result cache using memory-aware cache system"""
+        if hasattr(self.cache, 'clear'):
+            self.cache.clear()
+        else:
+            # Fallback to dict clear
+            self.cache.clear()
         self.logger.info("FinBERT cache cleared")
 
     def set_confidence_threshold(self, threshold: float):
         """Set minimum confidence threshold for reliable results"""
         self.confidence_threshold = max(0.0, min(1.0, threshold))
         self.logger.info(f"Confidence threshold set to {self.confidence_threshold}")
+
+    def _extract_symbol_from_article_id(self, article_id: str, fallback_symbol: str = None) -> str:
+        """
+        Robustly extract symbol from article_id with multiple fallback strategies
+        
+        Args:
+            article_id: Article identifier (e.g., "AAPL_1234", "text_5678")
+            fallback_symbol: Optional fallback symbol if extraction fails
+            
+        Returns:
+            Extracted symbol or fallback
+        """
+        if not article_id:
+            return fallback_symbol or 'UNKNOWN'
+            
+        # Strategy 1: Standard format "SYMBOL_id"
+        if '_' in article_id:
+            potential_symbol = article_id.split('_')[0].upper()
+            
+            # Special case: If it's "text_xxxx" format, this is from fallback generation
+            if potential_symbol == 'TEXT':
+                return fallback_symbol or 'UNKNOWN'
+                
+            # Validate it looks like a stock symbol - FROM CONFIGURATION MANAGER
+            # Validate symbol length from configuration\n            min_symbol_length = get_config('MIN_SYMBOL_LENGTH', 2)\n            max_symbol_length = get_config('MAX_SYMBOL_LENGTH', 5)\n            if min_symbol_length <= len(potential_symbol) <= max_symbol_length and potential_symbol.isalpha():
+                return potential_symbol
+        
+        # Strategy 2: Look for common stock patterns in the ID
+        import re
+        # Match 2-5 letter sequences that look like stock symbols
+        stock_pattern = re.findall(r'\b[A-Z]{2,5}\b', article_id.upper())
+        if stock_pattern:
+            return stock_pattern[0]
+            
+        # Strategy 3: Return fallback or UNKNOWN
+        return fallback_symbol or 'UNKNOWN'
+
+    def _validate_symbol_consistency(self, expected_symbol: str, extracted_symbol: str, article_id: str):
+        """Log symbol extraction issues for debugging"""
+        if expected_symbol and expected_symbol.upper() != extracted_symbol.upper():
+            self.logger.warning(f"SYMBOL MISMATCH: Expected {expected_symbol}, extracted {extracted_symbol} from article_id {article_id}")
+
+    def cleanup(self):
+        """Cleanup FinBERT resources and memory with memory-aware cache management"""
+        try:
+            if hasattr(self, 'model') and self.model is not None:
+                # Clear model from memory
+                del self.model
+                self.model = None
+                
+            if hasattr(self, 'tokenizer') and self.tokenizer is not None:
+                # Clear tokenizer from memory
+                del self.tokenizer
+                self.tokenizer = None
+                
+            # Clear cache using memory-aware cache cleanup
+            if hasattr(self, 'cache'):
+                if hasattr(self.cache, 'cleanup'):
+                    # Use memory-aware cache cleanup (stops monitoring, clears entries)
+                    self.cache.cleanup()
+                else:
+                    # Fallback to simple clear
+                    self.cache.clear()
+                
+            # Force garbage collection for memory cleanup
+            import gc
+            gc.collect()
+            
+            # Reset initialization state
+            self.initialized = False
+            
+            self.logger.info("FinBERT cleanup completed successfully with memory-aware cache management")
+            
+        except Exception as e:
+            self.logger.warning(f"Error during FinBERT cleanup: {e}")
 
 
 # Example usage and testing

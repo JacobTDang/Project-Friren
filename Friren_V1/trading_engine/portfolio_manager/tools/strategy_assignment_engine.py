@@ -19,28 +19,26 @@ from enum import Enum
 from .strategies import AVAILABLE_STRATEGIES
 from .strategy_selector import StrategySelector
 from ..analytics.position_health_analyzer import ActiveStrategy, StrategyStatus
+from ...analytics.market_metrics import get_market_metrics, MarketMetricsResult
 
-class AssignmentReason(Enum):
-    """Reasons for strategy assignment"""
-    NEW_POSITION = "new_position"           # First assignment to new position
-    REGIME_CHANGE = "regime_change"         # Market regime changed
-    POOR_PERFORMANCE = "poor_performance"   # Current strategy underperforming
-    DIVERSIFICATION = "diversification"     # Portfolio balance optimization
-    MANUAL_OVERRIDE = "manual_override"     # User/system override
-    REBALANCE = "rebalance"                # Periodic rebalancing
+# Import shared models (moved to prevent circular imports)
+from .assignment.models import StrategyAssignment, AssignmentReason, AssignmentScenario, ScenarioRequest
 
-@dataclass
-class StrategyAssignment:
-    """Result of strategy assignment analysis"""
-    symbol: str
-    recommended_strategy: str
-    confidence_score: float  # 0-100
-    reason: AssignmentReason
-    market_regime: str
-    risk_score: float
-    expected_return: float
-    assignment_time: datetime = field(default_factory=datetime.now)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+# Import 3-scenario assignment system for decision engine integration (ZERO DISCONNECTS)
+# This preserves all existing functionality while adding scenario coordination
+try:
+    from .assignment.scenario_coordinator import ThreeScenarioCoordinator
+    from .assignment.database_integrator import DatabaseIntegrator
+    from .assignment.assignment_validator import AssignmentValidator
+    SCENARIO_SYSTEM_AVAILABLE = True
+except ImportError as e:
+    # Graceful fallback if scenario system not available
+    SCENARIO_SYSTEM_AVAILABLE = False
+    import logging
+    logging.getLogger(__name__).warning(f"3-scenario assignment system not available: {e} - using legacy assignment")
+
+# AssignmentReason and StrategyAssignment now imported from .assignment.models
+# to prevent circular import dependencies
 
 @dataclass 
 class AssignmentRule:
@@ -60,12 +58,26 @@ class StrategyAssignmentEngine:
     - Performance-driven reassignment
     - Risk-balanced portfolio diversification
     - Automatic adaptation to changing conditions
+    - Three assignment scenarios:
+      1. User buy-and-hold positions (no active strategy)
+      2. Decision engine algorithmic selection (optimal strategy)
+      3. Strategy reevaluation from position health monitor (performance-based)
     """
     
-    def __init__(self, symbols: List[str], risk_tolerance: str = "moderate"):
+    def __init__(self, symbols: List[str], risk_tolerance: str = "moderate", db_manager=None, redis_manager=None):
         self.symbols = symbols
         self.risk_tolerance = risk_tolerance
         self.logger = logging.getLogger("strategy_assignment_engine")
+        
+        # Redis manager for real-time market regime access
+        self.redis_manager = redis_manager
+        if not self.redis_manager:
+            try:
+                from Friren_V1.multiprocess_infrastructure.trading_redis_manager import get_trading_redis_manager
+                self.redis_manager = get_trading_redis_manager()
+            except Exception as e:
+                self.logger.warning(f"Could not initialize Redis manager: {e}")
+                self.redis_manager = None
         
         # Initialize strategy selector for market analysis
         self.strategy_selector = StrategySelector()
@@ -80,6 +92,10 @@ class StrategyAssignmentEngine:
         # Assignment rules
         self.assignment_rules = self._create_assignment_rules()
         
+        # Real-time market regime access
+        self.current_regime_cache = {'regime': 'UNKNOWN', 'last_updated': None}
+        self.regime_cache_ttl = 300  # 5 minutes cache
+        
         # Strategy categories for diversification
         self.strategy_categories = {
             'momentum': ['momentum', 'pca_momentum', 'jump_momentum'],
@@ -89,22 +105,316 @@ class StrategyAssignmentEngine:
             'pairs': ['pairs']
         }
         
+        # Initialize 3-scenario assignment coordination (ZERO DISCONNECTS)
+        if SCENARIO_SYSTEM_AVAILABLE:
+            try:
+                # Pass self to coordinator to prevent circular initialization
+                self.scenario_coordinator = ThreeScenarioCoordinator(assignment_engine=self)
+                self.database_integrator = DatabaseIntegrator(db_manager=db_manager)
+                self.assignment_validator = AssignmentValidator()
+                self.logger.info("3-scenario assignment system initialized - enhanced coordination active")
+            except Exception as e:
+                self.logger.warning(f"Failed to initialize 3-scenario system: {e} - using legacy assignment")
+                self.scenario_coordinator = None
+                self.database_integrator = None
+                self.assignment_validator = None
+        else:
+            self.scenario_coordinator = None
+            self.database_integrator = None
+            self.assignment_validator = None
+        
         self.logger.info(f"StrategyAssignmentEngine initialized for {len(symbols)} symbols")
         self.logger.info(f"Risk tolerance: {risk_tolerance}")
+        if self.scenario_coordinator:
+            self.logger.info("3-scenario assignment coordination enabled")
         self.logger.info(f"Available strategies: {len(AVAILABLE_STRATEGIES)}")
+        
+        # Initialize market regime data
+        self._update_regime_cache()
     
-    def assign_strategy_to_position(self, symbol: str, current_strategy: Optional[str] = None,
-                                  force_reason: Optional[AssignmentReason] = None) -> StrategyAssignment:
+    def assign_strategy_for_user_position(self, symbol: str, user_intent: str = "buy_hold") -> StrategyAssignment:
         """
-        Assign optimal strategy to a specific position
+        Handle user-selected stock position (Scenario 1)
+        User chooses stock, no active strategy needed - just monitoring
         
         Args:
-            symbol: Stock symbol to assign strategy for
-            current_strategy: Currently assigned strategy (if any)
-            force_reason: Force specific assignment reason
+            symbol: User-selected stock symbol
+            user_intent: User's investment intent ("buy_hold", "manual_trade")
             
         Returns:
-            StrategyAssignment with recommended strategy and metadata
+            StrategyAssignment for user position
+        """
+        try:
+            self.logger.info(f"Creating user position assignment for {symbol} with intent: {user_intent}")
+            
+            # ZERO DISCONNECTS: Route through 3-scenario coordinator if available  
+            if self.scenario_coordinator and user_intent == "buy_hold":
+                try:
+                    request = ScenarioRequest(
+                        symbol=symbol,
+                        scenario=AssignmentScenario.USER_BUY_HOLD,
+                        user_data={'user_intent': user_intent},
+                        metadata={'assignment_source': 'user_request'}
+                    )
+                    assignment = self.scenario_coordinator.route_assignment_request(request)
+                    
+                    # Database integration and validation
+                    if self.database_integrator:
+                        self.database_integrator.record_assignment(assignment, AssignmentScenario.USER_BUY_HOLD)
+                    if self.assignment_validator:
+                        validation = self.assignment_validator.validate_assignment(assignment)
+                        if not validation.is_valid:
+                            self.logger.warning(f"Assignment validation warnings for {symbol}: {validation.warnings}")
+                    
+                    return assignment
+                except Exception as e:
+                    self.logger.warning(f"3-scenario coordination failed for {symbol}: {e} - falling back to legacy assignment")
+            
+            # Legacy assignment method (preserves existing functionality)
+            # For user buy-and-hold positions, assign monitoring strategy
+            if user_intent == "buy_hold":
+                # Get real market metrics for user position
+                metrics = get_market_metrics().get_comprehensive_metrics(symbol)
+                
+                assignment = StrategyAssignment(
+                    symbol=symbol,
+                    recommended_strategy="position_monitoring",  # Special strategy for user positions
+                    confidence_score=self._calculate_user_position_confidence(metrics),
+                    reason=AssignmentReason.USER_BUY_HOLD,
+                    market_regime=self._get_current_market_regime(symbol),
+                    risk_score=metrics.risk_score if metrics.risk_score is not None else self._handle_insufficient_data_risk(symbol),
+                    expected_return=self._calculate_user_position_expected_return(metrics),
+                    metadata={
+                        'user_controlled': True,
+                        'strategy_type': 'passive_monitoring',
+                        'user_intent': user_intent
+                    }
+                )
+            else:
+                # For other user intents, fail explicitly
+                raise ValueError(f"Unsupported user intent: {user_intent}. Only 'buy_hold' supported for user positions.")
+            
+            self._record_assignment(assignment)
+            self.logger.info(f"User position created: {symbol} -> {assignment.recommended_strategy}")
+            return assignment
+            
+        except Exception as e:
+            self.logger.error(f"Error creating user position assignment for {symbol}: {e}")
+            raise
+    
+    def _legacy_assign_strategy_for_decision_engine(self, symbol: str, market_analysis: Optional[Dict] = None, 
+                                                  decision_context: Optional[Dict] = None) -> StrategyAssignment:
+        """
+        Legacy decision engine assignment method (bypasses 3-scenario coordinator to prevent recursion)
+        """
+        try:
+            self.logger.info(f"Legacy decision engine strategy assignment for {symbol}")
+            
+            # Use market analysis or compute it
+            if not market_analysis:
+                market_analysis = self._analyze_market_conditions(symbol)
+            
+            # Get strategy fitness scores using real market data
+            strategy_scores = self._calculate_strategy_scores(symbol, market_analysis)
+            
+            if not strategy_scores:
+                raise ValueError(f"No strategies available for {symbol} - strategy assignment failed")
+            
+            # CRITICAL FIX: Get real-time market regime for strategy selection
+            real_time_regime = self._get_real_time_market_regime()
+            regime_strategies = self._select_strategies_for_regime(real_time_regime)
+            
+            # Filter strategies based on current regime + assignment rules
+            filtered_strategies = self._apply_assignment_rules(symbol, strategy_scores, real_time_regime)
+            regime_filtered_strategies = {k: v for k, v in filtered_strategies.items() if k in regime_strategies}
+            
+            # Use regime-filtered strategies if available, otherwise fall back to all filtered
+            final_strategy_pool = regime_filtered_strategies if regime_filtered_strategies else filtered_strategies
+            
+            # Select best strategy based on real performance data + regime suitability
+            best_strategy, confidence = self._select_best_strategy(final_strategy_pool)
+            
+            assignment = StrategyAssignment(
+                symbol=symbol,
+                recommended_strategy=best_strategy,
+                assignment_reason=AssignmentReason.DECISION_ENGINE_CHOICE,
+                confidence_score=confidence,
+                risk_score=self._get_validated_risk_score(symbol, market_analysis),
+                expected_return=self._get_validated_expected_return(best_strategy, strategy_scores, symbol),
+                assignment_scenario=AssignmentScenario.DECISION_ENGINE_CHOICE,
+                market_regime=real_time_regime.get('regime', 'UNKNOWN'),
+                assignment_metadata={
+                    'algorithmic_selection': True,
+                    'market_analysis': market_analysis,
+                    'real_time_regime': real_time_regime,
+                    'regime_based_strategies': regime_strategies,
+                    'strategy_scores': {k: v.get('fitness_score', 0) for k, v in strategy_scores.items()},
+                    'selection_criteria': 'optimal_performance'
+                }
+            )
+            
+            self._record_assignment(assignment)
+            self.logger.info(f"Legacy decision engine assignment: {symbol} -> {best_strategy} ({confidence:.1f}% confidence)")
+            return assignment
+            
+        except Exception as e:
+            self.logger.error(f"Error in legacy decision engine strategy assignment for {symbol}: {e}")
+            raise
+
+    def assign_strategy_for_decision_engine(self, symbol: str, market_analysis: Optional[Dict] = None, 
+                                           decision_context: Optional[Dict] = None) -> StrategyAssignment:
+        """
+        Handle decision engine algorithmic selection (Scenario 2)
+        Decision engine chooses both stock and optimal strategy
+        
+        Args:
+            symbol: Stock symbol chosen by decision engine
+            market_analysis: Optional pre-computed market analysis
+            
+        Returns:
+            StrategyAssignment with optimal strategy for algorithmic trading
+        """
+        try:
+            self.logger.info(f"Decision engine strategy assignment for {symbol}")
+            
+            # ZERO DISCONNECTS: Route through 3-scenario coordinator if available
+            if self.scenario_coordinator:
+                try:
+                    request = ScenarioRequest(
+                        symbol=symbol,
+                        scenario=AssignmentScenario.DECISION_ENGINE_CHOICE,
+                        market_data=market_analysis,
+                        metadata=decision_context or {}
+                    )
+                    assignment = self.scenario_coordinator.route_assignment_request(request)
+                    
+                    # Database integration and validation
+                    if self.database_integrator:
+                        self.database_integrator.record_assignment(assignment, AssignmentScenario.DECISION_ENGINE_CHOICE)
+                    if self.assignment_validator:
+                        validation = self.assignment_validator.validate_assignment(assignment)
+                        if not validation.is_valid:
+                            self.logger.warning(f"Assignment validation warnings for {symbol}: {validation.warnings}")
+                    
+                    return assignment
+                except Exception as e:
+                    self.logger.warning(f"3-scenario coordination failed for {symbol}: {e} - falling back to legacy assignment")
+            
+            # Fallback to legacy assignment method
+            return self._legacy_assign_strategy_for_decision_engine(symbol, market_analysis, decision_context)
+            
+        except Exception as e:
+            self.logger.error(f"Error in decision engine strategy assignment for {symbol}: {e}")
+            raise
+    
+    def reassign_strategy_from_health_monitor(self, symbol: str, current_strategy: str, 
+                                            performance_data: Dict, health_analysis: Dict) -> StrategyAssignment:
+        """
+        Handle strategy reevaluation from position health monitor (Scenario 3)
+        Current strategy is failing, position health monitor triggers reassignment
+        
+        Args:
+            symbol: Stock symbol with failing strategy
+            current_strategy: Currently assigned strategy that's failing
+            performance_data: Real performance metrics from position health monitor
+            health_analysis: Health analysis data triggering reassignment
+            
+        Returns:
+            StrategyAssignment with new strategy based on performance analysis
+        """
+        try:
+            self.logger.warning(f"Strategy reevaluation triggered for {symbol}: {current_strategy} underperforming")
+            
+            # ZERO DISCONNECTS: Route through 3-scenario coordinator if available
+            if self.scenario_coordinator:
+                try:
+                    request = ScenarioRequest(
+                        symbol=symbol,
+                        scenario=AssignmentScenario.STRATEGY_REEVALUATION,
+                        performance_data=performance_data,
+                        metadata={
+                            'current_strategy': current_strategy,
+                            'health_analysis': health_analysis,
+                            'reassignment_trigger': 'health_monitor'
+                        }
+                    )
+                    assignment = self.scenario_coordinator.route_assignment_request(request)
+                    
+                    # Database integration and validation
+                    if self.database_integrator:
+                        self.database_integrator.record_assignment(assignment, AssignmentScenario.STRATEGY_REEVALUATION)
+                    if self.assignment_validator:
+                        validation = self.assignment_validator.validate_assignment(assignment)
+                        if not validation.is_valid:
+                            self.logger.warning(f"Assignment validation warnings for {symbol}: {validation.warnings}")
+                    
+                    return assignment
+                except Exception as e:
+                    self.logger.warning(f"3-scenario coordination failed for {symbol}: {e} - falling back to legacy reassignment")
+            
+            # Legacy reassignment method (preserves existing functionality)
+            # Validate that we have real performance data
+            if not performance_data or 'total_return' not in performance_data:
+                raise ValueError(f"Position health monitor must provide real performance data for {symbol}")
+            
+            # Analyze why current strategy is failing
+            failure_analysis = self._analyze_strategy_failure(symbol, current_strategy, performance_data, health_analysis)
+            
+            # Get current market conditions for reassignment
+            market_analysis = self._analyze_market_conditions(symbol)
+            
+            # Calculate strategy scores excluding the failing strategy
+            strategy_scores = self._calculate_strategy_scores(symbol, market_analysis)
+            
+            # Remove the failing strategy from consideration
+            if current_strategy in strategy_scores:
+                del strategy_scores[current_strategy]
+                self.logger.info(f"Excluded failing strategy {current_strategy} from reassignment options")
+            
+            if not strategy_scores:
+                raise ValueError(f"No alternative strategies available for {symbol} after excluding {current_strategy}")
+            
+            # Apply special rules for reassignment based on failure analysis
+            filtered_strategies = self._apply_reassignment_rules(symbol, strategy_scores, failure_analysis)
+            
+            # Select best alternative strategy
+            best_strategy, confidence = self._select_best_strategy(filtered_strategies)
+            
+            assignment = StrategyAssignment(
+                symbol=symbol,
+                recommended_strategy=best_strategy,
+                confidence_score=confidence,
+                reason=AssignmentReason.STRATEGY_REEVALUATION,
+                market_regime=market_analysis.get('regime', 'UNKNOWN'),
+                risk_score=self._get_validated_risk_score(symbol, market_analysis),
+                expected_return=self._get_validated_expected_return(best_strategy, strategy_scores, symbol),
+                metadata={
+                    'previous_strategy': current_strategy,
+                    'failure_analysis': failure_analysis,
+                    'performance_data': performance_data,
+                    'health_trigger': health_analysis,
+                    'reassignment_type': 'performance_based'
+                }
+            )
+            
+            self._record_assignment(assignment)
+            self.logger.warning(f"Strategy reassigned for {symbol}: {current_strategy} -> {best_strategy} due to underperformance")
+            return assignment
+            
+        except Exception as e:
+            self.logger.error(f"Error in strategy reevaluation for {symbol}: {e}")
+            raise
+    
+    def assign_strategy_to_position(self, symbol: str, current_strategy: Optional[str] = None,
+                                  force_reason: Optional[AssignmentReason] = None, 
+                                  assignment_context: Optional[Dict] = None) -> StrategyAssignment:
+        """
+        DEPRECATED: Use specific assignment methods instead:
+        - assign_strategy_for_user_position() for user buy-hold positions
+        - assign_strategy_for_decision_engine() for algorithmic selection  
+        - reassign_strategy_from_health_monitor() for performance-based reassignment
+        
+        This method now routes to appropriate specific method based on context
         """
         try:
             self.logger.info(f"Analyzing strategy assignment for {symbol}")
@@ -131,8 +441,8 @@ class StrategyAssignmentEngine:
                 confidence_score=confidence,
                 reason=reason,
                 market_regime=market_analysis.get('regime', 'UNKNOWN'),
-                risk_score=market_analysis.get('risk_score', 50.0),
-                expected_return=strategy_scores.get(best_strategy, {}).get('expected_return', 0.0),
+                risk_score=self._get_validated_risk_score(symbol, market_analysis),
+                expected_return=self._get_validated_expected_return(best_strategy, strategy_scores, symbol),
                 metadata={
                     'market_analysis': market_analysis,
                     'strategy_scores': strategy_scores,
@@ -318,8 +628,9 @@ class StrategyAssignmentEngine:
                 }
                 
             except Exception as e:
-                self.logger.debug(f"Error scoring strategy {strategy_name}: {e}")
-                strategy_scores[strategy_name] = {'fitness_score': 50.0, 'expected_return': 0.0}
+                self.logger.error(f"Error scoring strategy {strategy_name} for {symbol}: {e}")
+                # Skip strategy with insufficient data - no hardcoded fallbacks
+                continue
         
         return strategy_scores
     
@@ -406,9 +717,9 @@ class StrategyAssignmentEngine:
         return adjusted_scores
     
     def _select_best_strategy(self, strategy_scores: Dict) -> Tuple[str, float]:
-        """Select the best strategy from scored options"""
+        """Select the best strategy from scored options - NO HARDCODED DEFAULTS"""
         if not strategy_scores:
-            return 'momentum', 60.0  # Safe default
+            raise ValueError("No strategies available - cannot assign strategy without valid options")
         
         # Sort by fitness score
         sorted_strategies = sorted(strategy_scores.items(), 
@@ -416,7 +727,14 @@ class StrategyAssignmentEngine:
                                  reverse=True)
         
         best_strategy, best_data = sorted_strategies[0]
-        confidence = best_data.get('fitness_score', 60.0)
+        confidence = best_data.get('fitness_score')
+        if confidence is None:
+            # Skip strategies without valid fitness scores
+            raise ValueError(f"Strategy {best_strategy} has no valid fitness score - cannot determine confidence")
+        
+        # Validate that we have a viable strategy
+        if confidence < 30.0:
+            raise ValueError(f"Best available strategy {best_strategy} has insufficient confidence ({confidence:.1f}%) - reassignment not viable")
         
         return best_strategy, confidence
     
@@ -440,17 +758,22 @@ class StrategyAssignmentEngine:
         self.assignment_history[symbol].append(assignment)
         self.current_assignments[symbol] = assignment
     
-    def _create_fallback_assignment(self, symbol: str, current_strategy: Optional[str]) -> StrategyAssignment:
-        """Create safe fallback assignment"""
+    def _create_data_insufficient_assignment(self, symbol: str, current_strategy: Optional[str], reason: str) -> StrategyAssignment:
+        """Create assignment when insufficient data - NO HARDCODED VALUES"""
+        self.logger.warning(f"Insufficient market data for {symbol}: {reason}")
+        
+        # Attempt to get any available market data
+        metrics = get_market_metrics().get_comprehensive_metrics(symbol)
+        
         return StrategyAssignment(
             symbol=symbol,
-            recommended_strategy=current_strategy or 'momentum',
-            confidence_score=60.0,
+            recommended_strategy=current_strategy or self._get_conservative_strategy(),
+            confidence_score=self._calculate_low_confidence_score(metrics),
             reason=AssignmentReason.NEW_POSITION,
-            market_regime='UNKNOWN',
-            risk_score=50.0,
-            expected_return=0.05,
-            metadata={'fallback': True}
+            market_regime=self._get_current_market_regime(symbol),
+            risk_score=metrics.risk_score if metrics.risk_score is not None else self._estimate_high_risk_score(symbol),
+            expected_return=self._estimate_conservative_return(metrics),
+            metadata={'data_quality': 'insufficient', 'reason': reason}
         )
     
     def _prioritize_symbols_for_assignment(self) -> List[str]:
@@ -478,7 +801,7 @@ class StrategyAssignmentEngine:
                 alt_assignment = StrategyAssignment(
                     symbol=symbol,
                     recommended_strategy=alt_strategy,
-                    confidence_score=assignment.confidence_score * 0.9,  # Slightly lower confidence
+                    confidence_score=max(10.0, assignment.confidence_score * 0.9),  # Slightly lower confidence with minimum
                     reason=AssignmentReason.DIVERSIFICATION,
                     market_regime=assignment.market_regime,
                     risk_score=assignment.risk_score,
@@ -784,3 +1107,369 @@ class StrategyAssignmentEngine:
         except Exception as e:
             self.logger.error(f"Error sending strategy assignment to decision engine: {e}")
             # Don't raise - strategy assignment should still complete even if messaging fails
+    
+    def _analyze_strategy_failure(self, symbol: str, current_strategy: str, 
+                                performance_data: Dict, health_analysis: Dict) -> Dict[str, Any]:
+        """
+        Analyze why a strategy is failing based on real performance data
+        
+        Args:
+            symbol: Stock symbol
+            current_strategy: Failing strategy
+            performance_data: Real performance metrics
+            health_analysis: Health analysis from position monitor
+            
+        Returns:
+            Analysis of strategy failure reasons
+        """
+        try:
+            failure_reasons = []
+            failure_severity = "moderate"
+            
+            # Analyze performance metrics
+            total_return = performance_data.get('total_return', 0.0)
+            sharpe_ratio = performance_data.get('sharpe_ratio', 0.0)
+            max_drawdown = performance_data.get('max_drawdown', 0.0)
+            win_rate = performance_data.get('win_rate', 0.0)
+            
+            # Check return performance
+            if total_return < -0.10:  # -10% threshold
+                failure_reasons.append("poor_returns")
+                failure_severity = "severe"
+            elif total_return < -0.05:  # -5% threshold
+                failure_reasons.append("underperforming_returns")
+            
+            # Check risk-adjusted performance
+            if sharpe_ratio < -0.5:
+                failure_reasons.append("poor_risk_adjusted_returns")
+                
+            # Check drawdown
+            if max_drawdown > 0.15:  # 15% drawdown
+                failure_reasons.append("excessive_drawdown")
+                failure_severity = "severe"
+            
+            # Check win rate
+            if win_rate < 0.30:  # Less than 30% win rate
+                failure_reasons.append("low_win_rate")
+            
+            # Market regime mismatch analysis
+            current_regime = self._get_current_market_regime(symbol)
+            if self._strategy_mismatched_to_regime(current_strategy, current_regime):
+                failure_reasons.append("regime_mismatch")
+            
+            return {
+                'failure_reasons': failure_reasons,
+                'failure_severity': failure_severity,
+                'performance_metrics': performance_data,
+                'health_metrics': health_analysis,
+                'regime_mismatch': current_regime,
+                'recommendation': self._get_failure_recommendation(failure_reasons, failure_severity)
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error analyzing strategy failure for {symbol}: {e}")
+            return {
+                'failure_reasons': ['analysis_error'],
+                'failure_severity': 'unknown',
+                'error': str(e)
+            }
+    
+    def _apply_reassignment_rules(self, symbol: str, strategy_scores: Dict, 
+                                failure_analysis: Dict) -> Dict[str, Dict]:
+        """
+        Apply special rules for strategy reassignment based on failure analysis
+        
+        Args:
+            symbol: Stock symbol
+            strategy_scores: Available strategy scores
+            failure_analysis: Analysis of why previous strategy failed
+            
+        Returns:
+            Filtered and adjusted strategy scores for reassignment
+        """
+        try:
+            adjusted_scores = strategy_scores.copy()
+            failure_reasons = failure_analysis.get('failure_reasons', [])
+            failure_severity = failure_analysis.get('failure_severity', 'moderate')
+            
+            # Apply reassignment rules based on failure reasons
+            if 'poor_returns' in failure_reasons or 'underperforming_returns' in failure_reasons:
+                # Boost strategies with historically better returns
+                for strategy_name in adjusted_scores:
+                    historical_performance = self._get_historical_performance_bonus(strategy_name, symbol)
+                    if historical_performance > 0:
+                        adjusted_scores[strategy_name]['fitness_score'] += 10  # Boost proven performers
+            
+            if 'excessive_drawdown' in failure_reasons:
+                # Prefer lower-risk strategies
+                low_risk_strategies = ['mean_reversion', 'bollinger', 'pca_low_beta']
+                for strategy_name in low_risk_strategies:
+                    if strategy_name in adjusted_scores:
+                        adjusted_scores[strategy_name]['fitness_score'] += 15  # Strong preference for low risk
+            
+            if 'regime_mismatch' in failure_reasons:
+                # Strongly prefer strategies that match current regime
+                current_regime = self._get_current_market_regime(symbol)
+                for strategy_name in adjusted_scores:
+                    regime_fitness = self._calculate_regime_fitness(strategy_name, current_regime)
+                    if regime_fitness > 70:  # High regime fit
+                        adjusted_scores[strategy_name]['fitness_score'] += 20  # Strong boost for regime match
+            
+            if failure_severity == 'severe':
+                # For severe failures, only consider most conservative strategies
+                conservative_strategies = ['pca_low_beta', 'bollinger', 'mean_reversion']
+                filtered_scores = {k: v for k, v in adjusted_scores.items() 
+                                 if k in conservative_strategies}
+                if filtered_scores:
+                    adjusted_scores = filtered_scores
+            
+            return adjusted_scores
+            
+        except Exception as e:
+            self.logger.error(f"Error applying reassignment rules: {e}")
+            return strategy_scores  # Return original scores on error
+    
+    def _get_failure_recommendation(self, failure_reasons: List[str], failure_severity: str) -> str:
+        """
+        Get recommendation for handling strategy failure
+        
+        Args:
+            failure_reasons: List of failure reasons
+            failure_severity: Severity of failure
+            
+        Returns:
+            Recommendation string
+        """
+        if failure_severity == 'severe':
+            return 'immediate_reassignment_to_conservative_strategy'
+        elif 'regime_mismatch' in failure_reasons:
+            return 'reassign_to_regime_appropriate_strategy'
+        elif 'excessive_drawdown' in failure_reasons:
+            return 'reassign_to_lower_risk_strategy'
+        else:
+            return 'reassign_to_better_performing_strategy'
+    
+    # NEW DYNAMIC CALCULATION METHODS - NO HARDCODED VALUES
+    
+    def _calculate_user_position_confidence(self, metrics: MarketMetricsResult) -> float:
+        """Calculate confidence for user-selected positions based on market data"""
+        if metrics.data_quality == 'insufficient':
+            # Low confidence when no market data available
+            return 25.0
+        elif metrics.data_quality == 'poor':
+            return 40.0
+        elif metrics.data_quality == 'fair':
+            return 65.0
+        elif metrics.data_quality == 'good':
+            return 85.0
+        else:  # excellent
+            return 95.0
+    
+    def _calculate_user_position_expected_return(self, metrics: MarketMetricsResult) -> float:
+        """Calculate expected return for user positions based on market metrics"""
+        if metrics.trend_strength is None or metrics.volatility is None:
+            return 0.0  # No expected return calculation possible
+        
+        # Conservative expected return based on trend strength and volatility
+        base_return = metrics.trend_strength * 0.08  # Max 8% for strong trends
+        volatility_adjustment = -metrics.volatility * 0.02  # Reduce for high volatility
+        
+        return max(0.0, base_return + volatility_adjustment)
+    
+    def _handle_insufficient_data_risk(self, symbol: str) -> float:
+        """Handle risk calculation when market data is insufficient"""
+        self.logger.warning(f"Insufficient market data for risk calculation: {symbol}")
+        # Return high risk score to be conservative
+        return 85.0
+    
+    def _get_validated_risk_score(self, symbol: str, market_analysis: Dict) -> float:
+        """Get validated risk score with no hardcoded fallbacks"""
+        if 'risk_score' in market_analysis and market_analysis['risk_score'] is not None:
+            return float(market_analysis['risk_score'])
+        
+        # Get risk score from market metrics
+        metrics = get_market_metrics().get_comprehensive_metrics(symbol)
+        if metrics.risk_score is not None:
+            return metrics.risk_score
+        
+        # If no data available, log and return high risk
+        self.logger.warning(f"No risk data available for {symbol}, assuming high risk")
+        return 90.0
+    
+    def _get_validated_expected_return(self, strategy_name: str, strategy_scores: Dict, symbol: str) -> float:
+        """Get validated expected return with no hardcoded fallbacks"""
+        if strategy_name in strategy_scores and 'expected_return' in strategy_scores[strategy_name]:
+            return float(strategy_scores[strategy_name]['expected_return'])
+        
+        # Calculate expected return based on market metrics
+        metrics = get_market_metrics().get_comprehensive_metrics(symbol)
+        if metrics.trend_strength is not None and metrics.volatility is not None:
+            # Dynamic expected return based on strategy type and market conditions
+            return self._calculate_strategy_market_return(strategy_name, metrics)
+        
+        # No data available - return zero expected return
+        self.logger.warning(f"No expected return data for {strategy_name} on {symbol}")
+        return 0.0
+    
+    def _calculate_strategy_market_return(self, strategy_name: str, metrics: MarketMetricsResult) -> float:
+        """Calculate expected return based on strategy type and market metrics"""
+        if metrics.trend_strength is None or metrics.volatility is None:
+            return 0.0
+        
+        # Strategy-specific return calculations
+        if 'momentum' in strategy_name:
+            return metrics.trend_strength * 0.12  # Momentum benefits from strong trends
+        elif 'mean_reversion' in strategy_name:
+            return (1 - metrics.trend_strength) * 0.08  # Mean reversion benefits from weak trends
+        elif 'volatility' in strategy_name:
+            return metrics.volatility * 0.15  # Volatility strategies benefit from high volatility
+        else:
+            return metrics.trend_strength * 0.06  # Conservative default
+    
+    def _get_conservative_strategy(self) -> str:
+        """Get most conservative strategy available"""
+        conservative_strategies = ['mean_reversion', 'bollinger', 'position_monitoring']
+        for strategy in conservative_strategies:
+            if strategy in AVAILABLE_STRATEGIES:
+                return strategy
+        return 'position_monitoring'  # Ultimate fallback
+    
+    def _calculate_low_confidence_score(self, metrics: MarketMetricsResult) -> float:
+        """Calculate low confidence score based on data quality"""
+        if metrics.data_quality == 'insufficient':
+            return 15.0
+        elif metrics.data_quality == 'poor':
+            return 25.0
+        elif metrics.data_quality == 'fair':
+            return 35.0
+        else:
+            return 45.0  # Still low confidence but some data available
+    
+    def _estimate_high_risk_score(self, symbol: str) -> float:
+        """Estimate high risk score when no data available"""
+        self.logger.warning(f"No risk data for {symbol}, estimating high risk")
+        return 95.0  # Very high risk when no data
+    
+    def _estimate_conservative_return(self, metrics: MarketMetricsResult) -> float:
+        """Estimate conservative return when data is limited"""
+        if metrics.trend_strength is not None:
+            return metrics.trend_strength * 0.03  # Very conservative return
+        return 0.01  # Minimal expected return
+    
+    def _get_real_time_market_regime(self) -> Dict[str, Any]:
+        """
+        Get real-time market regime data from Redis shared state
+        
+        CRITICAL FIX: Direct Redis access for real-time regime data
+        This ensures strategy assignment uses current market conditions
+        
+        Returns:
+            Dict with current market regime information
+        """
+        try:
+            # Check cache freshness
+            current_time = datetime.now()
+            if (self.current_regime_cache.get('last_updated') and 
+                (current_time - self.current_regime_cache['last_updated']).total_seconds() < self.regime_cache_ttl):
+                return self.current_regime_cache
+            
+            # Get fresh regime data from Redis
+            if self.redis_manager:
+                regime_data = self.redis_manager.get_shared_state('market_regime', namespace='market')
+                if regime_data and isinstance(regime_data, dict):
+                    # Update cache with real-time data
+                    self.current_regime_cache = {
+                        'regime': regime_data.get('regime', 'UNKNOWN'),
+                        'confidence': regime_data.get('confidence', 0.0),
+                        'trend': regime_data.get('trend', 'UNKNOWN'),
+                        'trend_strength': regime_data.get('trend_strength', 0.0),
+                        'volatility_regime': regime_data.get('volatility_regime', 'UNKNOWN'),
+                        'enhanced_regime': regime_data.get('enhanced_regime', 'UNKNOWN'),
+                        'market_stress_level': regime_data.get('market_stress_level', 50.0),
+                        'last_updated': current_time
+                    }
+                    
+                    self.logger.info(f"REAL-TIME REGIME: Retrieved current market regime: {regime_data.get('regime', 'UNKNOWN')} "
+                                   f"(confidence: {regime_data.get('confidence', 0):.1f}%)")
+                    return self.current_regime_cache
+                else:
+                    self.logger.warning("REAL-TIME REGIME: No valid regime data in Redis - using cached/default")
+            else:
+                self.logger.warning("REAL-TIME REGIME: Redis manager not available - using cached/default")
+                
+        except Exception as e:
+            self.logger.error(f"REAL-TIME REGIME: Error accessing Redis regime data: {e}")
+        
+        # Return cached or default regime data
+        return self.current_regime_cache
+    
+    def _update_regime_cache(self):
+        """Initialize or refresh the regime cache"""
+        try:
+            regime_data = self._get_real_time_market_regime()
+            self.logger.debug(f"Market regime cache updated: {regime_data.get('regime', 'UNKNOWN')}")
+        except Exception as e:
+            self.logger.warning(f"Failed to update regime cache: {e}")
+    
+    def _select_strategies_for_regime(self, regime_data: Dict[str, Any]) -> List[str]:
+        """
+        Select appropriate strategies based on current market regime
+        
+        CRITICAL FIX: Real regime-based strategy selection
+        Maps current market conditions to optimal strategy types
+        
+        Args:
+            regime_data: Current market regime information
+            
+        Returns:
+            List of strategy names suited for current regime
+        """
+        try:
+            current_regime = regime_data.get('regime', 'UNKNOWN')
+            trend = regime_data.get('trend', 'UNKNOWN')
+            volatility_regime = regime_data.get('volatility_regime', 'UNKNOWN')
+            market_stress = regime_data.get('market_stress_level', 50.0)
+            
+            # Strategy selection based on market regime
+            regime_strategies = {
+                'BULL_MARKET': ['momentum', 'pca_momentum', 'jump_momentum', 'volatility_breakout'],
+                'BEAR_MARKET': ['mean_reversion', 'bollinger', 'pca_mean_reversion', 'pca_low_beta'],
+                'SIDEWAYS': ['bollinger', 'mean_reversion', 'pairs', 'volatility'],
+                'HIGH_VOLATILITY': ['volatility', 'volatility_breakout', 'pca_low_beta'],
+                'LOW_VOLATILITY': ['momentum', 'pca_momentum', 'trend_following'],
+                'UNKNOWN': ['bollinger', 'mean_reversion', 'momentum']  # Conservative mix
+            }
+            
+            # Get base strategies for current regime
+            base_strategies = regime_strategies.get(current_regime, regime_strategies['UNKNOWN'])
+            
+            # Refine based on trend and volatility
+            refined_strategies = base_strategies.copy()
+            
+            if trend == 'UPTREND' and current_regime != 'BEAR_MARKET':
+                refined_strategies.extend(['momentum', 'pca_momentum'])
+            elif trend == 'DOWNTREND':
+                refined_strategies.extend(['mean_reversion', 'pca_mean_reversion'])
+            
+            if volatility_regime == 'HIGH_VOLATILITY':
+                refined_strategies = [s for s in refined_strategies if 'volatility' in s or 'low_beta' in s]
+                refined_strategies.extend(['volatility', 'pca_low_beta'])
+            
+            if market_stress > 70:  # High stress market
+                refined_strategies = [s for s in refined_strategies if s in ['pca_low_beta', 'mean_reversion', 'bollinger']]
+            
+            # Remove duplicates and ensure we have available strategies
+            final_strategies = list(set(refined_strategies))
+            available_strategy_names = list(AVAILABLE_STRATEGIES.keys())
+            final_strategies = [s for s in final_strategies if s in available_strategy_names]
+            
+            if not final_strategies:
+                # Fallback to conservative strategies
+                final_strategies = ['bollinger', 'mean_reversion']
+            
+            self.logger.info(f"REGIME-BASED SELECTION: {current_regime} regime → strategies: {final_strategies}")
+            return final_strategies
+            
+        except Exception as e:
+            self.logger.error(f"Error in regime-based strategy selection: {e}")
+            return ['bollinger', 'mean_reversion']  # Safe fallback

@@ -58,15 +58,15 @@ class ProcessQueueManager:
     """
     
     def __init__(self, redis_process_manager: RedisProcessManager, cycle_time_seconds: float = 30.0, 
-                 max_concurrent_processes: int = 3, target_memory_mb: int = 750):
+                 max_concurrent_processes: int = 20, target_memory_mb: int = 8000):
         """
         Initialize the process queue manager with memory optimization.
         
         Args:
             redis_process_manager: The underlying Redis process manager
             cycle_time_seconds: How long each process gets to execute before rotation
-            max_concurrent_processes: Maximum processes running simultaneously (default 4)
-            target_memory_mb: Target total memory usage in MB (default 900MB)
+            max_concurrent_processes: Maximum processes running simultaneously (default 20)
+            target_memory_mb: Target total memory usage in MB (default 8000MB)
         """
         self.redis_process_manager = redis_process_manager
         self.cycle_time_seconds = cycle_time_seconds
@@ -183,11 +183,17 @@ class ProcessQueueManager:
             self.logger.warning("Queue rotation already running or in transition")
             return
         
-        if not self.process_queue:
-            self.logger.warning("No processes in queue to rotate")
+        # Check if we have ANY processes (not just in process_queue)
+        total_processes = len(self.process_queue) + len(self.always_running_processes) + len(self.high_priority_processes)
+        if total_processes == 0:
+            self.logger.warning("No processes registered for queue rotation")
             return
         
-        self.logger.info("Starting process queue rotation")
+        self.logger.info(f"Starting process queue rotation with {total_processes} total processes")
+        self.logger.info(f"  - Always running: {len(self.always_running_processes)} processes")
+        self.logger.info(f"  - High priority: {len(self.high_priority_processes)} processes")
+        self.logger.info(f"  - Normal rotation: {len(self.process_queue)} processes")
+        
         self.queue_state = QueueState.RUNNING
         self.start_time = datetime.now()
         self._stop_event.clear()
@@ -200,7 +206,7 @@ class ProcessQueueManager:
         self._queue_thread = threading.Thread(target=self._queue_rotation_loop, daemon=True)
         self._queue_thread.start()
         
-        self.logger.info(f"Queue rotation started with {len(self.process_queue)} processes")
+        self.logger.info(f"Queue rotation started successfully")
     
     def stop_queue_rotation(self, timeout: int = 30):
         """Stop the process queue rotation"""
@@ -280,13 +286,8 @@ class ProcessQueueManager:
                 # Update statistics
                 self.total_cycles += 1
                 
-                # Sleep to avoid busy waiting - increased for production stability
-                time.sleep(30)  # Check every 30 seconds for production
-                
-                self.total_cycles += 1
-                
-                # Pause between cycles for production stability
-                time.sleep(5)
+                # Sleep to avoid busy waiting - reduced for better responsiveness
+                time.sleep(10)  # Check every 10 seconds for better responsiveness
                 
         except Exception as e:
             self.logger.error(f"Error in queue rotation loop: {e}")
@@ -405,6 +406,30 @@ class ProcessQueueManager:
             
         except Exception as e:
             self.logger.error(f"Error signaling process pause for {process_id}: {e}")
+
+    def _send_continuous_activation_signal(self, process_id: str):
+        """Send continuous activation signal for always running processes"""
+        try:
+            redis_manager = self.redis_process_manager.redis_manager
+            message = {
+                'sender': 'queue_manager',
+                'recipient': process_id,
+                'message_type': 'start_cycle',
+                'data': {
+                    'cycle_time': float('inf'),  # Infinite cycle time for continuous execution
+                    'continuous_mode': True,
+                    'timestamp': datetime.now().isoformat()
+                }
+            }
+            
+            from .trading_redis_manager import create_process_message
+            process_message = create_process_message(**message)
+            redis_manager.send_message(process_message, f"process_{process_id}")
+            
+            self.logger.debug(f"Sent continuous activation signal to {process_id}")
+            
+        except Exception as e:
+            self.logger.error(f"Error sending continuous activation signal to {process_id}: {e}")
     
     def _stop_current_process(self):
         """Stop the currently executing process"""
@@ -431,7 +456,9 @@ class ProcessQueueManager:
                 'total_execution_time': queued_process.total_execution_time,
                 'avg_execution_time': avg_execution_time,
                 'last_execution_time': queued_process.last_execution_time.isoformat() if queued_process.last_execution_time else None,
-                'is_ready': self._is_process_ready(queued_process)
+                'is_ready': self._is_process_ready(queued_process),
+                'priority': queued_process.priority.value,
+                'is_currently_running': queued_process.is_currently_running
             }
         
         uptime = (datetime.now() - self.start_time).total_seconds() if self.start_time else 0
@@ -441,6 +468,10 @@ class ProcessQueueManager:
             'current_process': self.current_process.process_id if self.current_process else None,
             'queue_order': queue_order,
             'process_count': len(self.process_queue),
+            'total_processes': len(self.process_lookup),
+            'running_processes': len(self.current_running_processes),
+            'always_running_count': len(self.always_running_processes),
+            'high_priority_count': len(self.high_priority_processes),
             'total_cycles': self.total_cycles,
             'cycle_time_seconds': self.cycle_time_seconds,
             'uptime_seconds': uptime,
@@ -482,6 +513,8 @@ class ProcessQueueManager:
         for process_id, queued_process in self.always_running_processes.items():
             if not queued_process.is_currently_running:
                 self._start_process(queued_process)
+                # Send continuous activation signal for always running processes
+                self._send_continuous_activation_signal(process_id)
                 self.logger.info(f"Started ALWAYS_RUNNING process: {process_id}")
     
     def _ensure_priority_processes_running(self):
@@ -491,6 +524,9 @@ class ProcessQueueManager:
             if not queued_process.is_currently_running:
                 self._start_process(queued_process)
                 self.logger.info(f"Restarted ALWAYS_RUNNING process: {process_id}")
+            else:
+                # Send periodic activation signal to ensure continuous execution
+                self._send_continuous_activation_signal(process_id)
         
         # Check HIGH_PRIORITY processes - start if we have capacity
         if self._can_start_more_processes():
@@ -499,6 +535,9 @@ class ProcessQueueManager:
                     self._start_process(queued_process)
                     self.logger.info(f"Started HIGH_PRIORITY process: {process_id}")
                     break  # Only start one high priority process per cycle
+                else:
+                    # Send periodic activation signal to ensure continuous execution
+                    self._send_continuous_activation_signal(process_id)
     
     def _can_start_more_processes(self) -> bool:
         """Check if we can start more processes based on concurrent limit and TOTAL memory health"""
@@ -519,11 +558,11 @@ class ProcessQueueManager:
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
             
-            # Block new processes if we're approaching 90% of target memory
-            memory_threshold = self.target_memory_mb * 0.9
+            # Block new processes if we're approaching 95% of target memory (more permissive)
+            memory_threshold = self.target_memory_mb * 0.95
             if total_memory_mb > memory_threshold:
                 memory_healthy = False
-                self.logger.warning(f"Cannot start more processes: Total system memory {total_memory_mb:.1f}MB > {memory_threshold:.1f}MB (90% of {self.target_memory_mb}MB)")
+                self.logger.warning(f"Cannot start more processes: Total system memory {total_memory_mb:.1f}MB > {memory_threshold:.1f}MB (95% of {self.target_memory_mb}MB)")
         except Exception as e:
             self.logger.debug(f"Could not check system memory: {e}")
         
@@ -562,6 +601,16 @@ class ProcessQueueManager:
                 queued_process.last_execution_time = datetime.now()
                 queued_process.execution_count += 1
                 self.current_running_processes[queued_process.process_id] = queued_process
+                
+                # Send appropriate activation signal based on priority
+                if queued_process.priority == ProcessPriority.ALWAYS_RUNNING:
+                    self._send_continuous_activation_signal(queued_process.process_id)
+                elif queued_process.priority == ProcessPriority.HIGH_PRIORITY:
+                    self._send_continuous_activation_signal(queued_process.process_id)
+                else:
+                    # For normal priority processes, send a timed activation signal
+                    self._signal_process_start(queued_process.process_id)
+                
                 self.logger.info(f"Started process: {queued_process.process_id} ({queued_process.priority.value})")
             else:
                 self.logger.error(f"Failed to start process: {queued_process.process_id}")
@@ -660,7 +709,11 @@ class ProcessQueueManager:
                 self._start_process(next_process)
                 self.logger.info(f"Filled slot with process: {next_process.process_id}")
             else:
-                # No more processes waiting
+                # No more processes waiting, but send activation signals to running normal processes
+                for process_id, queued_process in self.current_running_processes.items():
+                    if queued_process.priority == ProcessPriority.NORMAL:
+                        self._signal_process_start(process_id)
+                        self.logger.debug(f"Sent activation signal to running process: {process_id}")
                 break
     
     def _check_memory_and_adjust(self):

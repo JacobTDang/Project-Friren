@@ -16,6 +16,15 @@ from enum import Enum
 import threading
 import uuid
 
+# Import API resilience system
+try:
+    from Friren_V1.infrastructure.api_resilience import (
+        APIServiceType, get_resilience_manager, resilient_redis_call
+    )
+    HAS_RESILIENCE = True
+except ImportError:
+    HAS_RESILIENCE = False
+
 logger = logging.getLogger(__name__)
 
 class MessagePriority(Enum):
@@ -49,23 +58,56 @@ class TradingRedisManager:
     - Automatic cleanup and expiration
     """
 
-    def __init__(self, host='localhost', port=6379, db=0):
-        """Initialize Redis connection and setup trading system namespace"""
-        self.redis_client = redis.Redis(
-            host=host,
-            port=port,
-            db=db,
-            decode_responses=True,
-            socket_connect_timeout=5,    # Faster timeout for news collection responsiveness
-            socket_timeout=5,           # Faster timeout for news collection responsiveness
-            retry_on_timeout=True,
-            health_check_interval=15    # More frequent health checks
-        )
-
-        # Test connection
+    def __init__(self, host=None, port=None, db=None):
+        """Initialize Redis connection with configuration management - NO HARDCODED VALUES"""
+        
+        # PRODUCTION: Import configuration manager - NO FALLBACKS
         try:
-            self.redis_client.ping()
-            logger.info(f"Connected to Redis at {host}:{port}")
+            from Friren_V1.infrastructure.configuration_manager import get_redis_config
+            redis_config = get_redis_config()
+        except ImportError:
+            raise ImportError("CRITICAL: Configuration manager required for Redis connection. No hardcoded fallbacks allowed.")
+        
+        # Use configuration values - NO DEFAULTS
+        redis_host = host if host is not None else redis_config['host']
+        redis_port = port if port is not None else redis_config['port']
+        redis_db = db if db is not None else redis_config['db']
+        
+        if not redis_host or not redis_port:
+            raise ValueError("PRODUCTION: Redis host and port must be configured via REDIS_HOST and REDIS_PORT environment variables")
+        
+        # ENHANCED: Create connection pool for handle leak prevention with configured values
+        self.connection_pool = redis.ConnectionPool(
+            host=redis_host,
+            port=redis_port,
+            db=redis_db,
+            decode_responses=True,
+            socket_connect_timeout=redis_config['socket_connect_timeout'],
+            socket_timeout=redis_config['socket_timeout'],
+            retry_on_timeout=True,
+            health_check_interval=redis_config['health_check_interval'],
+            max_connections=redis_config['max_connections'],
+            socket_keepalive=True,
+            socket_keepalive_options={}
+        )
+        
+        self.redis_client = redis.Redis(connection_pool=self.connection_pool)
+
+        # Initialize resilience manager
+        self.resilience_manager = get_resilience_manager() if HAS_RESILIENCE else None
+        
+        # Test connection with resilience
+        def _test_connection():
+            return self.redis_client.ping()
+        
+        try:
+            if self.resilience_manager:
+                self.resilience_manager.resilient_call(
+                    _test_connection, APIServiceType.REDIS, "connection_test"
+                )
+            else:
+                _test_connection()
+            logger.info(f"Connected to Redis at {host}:{port} with resilience protection")
         except redis.ConnectionError as e:
             logger.error(f"Failed to connect to Redis: {e}")
             raise
@@ -99,8 +141,17 @@ class TradingRedisManager:
 
         logger.info("TradingRedisManager initialized successfully")
 
+    def _resilient_redis_operation(self, operation_func, operation_name: str, *args, **kwargs):
+        """Wrap Redis operations with resilience protection"""
+        if self.resilience_manager:
+            return self.resilience_manager.resilient_call(
+                operation_func, APIServiceType.REDIS, operation_name, *args, **kwargs
+            )
+        else:
+            return operation_func(*args, **kwargs)
+
     def _initialize_system_state(self):
-        """Initialize basic system state in Redis"""
+        """Initialize basic system state in Redis with resilience protection"""
         system_state = {
             'system_status': 'initializing',
             'start_time': datetime.now().isoformat(),
@@ -109,13 +160,15 @@ class TradingRedisManager:
             'last_activity': datetime.now().isoformat()
         }
 
-        self.redis_client.hset(
-            f"{self.STATE_PREFIX}:system",
-            mapping=system_state
-        )
+        def _set_system_state():
+            self.redis_client.hset(
+                f"{self.STATE_PREFIX}:system",
+                mapping=system_state
+            )
+            # Set expiration for health data (5 minutes)
+            self.redis_client.expire(f"{self.HEALTH_PREFIX}:*", 300)
 
-        # Set expiration for health data (5 minutes)
-        self.redis_client.expire(f"{self.HEALTH_PREFIX}:*", 300)
+        self._resilient_redis_operation(_set_system_state, "initialize_system_state")
 
     def start_cleanup_thread(self):
         """Start background cleanup thread"""
@@ -694,15 +747,65 @@ class TradingRedisManager:
             return False
 
     def close(self):
-        """Close Redis connections and cleanup threads"""
+        """Close Redis connections and cleanup threads with comprehensive handle cleanup"""
         try:
             logger.info("Closing TradingRedisManager...")
             self.stop_cleanup_thread()
+            
+            # ENHANCED: Close Redis client properly
             if hasattr(self.redis_client, 'close'):
                 self.redis_client.close()
-            logger.info("TradingRedisManager closed successfully")
+            
+            # ENHANCED: Disconnect connection pool to prevent handle leaks
+            if hasattr(self, 'connection_pool') and self.connection_pool:
+                try:
+                    self.connection_pool.disconnect()
+                    logger.debug("Redis connection pool disconnected")
+                except Exception as e:
+                    logger.warning(f"Error disconnecting Redis connection pool: {e}")
+            
+            logger.info("TradingRedisManager closed successfully with handle cleanup")
         except Exception as e:
             logger.error(f"Error closing TradingRedisManager: {e}")
+    
+    def force_connection_cleanup(self):
+        """Force cleanup of all Redis connections"""
+        try:
+            if hasattr(self, 'connection_pool') and self.connection_pool:
+                # Get connection count before cleanup
+                before_count = len(self.connection_pool._available_connections)
+                
+                # Reset connection pool
+                self.connection_pool.reset()
+                
+                # Get connection count after cleanup
+                after_count = len(self.connection_pool._available_connections)
+                
+                logger.info(f"Redis connection cleanup: {before_count} -> {after_count} connections")
+                
+        except Exception as e:
+            logger.warning(f"Error in force connection cleanup: {e}")
+    
+    def get_connection_statistics(self) -> Dict[str, Any]:
+        """Get Redis connection pool statistics"""
+        try:
+            if hasattr(self, 'connection_pool') and self.connection_pool:
+                pool = self.connection_pool
+                return {
+                    'max_connections': pool.max_connections,
+                    'available_connections': len(pool._available_connections),
+                    'in_use_connections': len(pool._in_use_connections),
+                    'total_created_connections': pool._created_connections,
+                    'connection_kwargs': {
+                        'host': pool.connection_kwargs.get('host'),
+                        'port': pool.connection_kwargs.get('port'),
+                        'db': pool.connection_kwargs.get('db')
+                    }
+                }
+            else:
+                return {'error': 'Connection pool not available'}
+        except Exception as e:
+            return {'error': str(e)}
 
     def __del__(self):
         """Cleanup when manager is destroyed"""

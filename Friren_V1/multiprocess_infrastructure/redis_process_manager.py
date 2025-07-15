@@ -30,6 +30,9 @@ from Friren_V1.multiprocess_infrastructure.trading_redis_manager import (
     MessagePriority
 )
 from Friren_V1.multiprocess_infrastructure.redis_base_process import RedisBaseProcess, ProcessState
+from Friren_V1.multiprocess_infrastructure.windows_handle_monitor import (
+    get_windows_handle_monitor, register_process_handle, unregister_process_handle
+)
 
 logger = logging.getLogger(__name__)
 
@@ -91,8 +94,15 @@ class RedisProcessManager:
         self.processes: Dict[str, ProcessStatus] = {}
         self.process_configs: Dict[str, ProcessConfig] = {}
 
+        # Windows handle management
+        self.windows_process_handles: Dict[int, subprocess.Popen] = {}
+        self.handle_cleanup_callbacks: List[callable] = []
+
         # Redis manager
         self.redis_manager = get_trading_redis_manager()
+        
+        # ENHANCED: Initialize Windows handle monitor
+        self.handle_monitor = get_windows_handle_monitor(self.redis_manager)
 
         # Enhanced queue rotation manager with priority system
         self.queue_manager = None
@@ -157,9 +167,16 @@ class RedisProcessManager:
         self.logger.info(f"Registered process: {config.process_id}")
 
     def start_all_processes(self, dependency_order: Optional[List[str]] = None):
-        """Start all registered processes"""
+        """Start all registered processes with enhanced handle monitoring"""
         execution_mode = "queue rotation" if self.enable_queue_rotation else "parallel"
         self.logger.info(f"Starting all processes in {execution_mode} mode...")
+
+        # ENHANCED: Start handle monitoring before launching processes
+        handle_monitor_started = self.start_handle_monitoring()
+        if handle_monitor_started:
+            self.logger.info("Windows handle monitoring active during process startup")
+        else:
+            self.logger.warning("Windows handle monitoring not available")
 
         # Determine startup order
         if dependency_order:
@@ -205,7 +222,7 @@ class RedisProcessManager:
         self.logger.info(f"All processes started in {execution_mode} mode")
 
     def stop_all_processes(self, graceful_timeout: int = 30):
-        """Stop all processes gracefully"""
+        """Stop all processes gracefully with comprehensive handle cleanup"""
         self.logger.info("Stopping all processes...")
 
         # Stop queue rotation first if enabled
@@ -227,7 +244,46 @@ class RedisProcessManager:
         for process_id in process_ids:
             self._stop_process(process_id, graceful_timeout)
 
-        self.logger.info("All processes stopped")
+        # ENHANCED: Comprehensive handle cleanup after all processes stopped
+        self._final_handle_cleanup()
+        
+        # Stop handle monitoring last
+        self.stop_handle_monitoring()
+
+        self.logger.info("All processes stopped with comprehensive handle cleanup")
+    
+    def _final_handle_cleanup(self):
+        """Perform final comprehensive handle cleanup"""
+        try:
+            # Get handle statistics before cleanup
+            stats_before = self.get_handle_statistics()
+            
+            # Cleanup all tracked Windows handles
+            self._cleanup_all_windows_handles()
+            
+            # Force Redis connection cleanup
+            if hasattr(self.handle_monitor, 'force_redis_connection_cleanup'):
+                self.handle_monitor.force_redis_connection_cleanup()
+            
+            # Force orphaned handle cleanup
+            if hasattr(self.handle_monitor, 'cleanup_orphaned_handles'):
+                cleaned_count = self.handle_monitor.cleanup_orphaned_handles()
+                if cleaned_count > 0:
+                    self.logger.info(f"Final cleanup: removed {cleaned_count} orphaned handles")
+            
+            # Force garbage collection
+            import gc
+            collected = gc.collect()
+            if collected > 0:
+                self.logger.debug(f"Final cleanup: garbage collected {collected} objects")
+            
+            # Get handle statistics after cleanup
+            stats_after = self.get_handle_statistics()
+            
+            self.logger.info("Final handle cleanup completed")
+            
+        except Exception as e:
+            self.logger.error(f"Error in final handle cleanup: {e}")
 
     def restart_process(self, process_id: str):
         """Manually restart a specific process"""
@@ -288,18 +344,51 @@ class RedisProcessManager:
 
             self.logger.info(f"Launching process with command: {' '.join(cmd)}")
 
-            # CRITICAL FIX: Add process group management for proper cleanup
+            # CRITICAL FIX: Add process group management with Windows handle management
             import platform
             if platform.system() == "Windows":
-                # Windows: Use CREATE_NEW_PROCESS_GROUP for proper termination
-                process = subprocess.Popen(
-                    cmd,
-                    stdout=None,  # Inherit from parent process (main terminal)
-                    stderr=None,  # Inherit from parent process (main terminal)
-                    text=True,
-                    cwd=project_root,
-                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
-                )
+                # Windows: Use CREATE_NEW_PROCESS_GROUP with handle management
+                try:
+                    process = subprocess.Popen(
+                        cmd,
+                        stdout=None,  # Inherit from parent process (main terminal)
+                        stderr=None,  # Inherit from parent process (main terminal)
+                        text=True,
+                        cwd=project_root,
+                        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                        close_fds=False  # Fix: Don't close file descriptors to prevent handle errors
+                    )
+                    
+                    # Register for Windows handle cleanup (legacy)
+                    self._register_windows_process_cleanup(process)
+                    
+                    # ENHANCED: Register with advanced handle monitor
+                    cleanup_callback = lambda: self._enhanced_windows_cleanup(process.pid)
+                    register_process_handle(process, cleanup_callback)
+                    
+                except OSError as e:
+                    if "handle is invalid" in str(e).lower():
+                        # Handle exhaustion recovery
+                        self.logger.warning(f"Windows handle exhaustion detected for {config.process_id}, attempting recovery")
+                        self._recover_windows_handles()
+                        
+                        # Retry process creation after cleanup
+                        process = subprocess.Popen(
+                            cmd,
+                            stdout=None,
+                            stderr=None,
+                            text=True,
+                            cwd=project_root,
+                            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                            close_fds=False
+                        )
+                        self._register_windows_process_cleanup(process)
+                        
+                        # ENHANCED: Register with advanced handle monitor (retry case)
+                        cleanup_callback = lambda: self._enhanced_windows_cleanup(process.pid)
+                        register_process_handle(process, cleanup_callback)
+                    else:
+                        raise
             else:
                 # Unix: Use process group for proper cleanup
                 process = subprocess.Popen(
@@ -424,21 +513,89 @@ class RedisProcessManager:
                 pass
 
     def _cleanup_process(self, process_id: str):
-        """Cleanup process resources"""
+        """Cleanup process resources with comprehensive handle management"""
         status = self.processes[process_id]
+
+        # ENHANCED: Comprehensive Windows handle cleanup
+        if status.process:
+            pid = status.process.pid
+            
+            # Enhanced Windows cleanup
+            self._enhanced_windows_cleanup(pid)
+            
+            # Force close any remaining handles
+            try:
+                if hasattr(status.process, 'stdout') and status.process.stdout:
+                    status.process.stdout.close()
+                if hasattr(status.process, 'stderr') and status.process.stderr:
+                    status.process.stderr.close()
+                if hasattr(status.process, 'stdin') and status.process.stdin:
+                    status.process.stdin.close()
+            except Exception as e:
+                self.logger.debug(f"Error closing subprocess streams: {e}")
 
         # Remove temp config file
         if status.config_file_path and os.path.exists(status.config_file_path):
             try:
                 os.unlink(status.config_file_path)
+                # Register file handle cleanup
+                if hasattr(self.handle_monitor, 'unregister_file_handle'):
+                    self.handle_monitor.unregister_file_handle(status.config_file_path)
             except Exception as e:
                 self.logger.warning(f"Could not remove temp config file: {e}")
+
+        # ENHANCED: Cleanup Redis connections related to this process
+        try:
+            self._cleanup_process_redis_resources(process_id)
+        except Exception as e:
+            self.logger.debug(f"Error cleaning up Redis resources for {process_id}: {e}")
 
         # Reset status
         status.process = None
         status.config_file_path = None
         status.last_stop_time = datetime.now()
         status.is_healthy = False
+        
+        self.logger.debug(f"Comprehensive cleanup completed for process {process_id}")
+    
+    def _cleanup_process_redis_resources(self, process_id: str):
+        """Cleanup Redis resources associated with a process"""
+        try:
+            # Force cleanup of process-specific Redis state
+            process_keys = [
+                f"trading_system:health:{process_id}",
+                f"trading_system:state:process_{process_id}",
+                f"trading_system:queue:process_{process_id}"
+            ]
+            
+            for key in process_keys:
+                try:
+                    self.redis_manager.redis_client.delete(key)
+                except Exception as e:
+                    self.logger.debug(f"Could not delete Redis key {key}: {e}")
+            
+            # Force Redis connection cleanup if applicable
+            if hasattr(self.handle_monitor, 'force_redis_connection_cleanup'):
+                self.handle_monitor.force_redis_connection_cleanup()
+                
+        except Exception as e:
+            self.logger.debug(f"Error in Redis resource cleanup: {e}")
+    
+    def _cleanup_process_resources(self, pid: int):
+        """Cleanup additional process resources (called by enhanced monitor)"""
+        try:
+            # Find process by PID
+            target_process_id = None
+            for process_id, status in self.processes.items():
+                if status.process and status.process.pid == pid:
+                    target_process_id = process_id
+                    break
+            
+            if target_process_id:
+                self._cleanup_process_redis_resources(target_process_id)
+                
+        except Exception as e:
+            self.logger.debug(f"Error in additional resource cleanup for PID {pid}: {e}")
 
     def _start_monitoring(self):
         """Start the process monitoring thread"""
@@ -738,6 +895,10 @@ class RedisProcessManager:
         except Exception as e:
             self.logger.error(f"Error enabling queue mode for {process_id}: {e}")
 
+    def enable_queue_mode_for_process(self, process_id: str):
+        """Enable queue mode for a specific process - used by ProcessQueueManager"""
+        self._enable_process_queue_mode(process_id)
+
     def get_queue_status(self) -> Optional[Dict[str, Any]]:
         """Get queue rotation status if enabled"""
         if self.queue_manager:
@@ -804,6 +965,9 @@ class RedisProcessManager:
         """Cleanup all resources"""
         self.stop_all_processes()
 
+        # Windows handle cleanup
+        self._cleanup_all_windows_handles()
+
         # Cleanup any remaining temp files
         for status in self.processes.values():
             if status.config_file_path and os.path.exists(status.config_file_path):
@@ -811,3 +975,122 @@ class RedisProcessManager:
                     os.unlink(status.config_file_path)
                 except:
                     pass
+
+    def _register_windows_process_cleanup(self, process: subprocess.Popen):
+        """Register a Windows process for handle cleanup"""
+        import platform
+        if platform.system() == "Windows":
+            self.windows_process_handles[process.pid] = process
+            
+            # Register cleanup callback
+            import atexit
+            cleanup_callback = lambda: self._cleanup_windows_handle(process.pid)
+            atexit.register(cleanup_callback)
+            self.handle_cleanup_callbacks.append(cleanup_callback)
+            
+            self.logger.debug(f"Registered Windows process {process.pid} for handle cleanup")
+
+    def _cleanup_windows_handle(self, pid: int):
+        """Cleanup a specific Windows process handle"""
+        if pid in self.windows_process_handles:
+            try:
+                process = self.windows_process_handles[pid]
+                if process.poll() is None:  # Process still running
+                    self.logger.debug(f"Terminating Windows process {pid} for handle cleanup")
+                    process.terminate()
+                    
+                    # Wait briefly for graceful termination
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        # Force kill if necessary
+                        process.kill()
+                        process.wait()
+                
+                del self.windows_process_handles[pid]
+                self.logger.debug(f"Cleaned up Windows process handle {pid}")
+                
+            except Exception as e:
+                self.logger.warning(f"Error cleaning up Windows process {pid}: {e}")
+
+    def _cleanup_all_windows_handles(self):
+        """Cleanup all tracked Windows process handles"""
+        import platform
+        if platform.system() == "Windows":
+            pids_to_cleanup = list(self.windows_process_handles.keys())
+            for pid in pids_to_cleanup:
+                self._cleanup_windows_handle(pid)
+
+    def _recover_windows_handles(self):
+        """Recover from Windows handle exhaustion"""
+        import platform
+        if platform.system() == "Windows":
+            self.logger.warning("Attempting Windows handle recovery...")
+            
+            # Force cleanup of dead processes
+            dead_pids = []
+            for pid, process in self.windows_process_handles.items():
+                if process.poll() is not None:  # Process is dead
+                    dead_pids.append(pid)
+            
+            for pid in dead_pids:
+                self._cleanup_windows_handle(pid)
+            
+            # Force garbage collection
+            import gc
+            gc.collect()
+            
+            self.logger.info(f"Windows handle recovery completed: cleaned up {len(dead_pids)} dead processes")
+    
+    def _enhanced_windows_cleanup(self, pid: int):
+        """Enhanced Windows handle cleanup using advanced monitor"""
+        try:
+            import platform
+            if platform.system() == "Windows":
+                # Comprehensive handle cleanup sequence
+                self.logger.debug(f"Enhanced Windows cleanup for PID {pid}")
+                
+                # 1. Standard cleanup
+                self._cleanup_windows_handle(pid)
+                
+                # 2. Unregister from advanced monitor
+                unregister_process_handle(pid)
+                
+                # 3. Force cleanup of related resources
+                if hasattr(self, '_cleanup_process_resources'):
+                    self._cleanup_process_resources(pid)
+                
+                # 4. Trigger garbage collection if many handles cleaned
+                if len(self.windows_process_handles) % 5 == 0:
+                    import gc
+                    gc.collect()
+                    
+        except Exception as e:
+            self.logger.warning(f"Error in enhanced Windows cleanup for PID {pid}: {e}")
+    
+    def start_handle_monitoring(self):
+        """Start comprehensive handle monitoring"""
+        try:
+            success = self.handle_monitor.start_monitoring()
+            if success:
+                self.logger.info("Enhanced Windows handle monitoring started")
+            return success
+        except Exception as e:
+            self.logger.error(f"Failed to start handle monitoring: {e}")
+            return False
+    
+    def stop_handle_monitoring(self):
+        """Stop handle monitoring"""
+        try:
+            self.handle_monitor.stop_monitoring()
+            self.logger.info("Enhanced Windows handle monitoring stopped")
+        except Exception as e:
+            self.logger.error(f"Error stopping handle monitoring: {e}")
+    
+    def get_handle_statistics(self):
+        """Get comprehensive handle usage statistics"""
+        try:
+            return self.handle_monitor.get_handle_statistics()
+        except Exception as e:
+            self.logger.error(f"Error getting handle statistics: {e}")
+            return {'error': str(e)}

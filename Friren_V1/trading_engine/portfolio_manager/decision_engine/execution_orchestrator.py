@@ -44,6 +44,7 @@ try:
     from ..tools.alpaca_interface import SimpleAlpacaInterface
     from ..tools.execution_engine import SimpleExecutionEngine, SimpleExecutionRequest, ExecutionType
     from ..tools.order_manager import SimpleOrderManager
+    from ..tools.account_manager import AccountManager
     IMPORTS_SUCCESSFUL = True
 except ImportError:
     IMPORTS_SUCCESSFUL = False
@@ -229,7 +230,8 @@ class ExecutionOrchestrator:
                  db_manager: Optional[TradingDBManager] = None,
                  alpaca_interface: Optional[SimpleAlpacaInterface] = None,
                  execution_engine: Optional[SimpleExecutionEngine] = None,
-                 order_manager: Optional[SimpleOrderManager] = None):
+                 order_manager: Optional[SimpleOrderManager] = None,
+                 account_manager: Optional[AccountManager] = None):
 
         self.logger = logging.getLogger("execution_orchestrator")
 
@@ -239,6 +241,10 @@ class ExecutionOrchestrator:
         self.db_manager = db_manager or TradingDBManager()
         self.alpaca_interface = alpaca_interface or SimpleAlpacaInterface()
         self.order_manager = order_manager or SimpleOrderManager()
+        self.account_manager = account_manager or AccountManager(
+            db_manager=self.db_manager,
+            alpaca_interface=self.alpaca_interface
+        )
         self.execution_engine = execution_engine or SimpleExecutionEngine(
             order_manager=self.order_manager,
             alpaca_interface=self.alpaca_interface,
@@ -560,6 +566,19 @@ class ExecutionOrchestrator:
 
             # Assign strategy ownership
             self._assign_strategy_ownership(execution_result)
+
+            # CRITICAL FIX: Sync Alpaca account positions to database after successful trade
+            try:
+                self.logger.info("POST-TRADE SYNC: Syncing Alpaca positions to database...")
+                sync_success = self.account_manager.sync_alpaca_positions_to_database()
+                if sync_success:
+                    self.logger.info("POST-TRADE SYNC: Successfully synced positions after trade execution")
+                    print(f"[POST-TRADE SYNC] Alpaca positions synchronized to database after {request.symbol} execution")
+                else:
+                    self.logger.warning("POST-TRADE SYNC: Failed to sync positions after trade execution")
+            except Exception as sync_error:
+                self.logger.error(f"POST-TRADE SYNC: Error syncing positions after trade: {sync_error}")
+                # Don't fail the execution due to sync issues
 
         except Exception as e:
             self.logger.error(f"Error in post-execution processing: {e}")

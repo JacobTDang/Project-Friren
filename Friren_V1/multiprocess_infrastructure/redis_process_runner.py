@@ -57,7 +57,10 @@ def create_redis_compatible_process(original_class, process_id: str, process_arg
 
         def __init__(self, process_id: str, heartbeat_interval: int = 30, **kwargs):
             # CRITICAL FIX: Pass memory_limit_mb from kwargs to parent class
-            memory_limit_mb = kwargs.get('memory_limit_mb', 250)
+            # Use environment variable for memory limit with AWS t3.micro optimization
+            import os
+            default_memory = int(os.getenv('FRIREN_BASE_PROCESS_MEMORY_MB', '400'))
+            memory_limit_mb = kwargs.get('memory_limit_mb', default_memory)
             super().__init__(process_id, heartbeat_interval, memory_limit_mb=memory_limit_mb)
 
             # CRITICAL FIX: Don't create original process instance since we ARE the process
@@ -85,6 +88,25 @@ def create_redis_compatible_process(original_class, process_id: str, process_arg
                 # Initialize basic attributes for fallback
                 self._initialize_business_attributes()
 
+        def _create_minimal_business_instance(self, business_args):
+            """Create business instance with minimal initialization to avoid pickle errors"""
+            try:
+                # Temporarily disable auto-start features during creation
+                original_auto_start = business_args.get('auto_start', True)
+                business_args['auto_start'] = False
+                
+                # Create instance
+                instance = self.business_class(**business_args)
+                
+                # Mark that full initialization should happen in start()
+                instance._minimal_init = True
+                
+                return instance
+                
+            except Exception as e:
+                self.logger.error(f"Minimal business instance creation failed: {e}")
+                raise
+
         def _import_business_methods(self):
             """Import ALL business methods from the original class dynamically"""
             try:
@@ -108,11 +130,16 @@ def create_redis_compatible_process(original_class, process_id: str, process_arg
                         if param_name in self.process_args:
                             business_args[param_name] = self.process_args[param_name]
                     
-                    # Create temporary business instance
-                    business_instance = self.business_class(**business_args)
+                    # CRITICAL FIX: Create business instance with minimal initialization
+                    # to avoid threading/weakref objects during subprocess creation
+                    business_instance = self._create_minimal_business_instance(business_args)
                     
                     # CRITICAL: Store reference to business instance for method delegation
                     self._business_instance = business_instance
+                    
+                    # CRITICAL FIX: Synchronize wrapper attributes to business instance
+                    # This fixes AttributeError when business methods try to access wrapper attributes
+                    self._synchronize_attributes_to_business_instance()
                     
                     # Extract and bind key methods by creating wrapper functions
                     if hasattr(business_instance, '_process_cycle'):
@@ -128,6 +155,14 @@ def create_redis_compatible_process(original_class, process_id: str, process_arg
                         self._business_initialize = wrapped_initialize
                         imported_methods.append('_business_initialize')
                         self.logger.info("Successfully bound _initialize as _business_initialize")
+                    
+                    # CRITICAL FIX: Bind missing _run_stock_discovery_scan method for enhanced_news_pipeline
+                    if hasattr(business_instance, '_run_stock_discovery_scan'):
+                        def wrapped_discovery_scan():
+                            return self._business_instance._run_stock_discovery_scan()
+                        self._run_stock_discovery_scan = wrapped_discovery_scan
+                        imported_methods.append('_run_stock_discovery_scan')
+                        self.logger.info("Successfully bound _run_stock_discovery_scan method")
                     
                     # Copy other important attributes
                     for attr in ['symbols', 'watchlist_symbols', 'confidence_threshold']:
@@ -209,6 +244,16 @@ def create_redis_compatible_process(original_class, process_id: str, process_arg
                 self.decision_queue = []
                 self.analysis_interval = self.process_args.get('analysis_interval', 300)  # 5 minutes
                 self.check_interval = self.process_args.get('check_interval', 60)  # 1 minute
+                
+                # CRITICAL FIX: Add shared_state attribute for pipeline metrics
+                self.shared_state = None  # Redis-based shared state for process communication
+                
+                # CRITICAL FIX: Add strategy monitoring states for position health monitor
+                self.strategy_monitoring_states = {}  # Strategy monitoring state tracking
+                self.watchlist = []  # Watchlist for position health monitor
+                
+                # Ensure all required position health attributes exist
+                self._ensure_position_health_attributes()
 
                 # Set all process_args as attributes for business class compatibility
                 for key, value in self.process_args.items():
@@ -293,6 +338,27 @@ def create_redis_compatible_process(original_class, process_id: str, process_arg
             except Exception as e:
                 self.logger.error(f"Error initializing business attributes: {e}")
 
+        def _ensure_position_health_attributes(self):
+            """Ensure all required attributes exist for position health monitoring"""
+            try:
+                required_attrs = {
+                    'strategy_monitoring_states': {},
+                    'watchlist': [],
+                    'active_strategies': {},
+                    'health_checks_count': 0,
+                    'last_health_check': None
+                }
+                
+                for attr, default_value in required_attrs.items():
+                    if not hasattr(self, attr):
+                        setattr(self, attr, default_value)
+                        self.logger.info(f"Initialized missing attribute: {attr}")
+                
+                self.logger.debug("Position health attributes validation completed")
+                
+            except Exception as e:
+                self.logger.error(f"Error ensuring position health attributes: {e}")
+
         def _reset_daily_counters(self):
             """Reset daily counters if it's a new day"""
             try:
@@ -320,6 +386,28 @@ def create_redis_compatible_process(original_class, process_id: str, process_arg
         def _send_colored_output_to_main_terminal(self):
             """Send colored business execution output to main terminal via Redis communication"""
             try:
+                # CRITICAL FIX: Don't override business logic outputs - let OutputCoordinator handle everything
+                # The real business logic classes use OutputCoordinator to generate proper formatted outputs
+                # This wrapper should not interfere with those outputs
+                
+                # Check if this is a process that uses OutputCoordinator for business logic
+                outputcoordinator_processes = [
+                    'enhanced_news_pipeline',
+                    'decision_engine', 
+                    'position_health_monitor',
+                    'strategy_analyzer',
+                    'finbert_sentiment',
+                    'xgboost_engine'
+                ]
+                
+                process_uses_outputcoordinator = any(proc in self.process_id.lower() for proc in outputcoordinator_processes)
+                
+                if process_uses_outputcoordinator:
+                    # Don't send wrapper messages - let the business logic OutputCoordinator handle all outputs
+                    self.logger.info(f"Process {self.process_id} uses OutputCoordinator - skipping wrapper output to avoid interference")
+                    return
+                
+                # Only send wrapper messages for legacy processes that don't use OutputCoordinator
                 # Use Redis directly to send colored output messages to main terminal
                 from Friren_V1.multiprocess_infrastructure.trading_redis_manager import create_process_message, MessagePriority
                 
@@ -327,11 +415,11 @@ def create_redis_compatible_process(original_class, process_id: str, process_arg
                 message_text = "Business process executed successfully"
                 color_type = "communication"
                 
-                # Extract real execution data from business instance
+                # Extract real execution data from business instance for legacy processes only
                 if hasattr(self, '_business_instance') and self._business_instance:
                     try:
-                        if 'news' in self.process_id.lower() and 'enhanced_news_pipeline' not in self.process_id.lower():
-                            # Get real news collection data with enhanced details
+                        if 'legacy_news' in self.process_id.lower():
+                            # Only for legacy news processes - not enhanced_news_pipeline
                             if hasattr(self._business_instance, 'last_collected_articles') and hasattr(self._business_instance, 'watchlist_symbols'):
                                 articles = getattr(self._business_instance, 'last_collected_articles', [])
                                 symbols = getattr(self._business_instance, 'watchlist_symbols', [])
@@ -354,121 +442,17 @@ def create_redis_compatible_process(original_class, process_id: str, process_arg
                                     message_text = f"News collection: Scanning {symbols_str} - no new articles found"
                                 else:
                                     message_text = "News collection: No symbols configured for monitoring"
-                                    
-                            elif hasattr(self._business_instance, 'watchlist_symbols'):
-                                symbols = getattr(self._business_instance, 'watchlist_symbols', [])
-                                if symbols:
-                                    message_text = f"News pipeline: Processing {len(symbols)} symbols: {', '.join(symbols[:3])}"
-                                else:
-                                    message_text = "News pipeline: No symbols configured for processing"
-                            else:
-                                message_text = "News pipeline: Real collection cycle completed"
                             color_type = "news"
-                            
-                        elif 'decision' in self.process_id.lower():
-                            # Get real decision engine data with enhanced details
-                            if hasattr(self._business_instance, 'last_decision'):
-                                decision = getattr(self._business_instance, 'last_decision', None)
-                                if decision and hasattr(decision, 'action') and hasattr(decision, 'symbol'):
-                                    confidence = getattr(decision, 'confidence', 0.0)
-                                    reasoning = getattr(decision, 'reasoning', '')[:30]
-                                    message_text = f"Decision: {decision.action} {decision.symbol} (confidence: {confidence:.1%}) - {reasoning}..."
-                                else:
-                                    message_text = "Decision Engine: Analysis cycle completed"
-                            elif hasattr(self._business_instance, 'last_sentiment_results'):
-                                # Show sentiment analysis results
-                                sentiment_results = getattr(self._business_instance, 'last_sentiment_results', [])
-                                if sentiment_results:
-                                    results_info = []
-                                    for result in sentiment_results[:2]:  # Show first 2 results
-                                        symbol = getattr(result, 'symbol', 'MARKET')
-                                        sentiment = getattr(result, 'classification', 'neutral')
-                                        confidence = getattr(result, 'confidence', 0.0)
-                                        results_info.append(f"{symbol}: {sentiment} ({confidence:.1%})")
-                                    message_text = f"FinBERT analysis: {', '.join(results_info)}"
-                                else:
-                                    message_text = "Decision Engine: Sentiment analysis completed"
-                            elif hasattr(self._business_instance, 'watchlist_symbols'):
-                                symbols = getattr(self._business_instance, 'watchlist_symbols', [])
-                                if symbols:
-                                    symbols_str = ', '.join(symbols[:3]) if len(symbols) <= 3 else f"{', '.join(symbols[:2])}, +{len(symbols)-2} more"
-                                    message_text = f"Decision Engine: Analyzing {symbols_str}"
-                                else:
-                                    message_text = "Decision Engine: No symbols configured for analysis"
-                            else:
-                                # PHASE 2 FIX: Reduce Decision Engine terminal spam - only show when actually processing
-                                message_text = ""  # Don't show generic "Real analysis completed" 
-                            color_type = "decision"
-                            
-                        elif 'position' in self.process_id.lower():
-                            # Get real position monitoring data
-                            if hasattr(self._business_instance, 'active_positions'):
-                                positions = getattr(self._business_instance, 'active_positions', {})
-                                if positions:
-                                    symbols = list(positions.keys())[:3]
-                                    message_text = f"Monitoring positions: {', '.join(symbols)}"
-                                else:
-                                    message_text = "Position Monitor: No active positions"
-                            elif hasattr(self._business_instance, 'watchlist_symbols'):
-                                symbols = getattr(self._business_instance, 'watchlist_symbols', [])
-                                message_text = f"Position Monitor: Checking {symbols}"
-                            else:
-                                message_text = "Position Monitor: Health check completed"
-                            color_type = "position"
-                            
-                        elif 'sentiment' in self.process_id.lower() or 'finbert' in self.process_id.lower():
-                            # Get real sentiment analysis data
-                            if hasattr(self._business_instance, 'last_sentiment_results'):
-                                results = getattr(self._business_instance, 'last_sentiment_results', [])
-                                if results:
-                                    symbols = [getattr(r, 'symbol', 'Unknown') for r in results[:3]]
-                                    message_text = f"Sentiment analyzed: {', '.join(symbols)}"
-                                else:
-                                    message_text = "Sentiment Analysis: No results generated"
-                            elif hasattr(self._business_instance, 'watchlist_symbols'):
-                                symbols = getattr(self._business_instance, 'watchlist_symbols', [])
-                                message_text = f"FinBERT Analysis: Processing {symbols}"
-                            else:
-                                message_text = "FinBERT Analysis: Real analysis completed"
-                            color_type = "sentiment"
-                            
-                        elif 'strategy' in self.process_id.lower():
-                            # Get real strategy analysis data
-                            if hasattr(self._business_instance, 'current_strategies'):
-                                strategies = getattr(self._business_instance, 'current_strategies', {})
-                                if strategies:
-                                    strategy_info = []
-                                    for symbol, strategy in list(strategies.items())[:3]:
-                                        strategy_name = getattr(strategy, 'strategy_type', 'Unknown') if hasattr(strategy, 'strategy_type') else str(strategy)
-                                        strategy_info.append(f"{symbol}: {strategy_name}")
-                                    message_text = f"Strategies active: {', '.join(strategy_info)}"
-                                else:
-                                    message_text = "Strategy Analyzer: No active strategies"
-                            elif hasattr(self._business_instance, 'watchlist_symbols'):
-                                symbols = getattr(self._business_instance, 'watchlist_symbols', [])
-                                message_text = f"Strategy Analyzer: Analyzing {symbols}"
-                            else:
-                                message_text = "Strategy Analyzer: Analysis completed"
-                            color_type = "strategy"
+                        else:
+                            # For other legacy processes, just indicate completion
+                            message_text = f"Legacy process {self.process_id} completed execution"
+                            color_type = "communication"
                             
                     except Exception as attr_error:
-                        self.logger.debug(f"Could not extract real execution details: {attr_error}")
-                        # Fallback to generic process-specific messages
-                        if 'news' in self.process_id.lower():
-                            message_text = "News pipeline: Collection cycle completed"
-                            color_type = "news"
-                        elif 'decision' in self.process_id.lower():
-                            message_text = "Decision Engine: Analysis cycle completed"
-                            color_type = "decision"
-                        elif 'position' in self.process_id.lower():
-                            message_text = "Position Monitor: Health check completed"
-                            color_type = "position"
-                        elif 'sentiment' in self.process_id.lower() or 'finbert' in self.process_id.lower():
-                            message_text = "FinBERT Analysis: Sentiment analysis completed"
-                            color_type = "sentiment"
-                        elif 'strategy' in self.process_id.lower():
-                            message_text = "Strategy Analyzer: Analysis completed"
-                            color_type = "strategy"
+                        self.logger.debug(f"Could not extract legacy execution details: {attr_error}")
+                        # Use generic message for legacy processes
+                        message_text = f"Process {self.process_id} completed execution"
+                        color_type = "communication"
 
                 # Create message data for main terminal
                 message_data = {
@@ -490,7 +474,7 @@ def create_redis_compatible_process(original_class, process_id: str, process_arg
                 # Send via Redis to terminal_output queue
                 if hasattr(self, 'redis_manager') and self.redis_manager:
                     self.redis_manager.send_message(redis_message, "terminal_output")
-                    self.logger.info(f"Colored output sent to main terminal: {message_text}")
+                    self.logger.info(f"Legacy wrapper output sent to main terminal: {message_text}")
                 else:
                     self.logger.warning("Redis manager not available - cannot send colored output")
 
@@ -613,6 +597,56 @@ def create_redis_compatible_process(original_class, process_id: str, process_arg
                 self.logger.info(f"Process {self.process_id} cleanup completed")
             except Exception as e:
                 self.logger.error(f"Error in cleanup: {e}")
+        
+        def _synchronize_attributes_to_business_instance(self):
+            """
+            Synchronize wrapper attributes to business instance to prevent AttributeError
+            
+            This fixes the context mismatch where attributes are initialized on the wrapper
+            but business methods execute on the business instance.
+            """
+            if not hasattr(self, '_business_instance') or self._business_instance is None:
+                return
+            
+            # Define attributes that need to be synchronized
+            critical_attributes = [
+                'strategy_monitoring_states',
+                'watchlist', 
+                'active_strategies',
+                'shared_state',
+                'check_interval',
+                'watchlist_symbols',
+                'processing_history',
+                'error_history',
+                'last_sentiment_results',
+                'last_recommendations',
+                'symbol_tracking'
+            ]
+            
+            synchronized_count = 0
+            for attr_name in critical_attributes:
+                if hasattr(self, attr_name):
+                    try:
+                        # Copy attribute from wrapper to business instance
+                        attr_value = getattr(self, attr_name)
+                        setattr(self._business_instance, attr_name, attr_value)
+                        synchronized_count += 1
+                        self.logger.debug(f"Synchronized attribute '{attr_name}' to business instance")
+                    except Exception as e:
+                        self.logger.warning(f"Could not synchronize attribute '{attr_name}': {e}")
+            
+            # Also synchronize any process_args as attributes
+            if hasattr(self, 'process_args') and self.process_args:
+                for key, value in self.process_args.items():
+                    if not hasattr(self._business_instance, key) and value is not None:
+                        try:
+                            setattr(self._business_instance, key, value)
+                            synchronized_count += 1
+                            self.logger.debug(f"Synchronized process_arg '{key}' to business instance")
+                        except Exception as e:
+                            self.logger.warning(f"Could not synchronize process_arg '{key}': {e}")
+            
+            self.logger.info(f"Attribute synchronization complete: {synchronized_count} attributes synchronized to business instance")
 
     return RedisCompatibleProcess
 

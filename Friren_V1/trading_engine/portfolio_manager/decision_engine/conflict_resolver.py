@@ -27,13 +27,14 @@ import pickle
 import os
 from pathlib import Path
 
-# ML imports with fallbacks
+# PRODUCTION: XGBoost is required - NO FALLBACKS
 try:
     import xgboost as xgb
     HAS_XGBOOST = True
 except ImportError:
     HAS_XGBOOST = False
-    logging.warning("XGBoost not available, using rule-based fallback only")
+    raise ImportError("PRODUCTION: XGBoost is required for conflict resolution. "
+                     "Install xgboost package. No rule-based fallbacks allowed.")
 
 # LAZY LOADING: Only import SHAP when actually needed to avoid memory issues
 def _lazy_import_shap():
@@ -858,7 +859,9 @@ class ConflictResolver:
         except Exception as e:
             self.logger.error(f"CRITICAL: XGBoost model loading failed: {e}")
             self.xgb_model = None
-            # Don't raise exception - fall back to rule-based decisions
+            # NO FALLBACK - XGBoost model is required for production
+            raise RuntimeError(f"PRODUCTION: XGBoost model loading failed: {e}. "
+                             "Model is required for conflict resolution. No rule-based fallbacks allowed.")
 
     def _validate_model_health(self) -> bool:
         """Perform comprehensive model health checks"""

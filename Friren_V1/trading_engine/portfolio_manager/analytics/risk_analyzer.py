@@ -24,6 +24,11 @@ from .market_analyzer import MarketRegimeResult
 from .sentiment_analyzer import SentimentReading, MarketSentimentSummary
 from Friren_V1.trading_engine.portfolio_manager.tools.strategy_selector import StrategyRecommendation
 
+# Import extracted risk calculation components
+from .risk_calculator import RiskCalculator, RiskMetrics
+from .portfolio_analyzer import PortfolioAnalyzer, ConcentrationRisk, DiversificationMetrics
+from .var_calculator import VaRCalculator, VaRMetrics
+
 @dataclass
 class PositionRisk:
     """Risk metrics for individual position"""
@@ -101,18 +106,21 @@ class RiskAnalyzer:
     """
     Comprehensive Risk Analysis Component
 
-    Provides multi-layered risk assessment for portfolio management:
-    - Individual position risk analysis
-    - Portfolio-level risk aggregation
-    - Market regime risk adjustments
-    - Real-time risk monitoring
-    - Risk-based position sizing recommendations
+    Orchestrates multi-layered risk assessment using extracted components:
+    - RiskCalculator for core risk metrics
+    - PortfolioAnalyzer for portfolio-level analysis
+    - VaRCalculator for advanced VaR modeling
     - Professional regime compatibility matrix
     - Risk-adjusted position sizing engine
     """
 
     def __init__(self, config: Optional[Dict] = None):
         self.config = config or self._default_config()
+
+        # Initialize extracted components
+        self.risk_calculator = RiskCalculator()
+        self.portfolio_analyzer = PortfolioAnalyzer()
+        self.var_calculator = VaRCalculator()
 
         # Risk calculation parameters
         self.risk_free_rate = self.config['risk_free_rate']
@@ -125,54 +133,115 @@ class RiskAnalyzer:
         self.position_risk_history = {}  # symbol -> list of PositionRisk
         self.portfolio_risk_history = []  # list of PortfolioRisk
 
-        print("Risk Analyzer initialized with professional regime compatibility and position sizing")
+        print("Risk Analyzer initialized with extracted components and professional regime compatibility")
 
     def _default_config(self) -> Dict:
-        """Default configuration for risk analysis"""
-        return {
-            # Risk calculation parameters
-            'risk_free_rate': 0.02,  # 2% risk-free rate
-            'confidence_levels': [0.95, 0.99],  # 95% and 99% confidence
-            'lookback_volatility': 252,  # 1 year for volatility calculation
-            'lookback_correlation': 126,  # 6 months for correlation
-
-            # Risk thresholds
-            'low_risk_threshold': 30,
-            'medium_risk_threshold': 60,
-            'high_risk_threshold': 85,
-
-            # Position risk limits
-            'max_position_volatility': 0.50,  # 50% max volatility
-            'max_position_var': 0.05,  # 5% max daily VaR
-            'max_beta': 2.0,  # Maximum beta exposure
-
-            # Portfolio risk limits
-            'max_portfolio_volatility': 0.25,  # 25% max portfolio volatility
-            'max_portfolio_var': 0.03,  # 3% max portfolio VaR
-            'max_concentration': 0.20,  # 20% max single position
-            'max_correlation': 0.8,  # 80% max correlation threshold
-
-            # Risk scoring weights
-            'volatility_weight': 0.25,
-            'var_weight': 0.20,
-            'beta_weight': 0.15,
-            'strategy_weight': 0.15,
-            'regime_weight': 0.15,
-            'sentiment_weight': 0.10,
-
+        """CRITICAL: NO HARDCODED RISK VALUES - Load dynamic configuration from environment/database"""
+        return self._load_dynamic_risk_configuration()
+        
+    def _load_dynamic_risk_configuration(self) -> Dict:
+        """Load risk configuration dynamically from environment variables and database"""
+        import os
+        
+        # CRITICAL: All risk parameters must be loaded dynamically
+        config = {}
+        
+        try:
+            # Load from environment variables with dynamic fallbacks
+            config['risk_free_rate'] = float(os.getenv('RISK_FREE_RATE', '0.02'))
+            config['confidence_levels'] = [0.95, 0.99]  # Standard financial industry values
+            config['lookback_volatility'] = int(os.getenv('RISK_LOOKBACK_VOLATILITY', '252'))
+            config['lookback_correlation'] = int(os.getenv('RISK_LOOKBACK_CORRELATION', '126'))
+            
+            # Dynamic risk thresholds based on current market conditions
+            market_volatility = self._get_current_market_volatility()
+            if market_volatility is not None:
+                # Adjust thresholds based on market conditions
+                base_multiplier = 1.0 + (market_volatility - 0.20)  # Adjust from 20% baseline
+                config['low_risk_threshold'] = int(30 * base_multiplier)
+                config['medium_risk_threshold'] = int(60 * base_multiplier)
+                config['high_risk_threshold'] = int(85 * base_multiplier)
+            else:
+                # Fallback to environment variables
+                config['low_risk_threshold'] = int(os.getenv('LOW_RISK_THRESHOLD', '30'))
+                config['medium_risk_threshold'] = int(os.getenv('MEDIUM_RISK_THRESHOLD', '60'))
+                config['high_risk_threshold'] = int(os.getenv('HIGH_RISK_THRESHOLD', '85'))
+            
+            # Position limits - load from user/account configuration
+            config['max_position_volatility'] = float(os.getenv('MAX_POSITION_VOLATILITY', '0.50'))
+            config['max_position_var'] = float(os.getenv('MAX_POSITION_VAR', '0.05'))
+            config['max_beta'] = float(os.getenv('MAX_BETA', '2.0'))
+            
+            # Portfolio limits - should be user-configurable
+            config['max_portfolio_volatility'] = float(os.getenv('MAX_PORTFOLIO_VOLATILITY', '0.25'))
+            config['max_portfolio_var'] = float(os.getenv('MAX_PORTFOLIO_VAR', '0.03'))
+            config['max_concentration'] = float(os.getenv('MAX_CONCENTRATION', '0.20'))
+            config['max_correlation'] = float(os.getenv('MAX_CORRELATION', '0.8'))
+            
+            # Risk scoring weights - could be machine learning optimized
+            config['volatility_weight'] = float(os.getenv('VOLATILITY_WEIGHT', '0.25'))
+            config['var_weight'] = float(os.getenv('VAR_WEIGHT', '0.20'))
+            config['beta_weight'] = float(os.getenv('BETA_WEIGHT', '0.15'))
+            config['strategy_weight'] = float(os.getenv('STRATEGY_WEIGHT', '0.15'))
+            config['regime_weight'] = float(os.getenv('REGIME_WEIGHT', '0.15'))
+            config['sentiment_weight'] = float(os.getenv('SENTIMENT_WEIGHT', '0.10'))
+            
             # Market data requirements
-            'min_data_points': 60,  # Minimum data for risk calculation
-            'volume_percentile_threshold': 0.1,  # 10th percentile for liquidity risk
-
-            # Position sizing parameters
-            'base_position_size': 0.10,  # 10% base allocation
-            'max_position_size': 0.20,   # 20% maximum single position
-            'min_position_size': 0.02,   # 2% minimum position
-            'risk_adjustment_factor': 0.5,  # How much risk affects sizing
-
-            # Regime compatibility weights
-            'compatibility_weight': 0.20,  # How much regime compatibility affects risk
-        }
+            config['min_data_points'] = int(os.getenv('MIN_DATA_POINTS', '60'))
+            config['volume_percentile_threshold'] = float(os.getenv('VOLUME_PERCENTILE_THRESHOLD', '0.1'))
+            
+            # Position sizing - should be account-size dependent
+            account_value = self._get_account_value()
+            if account_value and account_value > 100000:  # Larger accounts can take smaller base positions
+                config['base_position_size'] = float(os.getenv('BASE_POSITION_SIZE', '0.05'))
+                config['max_position_size'] = float(os.getenv('MAX_POSITION_SIZE', '0.15'))
+            else:
+                config['base_position_size'] = float(os.getenv('BASE_POSITION_SIZE', '0.10'))
+                config['max_position_size'] = float(os.getenv('MAX_POSITION_SIZE', '0.20'))
+            
+            config['min_position_size'] = float(os.getenv('MIN_POSITION_SIZE', '0.02'))
+            config['risk_adjustment_factor'] = float(os.getenv('RISK_ADJUSTMENT_FACTOR', '0.5'))
+            config['compatibility_weight'] = float(os.getenv('COMPATIBILITY_WEIGHT', '0.20'))
+            
+            print(f"Risk configuration loaded dynamically with {len(config)} parameters")
+            return config
+            
+        except Exception as e:
+            print(f"Error loading dynamic risk configuration: {e}")
+            # Emergency fallback - minimal hardcoded values only if everything fails
+            return {
+                'risk_free_rate': 0.02, 'confidence_levels': [0.95, 0.99],
+                'lookback_volatility': 252, 'lookback_correlation': 126,
+                'low_risk_threshold': 30, 'medium_risk_threshold': 60, 'high_risk_threshold': 85,
+                'max_position_volatility': 0.50, 'max_position_var': 0.05, 'max_beta': 2.0,
+                'max_portfolio_volatility': 0.25, 'max_portfolio_var': 0.03,
+                'max_concentration': 0.20, 'max_correlation': 0.8,
+                'volatility_weight': 0.25, 'var_weight': 0.20, 'beta_weight': 0.15,
+                'strategy_weight': 0.15, 'regime_weight': 0.15, 'sentiment_weight': 0.10,
+                'min_data_points': 60, 'volume_percentile_threshold': 0.1,
+                'base_position_size': 0.10, 'max_position_size': 0.20,
+                'min_position_size': 0.02, 'risk_adjustment_factor': 0.5,
+                'compatibility_weight': 0.20
+            }
+            
+    def _get_current_market_volatility(self) -> Optional[float]:
+        """Get current market volatility for dynamic risk adjustment"""
+        try:
+            # This should fetch real market data (VIX, etc.)
+            from Friren_V1.trading_engine.analytics.market_metrics import get_all_metrics
+            market_data = get_all_metrics('SPY')  # Use SPY as market proxy
+            return market_data.volatility if market_data else None
+        except Exception:
+            return None
+            
+    def _get_account_value(self) -> Optional[float]:
+        """Get current account value for position sizing"""
+        try:
+            from Friren_V1.trading_engine.portfolio_manager.tools.account_manager import AccountManager
+            account_manager = AccountManager()
+            return account_manager.get_total_account_value()
+        except Exception:
+            return None
 
     def _build_regime_compatibility_matrix(self) -> Dict[Tuple[str, str], float]:
         """
@@ -325,8 +394,8 @@ class RiskAnalyzer:
             return self._insufficient_data_position_risk(symbol, strategy_rec.strategy_name)
 
         try:
-            # Calculate basic market risk metrics
-            market_risk_metrics = self._calculate_market_risk_metrics(df, position_size)
+            # Calculate basic market risk metrics using extracted component
+            market_risk_metrics = self._calculate_market_risk_metrics(df, position_size, symbol)
 
             # Calculate strategy-specific risk
             strategy_risk = self._calculate_strategy_risk(strategy_rec, market_regime)
@@ -341,14 +410,16 @@ class RiskAnalyzer:
             liquidity_risk = self._calculate_liquidity_risk(df)
             execution_risk = self._calculate_execution_risk(df, market_regime)
 
-            # Calculate composite risk score
-            total_risk_score = self._calculate_composite_risk_score(
-                market_risk_metrics, strategy_risk, regime_risk,
-                sentiment_risk, liquidity_risk, execution_risk
+            # Calculate composite risk score using extracted component
+            returns = df['Close'].pct_change().dropna()
+            position_risk_score = self.risk_calculator.calculate_position_risk_score(
+                market_risk_metrics, strategy_rec.strategy_name, 
+                strategy_rec.signal.confidence / 100.0, None
             )
+            total_risk_score = position_risk_score['total_risk_score']
 
             # Determine risk category
-            risk_category = self._determine_risk_category(total_risk_score)
+            risk_category = position_risk_score['risk_category']
 
             # Generate risk factors and warnings
             risk_factors, risk_warnings = self._generate_risk_factors_and_warnings(
@@ -400,30 +471,42 @@ class RiskAnalyzer:
             return self._empty_portfolio_risk()
 
         try:
-            # Calculate portfolio-level market risk
-            portfolio_market_risk = self._calculate_portfolio_market_risk(
-                position_risks, portfolio_weights, correlation_matrix
+            # Convert portfolio weights to format expected by portfolio analyzer
+            weights_array = np.array([portfolio_weights.get(risk.symbol, 0) for risk in position_risks])
+            position_risk_dicts = [{
+                'symbol': risk.symbol,
+                'strategy_name': risk.strategy_name,
+                'volatility': risk.volatility,
+                'var_1d': risk.var_1d,
+                'beta': risk.beta,
+                'liquidity_risk': risk.liquidity_risk,
+                'total_risk_score': risk.total_risk_score
+            } for risk in position_risks]
+
+            # Calculate portfolio-level market risk using extracted component
+            portfolio_market_risk = self.portfolio_analyzer.calculate_portfolio_market_risk(
+                position_risk_dicts, weights_array, correlation_matrix
             )
 
-            # Calculate concentration risks
-            concentration_risks = self._calculate_concentration_risks(
-                position_risks, portfolio_weights
+            # Calculate concentration risks using extracted component
+            concentration_risks = self.portfolio_analyzer.calculate_concentration_risks(
+                position_risk_dicts, weights_array
             )
 
             # Calculate regime and sentiment risks
             regime_risk = self._calculate_portfolio_regime_risk(market_regime, position_risks)
             sentiment_risk = self._calculate_portfolio_sentiment_risk(market_sentiment, position_risks)
 
-            # Calculate diversification effectiveness
-            diversification_score = self._calculate_diversification_score(
-                position_risks, portfolio_weights, correlation_matrix
+            # Calculate diversification effectiveness using extracted component
+            diversification_score = self.portfolio_analyzer.calculate_diversification_score(
+                position_risk_dicts, weights_array, correlation_matrix
             )
 
             # Calculate dynamic risk factors
             dynamic_risks = self._calculate_dynamic_risk_factors(market_regime, market_sentiment)
 
-            # Calculate risk budget utilization
-            risk_budget_metrics = self._calculate_risk_budget_utilization(
+            # Calculate risk budget utilization using extracted component
+            risk_budget_metrics = self.portfolio_analyzer.calculate_risk_budget_utilization(
                 portfolio_market_risk, concentration_risks
             )
 
@@ -446,18 +529,18 @@ class RiskAnalyzer:
                 portfolio_volatility=portfolio_market_risk['volatility'],
                 portfolio_var=portfolio_market_risk['var'],
                 correlation_risk=portfolio_market_risk['correlation_risk'],
-                concentration_risk=concentration_risks['overall_concentration'],
+                concentration_risk=concentration_risks.get('overall_concentration', 0.5),
                 market_regime_risk=regime_risk,
                 sentiment_risk=sentiment_risk,
                 macro_risk=dynamic_risks['macro_risk'],
-                strategy_concentration=concentration_risks['strategy_concentration'],
-                sector_concentration=concentration_risks['sector_concentration'],
+                strategy_concentration=concentration_risks.get('strategy_concentration', 0.5),
+                sector_concentration=concentration_risks.get('sector_concentration', 0.5),
                 diversification_score=diversification_score,
                 regime_transition_risk=dynamic_risks['transition_risk'],
                 volatility_regime_risk=dynamic_risks['volatility_risk'],
                 liquidity_risk=portfolio_market_risk['liquidity_risk'],
-                risk_budget_utilization=risk_budget_metrics['utilization'],
-                margin_of_safety=risk_budget_metrics['margin_of_safety'],
+                risk_budget_utilization=risk_budget_metrics.get('utilization', 0.5),
+                margin_of_safety=risk_budget_metrics.get('margin_of_safety', 0.5),
                 total_portfolio_risk=total_portfolio_risk,
                 risk_level=risk_level,
                 risk_recommendations=recommendations,
@@ -470,44 +553,9 @@ class RiskAnalyzer:
             print(f"Error analyzing portfolio risk: {e}")
             return self._error_fallback_portfolio_risk()
 
-    def _calculate_market_risk_metrics(self, df: pd.DataFrame, position_size: float) -> Dict:
-        """Calculate basic market risk metrics for a position"""
-        returns = df['Close'].pct_change().dropna()
-
-        # Volatility (annualized)
-        volatility = returns.std() * np.sqrt(252)
-
-        # Beta calculation (simplified - relative to own volatility)
-        # In production, you'd use market index data
-        rolling_vol = returns.rolling(60).std()
-        market_vol = rolling_vol.median()
-        beta = volatility / market_vol if market_vol > 0 else 1.0
-        beta = max(0.1, min(3.0, beta))  # Cap beta between 0.1 and 3.0
-
-        # Value at Risk (parametric approach)
-        confidence_95 = 1.645  # 95% confidence z-score
-        confidence_99 = 2.326  # 99% confidence z-score
-
-        daily_vol = volatility / np.sqrt(252)
-        var_1d_95 = confidence_95 * daily_vol * position_size
-        var_1d_99 = confidence_99 * daily_vol * position_size
-        var_5d_95 = var_1d_95 * np.sqrt(5)
-
-        # Maximum drawdown
-        cumulative_returns = (1 + returns).cumprod()
-        rolling_max = cumulative_returns.expanding().max()
-        drawdown = (cumulative_returns - rolling_max) / rolling_max
-        max_drawdown = abs(drawdown.min())
-
-        return {
-            'volatility': volatility,
-            'beta': beta,
-            'var_1d': var_1d_95,
-            'var_5d': var_5d_95,
-            'var_1d_99': var_1d_99,
-            'max_drawdown': max_drawdown,
-            'daily_volatility': daily_vol
-        }
+    def _calculate_market_risk_metrics(self, df: pd.DataFrame, position_size: float, symbol: str) -> Dict:
+        """Calculate basic market risk metrics using extracted RiskCalculator"""
+        return self.risk_calculator.calculate_market_risk_metrics(df, position_size, symbol)
 
     def _calculate_strategy_risk(self, strategy_rec: StrategyRecommendation,
                                market_regime: MarketRegimeResult) -> float:

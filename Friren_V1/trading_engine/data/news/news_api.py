@@ -33,14 +33,27 @@ class NewsAPIData(NewsDataSource):
     def __init__(self, api_key: Optional[str] = None):
         super().__init__("NewsAPI")
 
-        self.api_key = api_key or os.getenv('NEWS_API_KEY')
-        if not self.api_key:
-            raise ValueError("NewsAPI key not found. Set NEWS_API_KEY environment variable.")
+        # PRODUCTION: Use configuration manager for all NewsAPI settings
+        try:
+            from Friren_V1.infrastructure.configuration_manager import get_newsapi_config
+            newsapi_config = get_newsapi_config()
+        except ImportError:
+            raise ImportError("CRITICAL: Configuration manager required for NewsAPI. No hardcoded values allowed.")
 
-        self.base_url = "https://newsapi.org/v2"
+        self.api_key = api_key if api_key is not None else newsapi_config['api_key']
+        self.api_key_configured = bool(self.api_key and self.api_key.strip())
+        
+        if not self.api_key_configured:
+            self.logger.warning("PRODUCTION: NEWS_API_KEY not configured - NewsAPI features will be disabled")
+            self.api_key = None  # Ensure it's None for clear checks
+
+        self.base_url = newsapi_config['base_url']
+        self.max_daily_requests = newsapi_config['max_daily_requests']
+        self.request_timeout = newsapi_config['timeout_seconds']
+        self.rate_limit_reset_hours = newsapi_config['rate_limit_reset_hours']
+        
         self.session = requests.Session()
         self.daily_requests = 0
-        self.max_daily_requests = 500  # Free tier limit
         self.logger = logging.getLogger(f"{__name__}.NewsAPIData")
 
         # Rate limiting and error tracking
@@ -57,14 +70,19 @@ class NewsAPIData(NewsDataSource):
 
     def _is_api_available(self) -> bool:
         """Check if API is available and not rate limited"""
+        # First check if API key is configured
+        if not self.api_key_configured:
+            return False
+            
         if self.rate_limited:
             # Check if enough time has passed since rate limit was detected
             if self.rate_limit_reset_time and datetime.now() < self.rate_limit_reset_time:
                 return False
             else:
-                # Reset rate limit status after 1 hour
-                if self.rate_limit_detected_at and (datetime.now() - self.rate_limit_detected_at).total_seconds() > 3600:
-                    self.logger.info("Resetting NewsAPI rate limit status after 1 hour")
+                # Reset rate limit status after configured hours
+                reset_seconds = self.rate_limit_reset_hours * 3600
+                if self.rate_limit_detected_at and (datetime.now() - self.rate_limit_detected_at).total_seconds() > reset_seconds:
+                    self.logger.info(f"Resetting NewsAPI rate limit status after {self.rate_limit_reset_hours} hour(s)")
                     self.rate_limited = False
                     self.consecutive_failures = 0
                     return True
@@ -92,11 +110,11 @@ class NewsAPIData(NewsDataSource):
                         self.rate_limit_reset_time = datetime.fromtimestamp(reset_timestamp)
                         self.logger.info(f"Rate limit resets at: {self.rate_limit_reset_time}")
                     except ValueError:
-                        # Default to 1 hour if we can't parse reset time
-                        self.rate_limit_reset_time = datetime.now() + timedelta(hours=1)
+                        # Default to configured hours if we can't parse reset time
+                        self.rate_limit_reset_time = datetime.now() + timedelta(hours=self.rate_limit_reset_hours)
                 else:
-                    # Default to 1 hour reset time
-                    self.rate_limit_reset_time = datetime.now() + timedelta(hours=1)
+                    # Default to configured hours reset time
+                    self.rate_limit_reset_time = datetime.now() + timedelta(hours=self.rate_limit_reset_hours)
 
                 return True
 
@@ -126,7 +144,7 @@ class NewsAPIData(NewsDataSource):
             return None
 
         try:
-            response = self.session.get(url, params=params, timeout=30)
+            response = self.session.get(url, params=params, timeout=self.request_timeout)
 
             # Check for rate limiting or other errors
             if self._handle_api_error(response=response):
@@ -157,10 +175,17 @@ class NewsAPIData(NewsDataSource):
 
     def collect_news(self, hours_back: int = 24, max_articles: int = 50) -> List[NewsArticle]:
         """Collect general financial news from NewsAPI"""
+        if not self.api_key_configured:
+            self.logger.debug("NewsAPI key not configured - returning empty results")
+            return []
         return self._fetch_news_efficiently(hours_back, max_articles)
 
     def get_symbol_news(self, symbol: str, hours_back: int = 24, max_articles: int = 20) -> List[NewsArticle]:
         """Get news for a specific symbol - CRITICAL for decision engine"""
+        if not self.api_key_configured:
+            self.logger.debug(f"NewsAPI key not configured - returning empty results for {symbol}")
+            return []
+            
         try:
             self.logger.info(f"Fetching NewsAPI news for {symbol}")
 
@@ -187,6 +212,10 @@ class NewsAPIData(NewsDataSource):
                           max_articles_per_symbol: int = 10) -> Dict[str, List[NewsArticle]]:
         """Get news for multiple symbols (watchlist) - CRITICAL for decision engine"""
         watchlist_news = {symbol: [] for symbol in symbols}
+        
+        if not self.api_key_configured:
+            self.logger.debug(f"NewsAPI key not configured - returning empty results for {len(symbols)} symbols")
+            return watchlist_news
 
         try:
             self.logger.info(f"Collecting NewsAPI news for {len(symbols)} watchlist symbols")
@@ -226,6 +255,10 @@ class NewsAPIData(NewsDataSource):
 
     def test_connection(self) -> bool:
         """Test NewsAPI connection"""
+        if not self.api_key_configured:
+            self.logger.info("NewsAPI key not configured - connection test skipped")
+            return False
+            
         try:
             url = f"{self.base_url}/top-headlines"
             params = {
@@ -236,7 +269,7 @@ class NewsAPIData(NewsDataSource):
                 'apiKey': self.api_key
             }
 
-            response = self.session.get(url, params=params, timeout=10)
+            response = self.session.get(url, params=params, timeout=self.request_timeout)
 
             if response.status_code == 200:
                 data = response.json()

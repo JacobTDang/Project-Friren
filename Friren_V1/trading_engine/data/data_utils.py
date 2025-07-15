@@ -874,7 +874,7 @@ if __name__ == "__main__":
     fetcher = YahooFinancePriceData()
     sample_data = fetcher.extract_data('AAPL', period='6mo')
 
-    if not sample_data.empty:
+    if sample_data is not None and len(sample_data) > 0:
         # Initialize tools
         tools = StockDataTools()
 

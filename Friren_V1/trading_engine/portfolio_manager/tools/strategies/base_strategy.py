@@ -87,7 +87,12 @@ class BaseStrategy(ABC):
         Returns:
             True if data is valid
         """
-        if df.empty:
+        # FIXED: Handle both DataFrame and dict data types safely
+        if hasattr(df, 'empty') and df.empty:
+            return False
+        elif isinstance(df, dict) and (not df or len(df) == 0):
+            return False
+        elif df is None:
             return False
 
         missing_cols = [col for col in required_columns if col not in df.columns]

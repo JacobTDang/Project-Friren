@@ -59,9 +59,6 @@ class TransactionHistory(models.Model):
         return f"{self.symbol}: {self.quantity} @ {self.price}"
 
 class CurrentHoldings(models.Model):
-    class Meta:
-        app_label = 'database'
-        
     """
     Store the current position that are open
     """
@@ -85,6 +82,60 @@ class CurrentHoldings(models.Model):
     last_transaction_date = models.DateTimeField()
     number_of_transactions = models.IntegerField(default=0)
 
+    # Strategy Assignment (New fields for three-scenario system)
+    current_strategy = models.CharField(max_length=50, null=True, blank=True, help_text="Currently assigned trading strategy")
+    assignment_scenario = models.CharField(
+        max_length=30, 
+        choices=[
+            ('user_buy_hold', 'User Buy & Hold'),
+            ('decision_engine_choice', 'Decision Engine Algorithmic'),
+            ('strategy_reevaluation', 'Position Health Monitor Reassignment')
+        ],
+        null=True, 
+        blank=True,
+        help_text="How this strategy was assigned"
+    )
+    assignment_reason = models.CharField(
+        max_length=30,
+        choices=[
+            ('new_position', 'New Position'),
+            ('regime_change', 'Market Regime Change'),
+            ('poor_performance', 'Poor Performance'),
+            ('diversification', 'Portfolio Diversification'),
+            ('manual_override', 'Manual Override'),
+            ('rebalance', 'Periodic Rebalance'),
+            ('user_buy_hold', 'User Buy & Hold'),
+            ('decision_engine_choice', 'Decision Engine Choice'),
+            ('strategy_reevaluation', 'Strategy Reevaluation')
+        ],
+        null=True,
+        blank=True,
+        help_text="Reason for current strategy assignment"
+    )
+    strategy_confidence = models.DecimalField(
+        max_digits=5, 
+        decimal_places=2, 
+        null=True, 
+        blank=True,
+        help_text="Confidence score for current strategy assignment (0-100)"
+    )
+    strategy_assigned_at = models.DateTimeField(
+        null=True, 
+        blank=True,
+        help_text="When current strategy was assigned"
+    )
+    previous_strategy = models.CharField(
+        max_length=50, 
+        null=True, 
+        blank=True,
+        help_text="Previous strategy before reassignment"
+    )
+    assignment_metadata = models.JSONField(
+        null=True, 
+        blank=True,
+        help_text="Additional metadata about strategy assignment"
+    )
+
     # Status
     is_active = models.BooleanField(default=True)  # False when net_quantity = 0
 
@@ -93,11 +144,15 @@ class CurrentHoldings(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
+        app_label = 'database'
         db_table = 'current_holdings'
         indexes = [
             models.Index(fields=['symbol']),
             models.Index(fields=['is_active']),
             models.Index(fields=['last_transaction_date']),
+            models.Index(fields=['current_strategy']),
+            models.Index(fields=['assignment_scenario']),
+            models.Index(fields=['strategy_assigned_at']),
         ]
 
     def __str__(self):
@@ -111,10 +166,49 @@ class CurrentHoldings(models.Model):
             return "SHORT"
         else:
             return "NEUTRAL"
+    
+    def assign_strategy(self, strategy_name, scenario, reason, confidence=None, metadata=None):
+        """Update strategy assignment for this holding"""
+        from django.utils import timezone
+        
+        # Store previous strategy for history
+        self.previous_strategy = self.current_strategy
+        
+        # Update current assignment
+        self.current_strategy = strategy_name
+        self.assignment_scenario = scenario
+        self.assignment_reason = reason
+        self.strategy_confidence = confidence
+        self.strategy_assigned_at = timezone.now()
+        self.assignment_metadata = metadata or {}
+        
+        self.save(update_fields=[
+            'current_strategy', 'assignment_scenario', 'assignment_reason',
+            'strategy_confidence', 'strategy_assigned_at', 'previous_strategy',
+            'assignment_metadata'
+        ])
+    
+    def is_user_controlled(self):
+        """Check if this is a user buy-hold position"""
+        return self.assignment_scenario == 'user_buy_hold'
+    
+    def is_algorithmic(self):
+        """Check if this is algorithmically managed"""
+        return self.assignment_scenario in ['decision_engine_choice', 'strategy_reevaluation']
+    
+    def days_since_strategy_assigned(self):
+        """Calculate days since strategy was assigned"""
+        if self.strategy_assigned_at:
+            from django.utils import timezone
+            return (timezone.now() - self.strategy_assigned_at).days
+        return None
+    
+    def needs_strategy_reevaluation(self, threshold_days=30):
+        """Check if strategy needs reevaluation based on time"""
+        days_since = self.days_since_strategy_assigned()
+        return days_since is not None and days_since >= threshold_days
 
 class MLFeatures(models.Model):
-    class Meta:
-        app_label = 'database'
     """
     Store ML features and market data at decision time
     Used for training and prediction tracking
@@ -176,6 +270,7 @@ class MLFeatures(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
+        app_label = 'database'
         db_table = 'ml_features'
         indexes = [
             models.Index(fields=['symbol', 'timestamp']),
@@ -188,8 +283,6 @@ class MLFeatures(models.Model):
         return f"{self.symbol} {self.strategy_used} @ {self.timestamp}"
 
 class TradingWatchlist(models.Model):
-    class Meta:
-        app_label = 'database'
     """
     Comprehensive watchlist for stocks we're monitoring
     Includes both current holdings and potential opportunities
@@ -265,6 +358,7 @@ class TradingWatchlist(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
+        app_label = 'database'
         db_table = 'trading_watchlist'
         indexes = [
             models.Index(fields=['symbol']),

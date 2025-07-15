@@ -122,9 +122,10 @@ class MemoryMonitor:
         self._monitor_thread = None
         self._is_monitoring = False
 
-        # Custom counters for tracking specific objects
+        # Custom counters for tracking specific objects - LAZY INITIALIZATION
         self.custom_counters = {}
         self._counter_callbacks = {}
+        self._weakref_tracking_enabled = False  # Flag to control weakref usage
 
         # Redis for sharing memory state
         self.redis_manager = None
@@ -155,6 +156,9 @@ class MemoryMonitor:
             return
 
         try:
+            # ENABLE weakref tracking only after process is fully spawned
+            self._weakref_tracking_enabled = True
+            
             # Initialize Redis connection
             self.redis_manager = get_trading_redis_manager()
 

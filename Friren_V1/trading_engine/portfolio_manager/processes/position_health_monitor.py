@@ -35,6 +35,9 @@ from ..analytics.position_health_analyzer import (
     OptimizedPositionHealthAnalyzer, ActiveStrategy, StrategyStatus, PositionHealthResult
 )
 
+# Import OutputCoordinator for standardized position health output
+from Friren_V1.trading_engine.output.output_coordinator import OutputCoordinator
+
 # NEW: Strategy Management Integration (Phase 2-3)
 from dataclasses import dataclass, field
 from enum import Enum
@@ -247,8 +250,9 @@ class PositionHealthMonitor(RedisBaseProcess):
     def __init__(self, process_id: str = "position_health_monitor",
                  check_interval: int = 10,
                  risk_threshold: float = 0.05,
-                 symbols: list = None):
-        super().__init__(process_id)
+                 symbols: list = None,
+                 auto_start: bool = True):
+        super().__init__(process_id, auto_start=auto_start)
 
         self.check_interval = check_interval
         self.risk_threshold = risk_threshold
@@ -273,6 +277,12 @@ class PositionHealthMonitor(RedisBaseProcess):
         self.max_reassessment_requests_per_day = 3  # Daily limit per symbol
         self.strategy_transition_signals = {}  # {symbol: List[HealthBasedSignal]}
         self.performance_history = {}  # {symbol: List[performance_snapshots]}
+        
+        # OutputCoordinator for standardized output (initialized in _initialize)
+        self.output_coordinator = None
+        
+        # CRITICAL FIX: Initialize shared_state to prevent AttributeError
+        self.shared_state = None
 
         self.logger.info(f"PositionHealthMonitor configured - interval: {check_interval}s with strategy management")
 
@@ -315,12 +325,41 @@ class PositionHealthMonitor(RedisBaseProcess):
             except ImportError as e:
                 self.logger.error(f"TradingDBManager not available: {e}")
                 self.trading_db_manager = None
+            
+            # CRITICAL FIX: Initialize shared_state with Redis manager
+            try:
+                if self.redis_manager:
+                    self.shared_state = self.redis_manager
+                    self.logger.info("Shared state initialized with Redis manager")
+                else:
+                    self.logger.warning("Redis manager not available for shared state")
+            except Exception as e:
+                self.logger.error(f"Failed to initialize shared state: {e}")
+                self.shared_state = None
 
             # ENHANCED: Initialize Strategy Assignment Engine for intelligent strategy selection
             try:
                 from ..tools.strategy_assignment_engine import StrategyAssignmentEngine
+                # CRITICAL: NO HARDCODED SYMBOLS - Only use actual portfolio symbols
+                portfolio_symbols = getattr(self, 'symbols', [])
+                if not portfolio_symbols:
+                    # If no symbols provided, get them from the actual portfolio holdings
+                    try:
+                        from ..tools.db_manager import DatabaseManager
+                        db_manager = DatabaseManager()
+                        portfolio_symbols = db_manager.get_active_portfolio_symbols()
+                        self.logger.info(f"Retrieved {len(portfolio_symbols)} symbols from active portfolio")
+                    except Exception as e:
+                        self.logger.error(f"Failed to retrieve portfolio symbols: {e}")
+                        portfolio_symbols = []
+                
+                if not portfolio_symbols:
+                    self.logger.warning("No portfolio symbols available - StrategyAssignmentEngine will be disabled")
+                    self.strategy_assigner = None
+                    return
+                
                 self.strategy_assigner = StrategyAssignmentEngine(
-                    symbols=getattr(self, 'symbols', ['AAPL']),
+                    symbols=portfolio_symbols,
                     risk_tolerance="moderate"  # Could be configured per user
                 )
                 self.logger.info("StrategyAssignmentEngine initialized - intelligent strategy assignment enabled")
@@ -338,6 +377,18 @@ class PositionHealthMonitor(RedisBaseProcess):
 
             # NEW: Initialize strategy management queue message handlers
             self._setup_strategy_message_handlers()
+            
+            # Initialize OutputCoordinator for standardized position health output
+            try:
+                self.output_coordinator = OutputCoordinator(
+                    redis_client=self.redis_manager.redis_client if self.redis_manager else None,
+                    enable_terminal=True,
+                    enable_logging=True
+                )
+                self.logger.info("OutputCoordinator initialized for position health output")
+            except Exception as e:
+                self.logger.warning(f"OutputCoordinator initialization failed: {e}")
+                self.output_coordinator = None
 
             self.state = ProcessState.RUNNING
             self.logger.info("Enhanced PositionHealthMonitor initialization complete")
@@ -354,7 +405,8 @@ class PositionHealthMonitor(RedisBaseProcess):
         self.message_handlers = {
             "STRATEGY_ASSIGNMENT": self._handle_strategy_assignment,
             "STRATEGY_TRANSITION": self._handle_strategy_transition,
-            "MONITORING_STRATEGY_UPDATE": self._handle_monitoring_strategy_update
+            "MONITORING_STRATEGY_UPDATE": self._handle_monitoring_strategy_update,
+            "STRATEGY_REASSIGNMENT_REQUEST": self._handle_strategy_reassignment_request
         }
         self.logger.info("Strategy management message handlers setup complete")
 
@@ -436,9 +488,15 @@ class PositionHealthMonitor(RedisBaseProcess):
                     current_time = datetime.now()
                     if hasattr(strategy_info, 'entry_time'):
                         time_in_position = current_time - strategy_info.entry_time
-                        print_position_monitor(f"Monitoring {symbol}: {shares} shares, {strategy_type} active ({time_in_position.days}d)")
+                        business_output = f"Monitoring {symbol}: {shares} shares, {strategy_type} active ({time_in_position.days}d)"
+                        print_position_monitor(f"[POSITION MONITOR] {business_output}")
+                        # DIRECT TERMINAL OUTPUT
+                        print(f"\033[91m[POSITION_HEALTH_MONITOR] {business_output}\033[0m")
                     else:
-                        print_position_monitor(f"Monitoring {symbol}: {shares} shares, {strategy_type} active")
+                        business_output = f"Monitoring {symbol}: {shares} shares, {strategy_type} active"
+                        print_position_monitor(f"[POSITION MONITOR] {business_output}")
+                        # DIRECT TERMINAL OUTPUT
+                        print(f"\033[91m[POSITION_HEALTH_MONITOR] {business_output}\033[0m")
                     
                 print_position_monitor(f"Position health monitor analyzing {len(active_symbols)} positions...")
             else:
@@ -1138,6 +1196,89 @@ class PositionHealthMonitor(RedisBaseProcess):
         except Exception as e:
             self.logger.error(f"Error handling monitoring strategy update: {e}")
 
+    def _handle_strategy_reassignment_request(self, message: ProcessMessage):
+        """
+        Handle strategy reassignment requests from Decision Engine
+        
+        CRITICAL FIX: Process automatic regime-based reassignment requests
+        Triggered when market regime changes and strategies need to adapt
+        """
+        try:
+            data = message.data
+            symbol = data.get('symbol')
+            current_strategy = data.get('current_strategy')
+            reassignment_reason = data.get('reassignment_reason')
+            new_regime = data.get('new_regime')
+            trigger_source = data.get('trigger_source')
+            
+            if not symbol or not current_strategy:
+                self.logger.warning("Invalid strategy reassignment request: missing required fields")
+                return
+            
+            self.logger.info(f"REGIME REASSIGNMENT: Processing reassignment request for {symbol} "
+                           f"(current: {current_strategy}, reason: {reassignment_reason}, regime: {new_regime})")
+            
+            # Check if symbol is being monitored
+            if symbol not in self.strategy_monitoring_states:
+                self.logger.warning(f"REGIME REASSIGNMENT: {symbol} not in monitoring states - adding to monitoring")
+                # Add to monitoring if not present
+                self._add_symbol_to_monitoring(symbol, current_strategy)
+            
+            # Create performance data context for reassignment
+            monitoring_state = self.strategy_monitoring_states.get(symbol)
+            performance_data = {
+                'current_health_status': monitoring_state.health_status.value if monitoring_state else 'UNKNOWN',
+                'performance_score': monitoring_state.performance_score if monitoring_state else 0.0,
+                'consecutive_poor_checks': monitoring_state.consecutive_poor_checks if monitoring_state else 0,
+                'time_in_strategy': (datetime.now() - monitoring_state.assigned_time).total_seconds() / 3600 if monitoring_state else 0,
+                'reassignment_trigger': trigger_source
+            }
+            
+            # Create health analysis context
+            health_analysis = {
+                'regime_change': True,
+                'new_regime': new_regime,
+                'reassignment_reason': reassignment_reason,
+                'automatic_trigger': True,
+                'urgency': 'high' if reassignment_reason == 'regime_change' else 'medium'
+            }
+            
+            # Trigger strategy reassignment through existing system
+            try:
+                # Use the strategy assignment engine to get new strategy
+                if hasattr(self, 'strategy_assignment_engine') and self.strategy_assignment_engine:
+                    new_assignment = self.strategy_assignment_engine.reassign_strategy_from_health_monitor(
+                        symbol=symbol,
+                        current_strategy=current_strategy,
+                        performance_data=performance_data,
+                        health_analysis=health_analysis
+                    )
+                    
+                    if new_assignment:
+                        self.logger.info(f"REGIME REASSIGNMENT: New strategy assigned for {symbol}: "
+                                       f"{current_strategy} → {new_assignment.recommended_strategy}")
+                        print(f"[POSITION HEALTH] Regime-based reassignment: {symbol} | "
+                              f"{current_strategy} → {new_assignment.recommended_strategy} | "
+                              f"Reason: {new_regime} regime change")
+                        
+                        # Update monitoring state with new strategy
+                        if monitoring_state:
+                            monitoring_state.strategy_name = new_assignment.recommended_strategy
+                            monitoring_state.assigned_time = datetime.now()
+                            monitoring_state.health_status = StrategyHealthStatus.NEUTRAL
+                            monitoring_state.consecutive_poor_checks = 0
+                            monitoring_state.transition_signals_detected.clear()
+                    else:
+                        self.logger.warning(f"REGIME REASSIGNMENT: Failed to get new strategy assignment for {symbol}")
+                else:
+                    self.logger.error("REGIME REASSIGNMENT: Strategy assignment engine not available")
+                    
+            except Exception as assignment_error:
+                self.logger.error(f"REGIME REASSIGNMENT: Error during strategy reassignment for {symbol}: {assignment_error}")
+            
+        except Exception as e:
+            self.logger.error(f"Error handling strategy reassignment request: {e}")
+
     def _prepare_strategy_contexts(self) -> Dict[str, Dict]:
         """Prepare strategy contexts for enhanced analysis"""
         try:
@@ -1412,7 +1553,7 @@ class PositionHealthMonitor(RedisBaseProcess):
     def _send_reassessment_request(self, symbol: str, monitoring_state: StrategyMonitoringState) -> bool:
         """Send strategy reassessment request to decision engine"""
         try:
-            if not self.priority_queue:
+            if not self.redis_manager:
                 return False
 
             # Get performance data
@@ -1694,24 +1835,32 @@ class PositionHealthMonitor(RedisBaseProcess):
                     
                     print_position_monitor(f"Position Monitor: {symbol} health: {health_score:.1%}, risk: {risk_level}, duration: {duration.days}d{position_info}")
                     
-                    # BUSINESS LOGIC OUTPUT: Detailed position health monitoring
+                    # BUSINESS LOGIC OUTPUT: Standardized position health monitoring via OutputCoordinator
                     try:
-                        from terminal_color_system import print_position_health
                         shares = strategy_data.get('position_size', 0) if hasattr(strategy_data, 'get') else getattr(strategy_data, 'position_size', 0)
                         avg_cost = strategy_data.get('avg_cost', 0) if hasattr(strategy_data, 'get') else getattr(strategy_data, 'avg_cost', 0)
                         current_value = shares * avg_cost * (1 + (health_score - 0.5) * 0.1)  # Estimate current value from health
                         pnl_pct = (health_score - 0.5) * 20  # Convert health to approximate PnL%
                         risk_status = risk_level.upper() if risk_level != 'unknown' else 'LOW'
                         action = "HOLD" if abs(pnl_pct) < 5 else ("MONITOR" if abs(pnl_pct) < 10 else "REVIEW")
-                        print_position_health(f"{symbol}: {shares} shares | value: ${current_value:,.2f} | PnL: {pnl_pct:+.2f}% | risk: {risk_status} | action: {action}")
-                    except ImportError:
-                        shares = strategy_data.get('position_size', 0) if hasattr(strategy_data, 'get') else getattr(strategy_data, 'position_size', 0)
-                        avg_cost = strategy_data.get('avg_cost', 0) if hasattr(strategy_data, 'get') else getattr(strategy_data, 'avg_cost', 0)
-                        current_value = shares * avg_cost * (1 + (health_score - 0.5) * 0.1)  # Estimate current value from health
-                        pnl_pct = (health_score - 0.5) * 20  # Convert health to approximate PnL%
-                        risk_status = risk_level.upper() if risk_level != 'unknown' else 'LOW'
-                        action = "HOLD" if abs(pnl_pct) < 5 else ("MONITOR" if abs(pnl_pct) < 10 else "REVIEW")
-                        print(f"[POSITION HEALTH] {symbol}: {shares} shares | value: ${current_value:,.2f} | PnL: {pnl_pct:+.2f}% | risk: {risk_status} | action: {action}")
+                        
+                        # Use OutputCoordinator for standardized position health format
+                        if self.output_coordinator:
+                            self.output_coordinator.output_position_health(
+                                symbol=symbol,
+                                shares=int(shares),
+                                position_value=current_value,
+                                pnl_pct=pnl_pct,
+                                risk_level=risk_status,
+                                action=action
+                            )
+                        else:
+                            # Fallback to direct print with exact target format
+                            print(f"[POSITION HEALTH] {symbol}: {int(shares)} shares | value: ${current_value:,.2f} | PnL: {pnl_pct:+.2f}% | risk: {risk_status} | action: {action}")
+                    except Exception as e:
+                        self.logger.warning(f"Error outputting position health for {symbol}: {e}")
+                        # Minimal fallback output
+                        print(f"[POSITION HEALTH] {symbol}: monitoring position")
                     
                     # BUSINESS LOGIC OUTPUT: Detailed strategy monitoring 
                     try:

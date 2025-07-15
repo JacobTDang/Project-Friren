@@ -31,6 +31,14 @@ from Friren_V1.multiprocess_infrastructure.trading_redis_manager import (
     get_trading_redis_manager, create_process_message, MessagePriority, ProcessMessage
 )
 
+# Import extracted modules
+from .signal_processor import SignalProcessor, AggregatedSignal
+from .execution_coordinator import ExecutionCoordinator
+from .parameter_adapter import ParameterAdapter, create_adaptation_metrics, get_system_metrics
+
+# Import standardized output formatting system
+from Friren_V1.trading_engine.output.output_coordinator import OutputCoordinator
+
 # Import color system for terminal output with safe fallback
 try:
     # Add project root to path for color system import
@@ -53,7 +61,12 @@ except ImportError as e:
 def send_colored_business_output(process_id, message, output_type):
     """Send colored business output with Redis communication fallback"""
     try:
-        # Method 1: Try direct main terminal bridge import
+        # Method 1: Try direct main terminal bridge import with proper path resolution
+        import sys
+        import os
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
+        if project_root not in sys.path:
+            sys.path.append(project_root)
         from main_terminal_bridge import send_colored_business_output as bridge_output
         bridge_output(process_id, message, output_type)
     except ImportError:
@@ -285,6 +298,9 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
             "sentiment": SignalWeight.SENTIMENT.value,
             "risk": SignalWeight.RISK.value
         }
+        
+        # Track when we last checked for market regime updates
+        self.last_regime_check = datetime.now() - timedelta(minutes=10)  # Force initial check
 
         # MEMORY OPTIMIZED: Reduced metrics and tracking buffers
         self.metrics = DecisionMetrics()
@@ -308,6 +324,7 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
         self.parameter_adapter = None
         self.execution_orchestrator = None
         self.conflict_resolver = None
+        self.output_coordinator = None
 
         # NEW: Strategy Management State (from implementation_rules.xml)
         self.active_monitoring_strategies: Dict[str, MonitoringStrategyStatus] = {}
@@ -358,13 +375,36 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
             self.logger.info("LIFECYCLE_DEBUG: ConflictResolver set for lazy loading...")
             # MEMORY OPTIMIZATION: Lazy load ConflictResolver only when needed
             self.conflict_resolver = None
-            self._conflict_resolver_path = "models/demo_xgb_model.json"
+            # PRODUCTION: Get XGBoost model path from configuration - NO HARDCODED PATHS
+            try:
+                from Friren_V1.infrastructure.configuration_manager import get_config
+                self._conflict_resolver_path = get_config('XGBOOST_MODEL_PATH')
+                if not self._conflict_resolver_path:
+                    raise ValueError("XGBOOST_MODEL_PATH not configured")
+            except Exception as e:
+                raise RuntimeError(f"PRODUCTION: XGBoost model path configuration required: {e}")
             self.logger.info("LIFECYCLE_DEBUG: ConflictResolver configured for lazy loading.")
+
+            self.logger.info("LIFECYCLE_DEBUG: Initializing OutputCoordinator...")
+            self.output_coordinator = OutputCoordinator(
+                redis_client=self.redis_manager.redis_client if self.redis_manager else None,
+                enable_terminal=True,
+                enable_logging=True
+            )
+            self.logger.info("LIFECYCLE_DEBUG: OutputCoordinator initialized.")
 
             self.enhanced_init_status = {'done': True, 'error': None}
 
             # Initialize basic performance tracking
             self.performance_tracker = PerformanceTracker()
+            
+            # Mark event-driven process as healthy immediately after initialization
+            if hasattr(self, 'state'):
+                from Friren_V1.multiprocess_infrastructure.redis_base_process import ProcessState
+                self.state = ProcessState.RUNNING
+                if hasattr(self, '_update_health'):
+                    self._update_health()
+                self.logger.info("LIFECYCLE_DEBUG: Event-driven decision_engine marked as healthy")
             
         except Exception as e:
             self.logger.error(f"LIFECYCLE_ERROR: Failed to initialize decision_engine components: {e}")
@@ -391,7 +431,15 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
         self.risk_manager = SolidRiskManager()
         self.parameter_adapter = ParameterAdapter(adaptation_level=AdaptationLevel.MODERATE)
         self.execution_orchestrator = ExecutionOrchestrator()
-        self.conflict_resolver = ConflictResolver(model_path="models/demo_xgb_model.json")
+        # PRODUCTION: Get XGBoost model path from configuration - NO HARDCODED PATHS
+        try:
+            from Friren_V1.infrastructure.configuration_manager import get_config
+            model_path = get_config('XGBOOST_MODEL_PATH')
+            if not model_path:
+                raise ValueError("XGBOOST_MODEL_PATH not configured")
+            self.conflict_resolver = ConflictResolver(model_path=model_path)
+        except Exception as e:
+            raise RuntimeError(f"PRODUCTION: XGBoost model path configuration required: {e}")
         self.enhanced_init_status = {'done': True, 'error': None}
 
     def _initialize_tool_connections(self):
@@ -405,6 +453,44 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
         # self.db_manager = TradingDBManager()
 
         self.logger.info("Tool connections established")
+
+    def _update_market_regime_from_redis(self):
+        """Periodically fetch market regime data from Redis shared state"""
+        try:
+            if self.redis_manager:
+                # Fetch market regime data from Redis (matching namespace used by market regime detector)
+                regime_data = self.redis_manager.get_shared_state('market_regime', namespace='market')
+                
+                if regime_data and isinstance(regime_data, dict):
+                    current_regime = regime_data.get('regime')
+                    confidence = regime_data.get('confidence', 0.0)
+                    last_update = regime_data.get('last_update')
+                    
+                    if current_regime and current_regime != 'UNKNOWN':
+                        old_regime = self.regime_state.get('current')
+                        
+                        # Update regime state
+                        self.regime_state = {
+                            'current': current_regime,
+                            'confidence': confidence,
+                            'updated': datetime.now(),
+                            'volatility': regime_data.get('volatility_regime', 'NORMAL'),
+                            'trend': regime_data.get('trend', 'SIDEWAYS')
+                        }
+                        
+                        if old_regime != current_regime:
+                            self.logger.info(f"Market regime updated from Redis: {old_regime} -> {current_regime} (confidence: {confidence:.1f}%)")
+                        
+                        return True
+                    else:
+                        self.logger.debug(f"Market regime data invalid or UNKNOWN: {regime_data}")
+                else:
+                    self.logger.debug("No market regime data available in Redis")
+                    
+        except Exception as e:
+            self.logger.error(f"Error updating market regime from Redis: {e}")
+            
+        return False
 
     def _safe_log(self, level: str, message: str):
         """Safe logging method for decision engine"""
@@ -425,6 +511,16 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
 
             # Reset daily execution count if new day
             self._reset_daily_counters()
+            
+            # FIXED: Periodically check for market regime updates from Redis (every 5 minutes)
+            # Defensive initialization for last_regime_check
+            if not hasattr(self, 'last_regime_check'):
+                self.last_regime_check = datetime.now() - timedelta(minutes=10)
+            
+            if (datetime.now() - self.last_regime_check).total_seconds() > 300:  # 5 minutes
+                if self._update_market_regime_from_redis():
+                    self.logger.debug("Market regime updated from Redis")
+                self.last_regime_check = datetime.now()
 
             # FIXED: Only process if there are actual messages waiting
             message = self._get_next_message(timeout=0.1)  # Slightly longer timeout
@@ -494,8 +590,12 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
                 self._handle_health_alert(message)
             elif message.message_type == "REGIME_CHANGE":
                 self._handle_regime_change(message)
+            elif message.message_type == "REGIME_UPDATE":
+                self._handle_regime_update(message)
             elif message.message_type == "TRADING_RECOMMENDATION":
                 self._handle_trading_recommendation(message)
+            elif message.message_type == "REASSESSMENT_REQUEST":
+                self._handle_reassessment_request(message)
 
             # NEW: Strategy Management Message Handling (from implementation_rules.xml)
             elif hasattr(MessageType, 'STRATEGY_REASSESSMENT_REQUEST') and message.message_type == MessageType.STRATEGY_REASSESSMENT_REQUEST:
@@ -668,7 +768,7 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
             self.logger.warning(f" Risk alert for {symbol}: {payload.get('message', '')}")
 
     def _handle_regime_change(self, message: ProcessMessage):
-        """Enhanced regime change handling"""
+        """Enhanced regime change handling - Legacy support"""
         payload = message.payload
         new_regime = payload.get('regime_type')
         confidence = payload.get('confidence', 0.5)
@@ -684,6 +784,178 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
             }
 
             self.logger.info(f" Regime change: {old_regime} → {new_regime} (confidence: {confidence:.2f})")
+    
+    def _handle_regime_update(self, message: ProcessMessage):
+        """
+        Handle real-time regime updates from Market Regime Detector
+        
+        CRITICAL FIX: Automatic regime-based strategy reassignment
+        When market regime changes, automatically reassign strategies for current positions
+        """
+        try:
+            data = message.data
+            new_regime = data.get('new_regime')
+            previous_regime = data.get('previous_regime', 'UNKNOWN')
+            confidence = data.get('confidence', 0.0)
+            trend = data.get('trend', 'UNKNOWN')
+            market_stress = data.get('market_stress_level', 50.0)
+            
+            if new_regime and new_regime != previous_regime:
+                # Update internal regime state
+                old_regime = self.regime_state.get('current', 'UNKNOWN')
+                self.regime_state = {
+                    'current': new_regime,
+                    'confidence': confidence,
+                    'updated': datetime.now(),
+                    'volatility': data.get('volatility_regime', 'UNKNOWN'),
+                    'trend': trend,
+                    'market_stress': market_stress
+                }
+                
+                self.logger.info(f"REGIME UPDATE: Market regime changed from {previous_regime} to {new_regime} "
+                               f"(confidence: {confidence:.1f}%, stress: {market_stress:.1f})")
+                print(f"[DECISION ENGINE] Regime Update: {previous_regime} → {new_regime} | "
+                      f"Confidence: {confidence:.1f}% | Initiating strategy reassignment...")
+                
+                # CRITICAL: Trigger automatic strategy reassignments for all current positions
+                self._trigger_regime_based_reassignments(new_regime, previous_regime, data)
+                
+        except Exception as e:
+            self.logger.error(f"Error handling regime update: {e}")
+    
+    def _trigger_regime_based_reassignments(self, new_regime: str, previous_regime: str, regime_data: Dict[str, Any]):
+        """
+        Trigger automatic strategy reassignments based on regime change
+        
+        CRITICAL FIX: Proactive strategy adaptation to market regime changes
+        Ensures all positions use optimal strategies for new market conditions
+        """
+        try:
+            # Get current active positions from database
+            if hasattr(self, 'db_manager') and self.db_manager:
+                current_holdings = self.db_manager.get_current_holdings()
+                if not current_holdings:
+                    self.logger.info("REGIME REASSIGNMENT: No current holdings to reassign")
+                    return
+                
+                reassignment_count = 0
+                for holding in current_holdings:
+                    try:
+                        symbol = holding.get('symbol')
+                        current_strategy = holding.get('assigned_strategy', 'none')
+                        
+                        if symbol and current_strategy != 'none':
+                            # Check if current strategy is still optimal for new regime
+                            reassignment_needed = self._assess_regime_reassignment_need(
+                                symbol, current_strategy, new_regime, regime_data
+                            )
+                            
+                            if reassignment_needed:
+                                # Send reassignment request to strategy assignment system
+                                self._request_strategy_reassignment(symbol, current_strategy, 
+                                                                  new_regime, "regime_change", regime_data)
+                                reassignment_count += 1
+                                
+                    except Exception as e:
+                        self.logger.error(f"Error processing reassignment for {symbol}: {e}")
+                
+                self.logger.info(f"REGIME REASSIGNMENT: Initiated {reassignment_count} regime-based strategy reassignments")
+                if reassignment_count > 0:
+                    print(f"[DECISION ENGINE] Regime-based reassignment: {reassignment_count} positions queued for strategy review")
+                    
+            else:
+                self.logger.warning("REGIME REASSIGNMENT: Database manager not available for position lookup")
+                
+        except Exception as e:
+            self.logger.error(f"Error triggering regime-based reassignments: {e}")
+    
+    def _assess_regime_reassignment_need(self, symbol: str, current_strategy: str, 
+                                       new_regime: str, regime_data: Dict[str, Any]) -> bool:
+        """
+        Assess if a position needs strategy reassignment based on regime change
+        
+        Args:
+            symbol: Stock symbol
+            current_strategy: Currently assigned strategy
+            new_regime: New market regime
+            regime_data: Full regime change data
+            
+        Returns:
+            True if reassignment is needed
+        """
+        try:
+            # Define regime-incompatible strategy combinations
+            regime_strategy_conflicts = {
+                'BEAR_MARKET': ['momentum', 'pca_momentum', 'jump_momentum'],
+                'BULL_MARKET': ['mean_reversion', 'pca_mean_reversion', 'defensive'],
+                'HIGH_VOLATILITY': ['momentum', 'trend_following'],
+                'SIDEWAYS': ['momentum', 'jump_momentum', 'volatility_breakout']
+            }
+            
+            # Check if current strategy conflicts with new regime
+            conflicting_strategies = regime_strategy_conflicts.get(new_regime, [])
+            if current_strategy in conflicting_strategies:
+                self.logger.info(f"REASSIGNMENT NEEDED: {symbol} strategy {current_strategy} conflicts with {new_regime}")
+                return True
+            
+            # Check market stress level for high-risk strategies
+            market_stress = regime_data.get('market_stress_level', 50.0)
+            if market_stress > 75 and current_strategy in ['volatility_breakout', 'jump_momentum']:
+                self.logger.info(f"REASSIGNMENT NEEDED: {symbol} high-risk strategy {current_strategy} in high stress market")
+                return True
+                
+            # Check trend reversal impact
+            trend = regime_data.get('trend', 'UNKNOWN')
+            if trend == 'DOWNTREND' and current_strategy in ['momentum', 'pca_momentum']:
+                self.logger.info(f"REASSIGNMENT NEEDED: {symbol} momentum strategy {current_strategy} in downtrend")
+                return True
+                
+            return False
+            
+        except Exception as e:
+            self.logger.error(f"Error assessing reassignment need for {symbol}: {e}")
+            return False
+    
+    def _request_strategy_reassignment(self, symbol: str, current_strategy: str, 
+                                     new_regime: str, reason: str, regime_data: Dict[str, Any]):
+        """
+        Request strategy reassignment for a specific position
+        
+        Args:
+            symbol: Stock symbol to reassign
+            current_strategy: Current strategy being used
+            new_regime: New market regime triggering reassignment
+            reason: Reason for reassignment
+            regime_data: Full regime data for context
+        """
+        try:
+            # Create reassignment request message
+            reassignment_message = create_process_message(
+                sender_id="market_decision_engine",
+                recipient="position_health_monitor",
+                message_type="STRATEGY_REASSIGNMENT_REQUEST",
+                data={
+                    'symbol': symbol,
+                    'current_strategy': current_strategy,
+                    'reassignment_reason': reason,
+                    'new_regime': new_regime,
+                    'regime_data': regime_data,
+                    'trigger_source': 'regime_change',
+                    'priority': 'high',
+                    'timestamp': datetime.now().isoformat()
+                },
+                priority=MessagePriority.HIGH
+            )
+            
+            # Send reassignment request
+            success = self.redis_manager.send_process_message(reassignment_message)
+            if success:
+                self.logger.info(f"REASSIGNMENT REQUEST: Sent strategy reassignment request for {symbol} due to {new_regime} regime")
+            else:
+                self.logger.error(f"REASSIGNMENT REQUEST: Failed to send reassignment request for {symbol}")
+                
+        except Exception as e:
+            self.logger.error(f"Error requesting strategy reassignment for {symbol}: {e}")
 
     def _handle_trading_recommendation(self, message: ProcessMessage):
         """Handle trading recommendations from enhanced news pipeline"""
@@ -707,9 +979,17 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
             self.logger.info(f"ACTION: {recommendation.get('action', 'unknown')}")
             self.logger.info(f"CONFIDENCE: {recommendation.get('confidence', 0):.3f}")
             
-            # Business logic output to terminal
-            print(f"[DECISION ENGINE] Processing {symbol}: {recommendation.get('action', 'unknown')} (confidence: {recommendation.get('confidence', 0):.3f})")
-            print(f"[DECISION ENGINE] News volume: {supporting_data.get('news_volume', 0)}, Sentiment count: {supporting_data.get('sentiment_count', 0)}")
+            # Business logic output to terminal using standardized OutputCoordinator
+            if self.output_coordinator:
+                # Extract real data for XGBoost-style recommendation output
+                action = recommendation.get('action', 'HOLD').upper()
+                confidence = recommendation.get('confidence', 0.0)
+                features = {
+                    'news_volume': supporting_data.get('news_volume', 0),
+                    'sentiment_count': supporting_data.get('sentiment_count', 0),
+                    'confidence': confidence
+                }
+                self.output_coordinator.output_xgboost_recommendation(symbol, action, confidence, features)
             self.logger.info(f"NEWS VOLUME: {supporting_data.get('news_volume', 0)}")
             self.logger.info(f"SENTIMENT COUNT: {supporting_data.get('sentiment_count', 0)}")
 
@@ -729,6 +1009,82 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
 
         except Exception as e:
             self.logger.error(f"Error handling trading recommendation: {e}")
+
+    def _handle_reassessment_request(self, message: ProcessMessage):
+        """Handle strategy reassessment requests from Position Health Monitor"""
+        try:
+            self.logger.info(f"DECISION ENGINE: Received REASSESSMENT_REQUEST from {message.sender}")
+            print(f"[DECISION ENGINE] RECEIVED: REASSESSMENT_REQUEST from {message.sender}")
+            
+            payload = message.data  # Use .data instead of .payload
+            symbol = payload.get('symbol')
+            strategy_name = payload.get('strategy_name')
+            performance_score = payload.get('performance_score', 0.0)
+            health_status = payload.get('health_status', 'UNKNOWN')
+            reason = payload.get('reason', 'No reason provided')
+
+            if not symbol or not strategy_name:
+                self.logger.warning("Reassessment request missing symbol or strategy_name")
+                print(f"[DECISION ENGINE] ERROR: Missing symbol or strategy_name")
+                return
+
+            self.logger.info(f"=== STRATEGY REASSESSMENT REQUEST ===")
+            self.logger.info(f"SYMBOL: {symbol}")
+            self.logger.info(f"CURRENT STRATEGY: {strategy_name}")
+            self.logger.info(f"PERFORMANCE SCORE: {performance_score}")
+            self.logger.info(f"HEALTH STATUS: {health_status}")
+            self.logger.info(f"REASON: {reason}")
+
+            # Trigger strategy reassignment through 3-scenario system (Scenario 3)
+            try:
+                # Import strategy assignment engine for reassignment
+                from ..tools.strategy_assignment_engine import StrategyAssignmentEngine
+                from ..tools.db_manager import TradingDBManager
+                
+                # Create or reuse strategy assignment engine
+                if not hasattr(self, '_strategy_assignment_engine'):
+                    db_manager = TradingDBManager()
+                    self._strategy_assignment_engine = StrategyAssignmentEngine(
+                        symbols=[symbol],
+                        risk_tolerance=getattr(self, 'risk_tolerance', 'moderate'),
+                        db_manager=db_manager
+                    )
+
+                # Request strategy reassignment using Scenario 3 (performance-based)
+                if hasattr(self._strategy_assignment_engine, 'scenario_coordinator'):
+                    reassignment_context = {
+                        'symbol': symbol,
+                        'current_strategy': strategy_name,
+                        'performance_score': performance_score,
+                        'health_status': health_status,
+                        'reason': reason,
+                        'timestamp': message.timestamp
+                    }
+                    
+                    new_assignment = self._strategy_assignment_engine.scenario_coordinator.reassign_strategy_from_health_monitor(
+                        symbol, reassignment_context
+                    )
+                    
+                    if new_assignment:
+                        self.logger.info(f"STRATEGY REASSIGNED: {symbol} from {strategy_name} to {new_assignment.strategy_name}")
+                        print(f"[DECISION ENGINE] STRATEGY REASSIGNED: {symbol} {strategy_name} → {new_assignment.strategy_name}")
+                        
+                        # Business logic output using standardized OutputCoordinator
+                        if self.output_coordinator:
+                            self.output_coordinator.output_strategy_reassignment(
+                                symbol, strategy_name, new_assignment.strategy_name, reason, performance_score
+                            )
+                    else:
+                        self.logger.info(f"REASSIGNMENT REJECTED: Current strategy {strategy_name} remains optimal for {symbol}")
+                        print(f"[DECISION ENGINE] REASSIGNMENT REJECTED: {strategy_name} remains optimal for {symbol}")
+                else:
+                    self.logger.warning("3-scenario system not available - cannot perform reassignment")
+
+            except Exception as reassignment_error:
+                self.logger.error(f"Error during strategy reassignment: {reassignment_error}")
+
+        except Exception as e:
+            self.logger.error(f"Error handling reassessment request: {e}")
 
     def _process_trading_recommendation_signal(self, symbol: str, signal: dict):
         """Process trading recommendation through conflict resolution and risk validation"""
@@ -756,9 +1112,16 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
                 if risk_validation.risk_warnings:
                     self.logger.warning(f"RISK WARNINGS: {risk_validation.risk_warnings}")
 
-                # BUSINESS LOGIC OUTPUT: Risk validation
-                risk_status = "approved" if risk_validation.is_approved else "rejected"
-                send_colored_business_output(self.process_id, f"Risk Manager: Position size {risk_status} for {symbol} - risk: low", "risk")
+                # BUSINESS LOGIC OUTPUT: Risk validation using standardized OutputCoordinator
+                if self.output_coordinator:
+                    risk_status = "PASSED" if risk_validation.is_approved else "FAILED"
+                    action = signal.get('action', 'UNKNOWN')
+                    # Extract real risk data - NO HARDCODED VALUES
+                    risk_score = getattr(risk_validation, 'risk_score', 0.0)
+                    risk_reason = risk_validation.rejection_reason if not risk_validation.is_approved else "Risk assessment passed"
+                    quantity = getattr(risk_validation, 'recommended_quantity', 0)
+                    
+                    self.output_coordinator.output_risk_check(symbol, risk_status, action, quantity, risk_score, risk_reason)
 
                 # Step 3: Execute if approved
                 if risk_validation.is_approved and risk_validation.should_execute:
@@ -772,35 +1135,36 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
             self.logger.error(f"Error processing trading recommendation signal: {e}")
 
     def _execute_approved_recommendation(self, risk_validation, signal):
-        """Execute approved trading recommendation"""
+        """Execute approved trading recommendation using execution coordinator"""
         try:
-            symbol = signal['symbol']
-            action = signal['action']
-            confidence = signal['confidence']
-
-            self.logger.info(f"=== EXECUTING APPROVED RECOMMENDATION ===")
-            self.logger.info(f"SYMBOL: {symbol}")
-            self.logger.info(f"ACTION: {action}")
-            self.logger.info(f"CONFIDENCE: {confidence:.3f}")
-
-            # BUSINESS LOGIC OUTPUT: Decision execution
-            send_colored_business_output(self.process_id, f"Decision: {action} {symbol} - XGBoost confidence: {confidence:.2f}", "decision")
-            send_colored_business_output(self.process_id, f"XGBoost decision: {action} {symbol} (confidence: {confidence:.3f})", "xgboost")
-
-            # Use existing execution orchestrator
-            if hasattr(self, 'execution_orchestrator') and self.execution_orchestrator:
-                execution_result = self.execution_orchestrator.execute_approved_decision(
-                    risk_validation=risk_validation,
-                    strategy_name="news_recommendation",
-                    confidence=confidence
+            if not hasattr(self, '_execution_coordinator'):
+                self._execution_coordinator = ExecutionCoordinator(
+                    process_id=self.process_id,
+                    execution_orchestrator=getattr(self, 'execution_orchestrator', None)
                 )
-
-                if execution_result.was_successful:
-                    self.logger.info(f"EXECUTION SUCCESS: {execution_result.execution_summary}")
-                else:
-                    self.logger.error(f"EXECUTION FAILED: {execution_result.error_message}")
+            
+            result = self._execution_coordinator.execute_approved_recommendation(risk_validation, signal)
+            
+            # Business logic output using standardized OutputCoordinator
+            if self.output_coordinator and result.was_successful:
+                # Extract real execution data - NO HARDCODED VALUES
+                symbol = signal.get('symbol', 'UNKNOWN')
+                action = signal.get('action', 'UNKNOWN')
+                quantity = getattr(result, 'quantity_executed', getattr(risk_validation, 'recommended_quantity', 0))
+                price = getattr(result, 'execution_price', 0.0)
+                order_id = getattr(result, 'order_id', 'N/A')
+                total_value = getattr(result, 'total_value', quantity * price if quantity and price else 0.0)
+                
+                self.output_coordinator.output_execution(symbol, action, quantity, price, order_id, total_value)
+            elif result.was_successful:
+                self.logger.info(f"EXECUTION SUCCESS: {result.execution_summary}")
             else:
-                self.logger.warning("Execution orchestrator not available - cannot execute recommendation")
+                self.logger.error(f"EXECUTION FAILED: {result.error_message}")
+                if self.output_coordinator:
+                    symbol = signal.get('symbol', 'UNKNOWN')
+                    self.output_coordinator.output_error(f"Execution failed: {result.error_message}", "ExecutionEngine", symbol)
+                
+            return result
 
         except Exception as e:
             self.logger.error(f"Error executing approved recommendation: {e}")
@@ -907,88 +1271,34 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
             self.logger.error(f"Error in enhanced decision making: {e}")
 
     def _create_enhanced_aggregated_signal(self, symbol: str) -> Optional[AggregatedSignal]:
-        """Create enhanced aggregated signal with conflict analysis and position-aware logic"""
+        """Create enhanced aggregated signal using extracted signal processor"""
         try:
             signals = list(self.signal_buffer[symbol])
             if not signals:
                 return None
-
-            # Get sentiment data
-            sentiment = self.sentiment_cache.get(symbol, {})
-
-            # Calculate signal components with adaptive weights
-            technical_component = self._calculate_technical_component(signals)
-            sentiment_component = sentiment.get('score', 0) * self.signal_weights['sentiment']
-            market_component = self._calculate_market_component()
-            risk_component = self._calculate_risk_component(symbol)
-
-            # Calculate aggregated values
-            final_direction = (
-                technical_component * self.signal_weights['technical'] +
-                sentiment_component * self.signal_weights['sentiment'] +
-                market_component * self.signal_weights['market'] +
-                risk_component * self.signal_weights['risk']
+            
+            # Use signal processor for aggregation
+            if not hasattr(self, '_signal_processor'):
+                self._signal_processor = SignalProcessor(self.signal_weights)
+                self._signal_processor.update_regime_state(self.regime_state)
+                self._signal_processor.risk_alerts_active = self.risk_alerts_active
+            
+            return self._signal_processor.create_enhanced_aggregated_signal(
+                symbol, signals, self.sentiment_cache
             )
-
-            # Calculate signal agreement and uncertainty
-            signal_agreement = self._calculate_signal_agreement(signals, sentiment)
-            uncertainty = self._calculate_signal_uncertainty(signals, sentiment)
-
-            # Determine base decision type
-            if final_direction > 0.3:
-                base_decision_type = DecisionType.BUY
-            elif final_direction < -0.3:
-                base_decision_type = DecisionType.SELL
-            else:
-                base_decision_type = DecisionType.HOLD
-
-            # Calculate overall confidence
-            base_confidence = np.mean([s['confidence'] for s in signals]) if signals else 0
-            confidence = base_confidence * (1 - uncertainty) * signal_agreement
-
-            # Apply position-aware decision logic
-            final_decision_type = self._apply_position_aware_logic(
-                symbol, base_decision_type, sentiment.get('score', 0), confidence
-            )
-
-            return AggregatedSignal(
-                symbol=symbol,
-                decision_type=final_decision_type,
-                confidence=confidence * 100,  # Convert to 0-100 scale
-                signal_components={
-                    'technical': technical_component,
-                    'sentiment': sentiment_component,
-                    'market': market_component,
-                    'risk': risk_component
-                },
-                risk_score=self._calculate_risk_score(symbol),
-                technical_signals=[s['signal'] for s in signals],
-                sentiment_score=sentiment.get('score'),
-                market_regime=self.regime_state.get('current'),
-                risk_alerts=list(self.risk_alerts_active) if symbol in self.risk_alerts_active else [],
-                signal_agreement=signal_agreement,
-                uncertainty=uncertainty,
-                final_direction=final_direction,
-                final_strength=abs(final_direction)
-            )
-
         except Exception as e:
             self.logger.error(f"Error creating aggregated signal for {symbol}: {e}")
             return None
 
-    def _resolve_signal_conflicts(self, aggregated_signal: AggregatedSignal):
-        """NEW: Resolve signal conflicts using conflict resolver"""
+    def _resolve_signal_conflicts(self, aggregated_signal):
+        """Resolve signal conflicts using extracted signal processor"""
         try:
-            if self.conflict_resolver:
-                return self._get_conflict_resolver().resolve_conflict(aggregated_signal)
-            else:
-                # Fallback: return signal as-is
-                return type('ResolvedDecision', (), {
-                    'symbol': aggregated_signal.symbol,
-                    'final_direction': aggregated_signal.final_direction,
-                    'final_confidence': aggregated_signal.confidence / 100,
-                    'resolution_method': 'fallback'
-                })()
+            if not hasattr(self, '_signal_processor'):
+                self._signal_processor = SignalProcessor(self.signal_weights)
+                self._signal_processor.update_regime_state(self.regime_state)
+                self._signal_processor.risk_alerts_active = self.risk_alerts_active
+            
+            return self._signal_processor.resolve_signal_conflicts(aggregated_signal)
         except Exception as e:
             self.logger.error(f"Error resolving conflicts for {aggregated_signal.symbol}: {e}")
             return None
@@ -1030,114 +1340,68 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
             return type('RiskValidation', (), {'is_approved': False, 'reason': f'Validation error: {e}'})()
 
     def _execute_validated_decision(self, risk_validation, strategy_name: str):
-        """NEW: Execute using execution orchestrator"""
+        """Execute validated decision using execution coordinator"""
         try:
-            if self.execution_orchestrator and getattr(risk_validation, 'should_execute', False):
-                # Show decision being made (business logic output)
-                try:
-                    from colored_print import success, info
-                    from terminal_color_system import print_decision_engine
-                    
-                    symbol = getattr(risk_validation.original_decision, 'symbol', 'UNKNOWN')
-                    action = getattr(risk_validation.original_decision, 'action', 'UNKNOWN')
-                    confidence = getattr(risk_validation.original_decision, 'final_confidence', 0.0)
-                    
-                    print_decision_engine(f"Decision: {action} {symbol} - strategy: {strategy_name}, confidence: {confidence:.2f}")
-                    
-                except ImportError:
-                    print(f"BUSINESS LOGIC: Decision engine executing {strategy_name} decision")
-                
-                result = self.execution_orchestrator.execute_approved_decision(
-                    risk_validation=risk_validation,
-                    strategy_name=strategy_name,
-                    strategy_confidence=getattr(risk_validation.original_decision, 'final_confidence', 0.5)
+            if not hasattr(self, '_execution_coordinator'):
+                self._execution_coordinator = ExecutionCoordinator(
+                    process_id=self.process_id,
+                    execution_orchestrator=getattr(self, 'execution_orchestrator', None)
                 )
-
-                self.daily_execution_count += 1
-
-                if getattr(result, 'was_successful', False):
-                    self.logger.info(f"Execution successful: {getattr(result, 'execution_summary', 'No summary')}")
-                    
-                    # BUSINESS LOGIC OUTPUT: Trade execution success
-                    try:
-                        from terminal_color_system import print_trade_execution
-                        symbol = getattr(result, 'symbol', 'UNKNOWN')
-                        executed_amount = getattr(result, 'executed_amount', 0.0)
-                        execution_price = getattr(result, 'execution_price', 0.0)
-                        action = getattr(risk_validation.original_decision, 'action', 'UNKNOWN')
-                        print_trade_execution(f"Execution: {action} {executed_amount} {symbol} at ${execution_price}")
-                    except:
-                        print(f"[EXECUTION] Trade executed successfully")
-                        
-                else:
-                    self.logger.warning(f"Execution failed: {getattr(result, 'error_message', 'Unknown error')}")
-                    
-                    # BUSINESS LOGIC OUTPUT: Trade execution failure  
-                    try:
-                        from terminal_color_system import print_trade_execution
-                        symbol = getattr(result, 'symbol', 'UNKNOWN')
-                        error = getattr(result, 'error_message', 'Unknown error')
-                        print_trade_execution(f"Execution: FAILED {symbol} - {error}")
-                    except:
-                        print(f"[EXECUTION] Trade execution failed")
-
-                return result
-            else:
-                # No execution orchestrator available - cannot execute real trades
-                self.logger.error("Cannot execute trade: No execution orchestrator available")
-                return type('ExecutionResult', (), {
-                    'was_successful': False,
-                    'execution_summary': f"Execution failed: No real execution system available for {getattr(risk_validation, 'symbol', 'UNKNOWN')}",
-                    'symbol': getattr(risk_validation, 'symbol', 'UNKNOWN'),
-                    'error_message': 'No execution orchestrator configured',
-                    'execution_slippage': 0.0,
-                    'executed_amount': 0.0
-                })()
-
+            
+            result = self._execution_coordinator.execute_validated_decision(risk_validation, strategy_name)
+            
+            # Update daily count
+            self.daily_execution_count = self._execution_coordinator.daily_execution_count
+            
+            return result
+            
         except Exception as e:
-            self.logger.error(f"Error executing decision: {e}")
+            self.logger.error(f"Error executing validated decision: {e}")
             return type('ExecutionResult', (), {
                 'was_successful': False,
                 'error_message': str(e),
                 'symbol': getattr(risk_validation, 'symbol', 'unknown'),
-                'execution_summary': f"Failed execution: {str(e)}",
-                'execution_slippage': 0.0,
-                'executed_amount': 0.0
+                'execution_summary': f"Failed execution: {str(e)}"
             })()
 
     def _execute_force_close(self, symbol: str, reason: str):
-        """NEW: Execute force close using execution orchestrator"""
+        """Execute force close using execution coordinator"""
         try:
-            self.logger.warning(f" Force closing {symbol}: {reason}")
-
-            if self.execution_orchestrator:
-                # Create force close execution request
-                # This would be implemented based on your execution orchestrator interface
-                pass
-
-            # Remove from active tracking
-            self.force_close_symbols.discard(symbol)
-
+            if not hasattr(self, '_execution_coordinator'):
+                self._execution_coordinator = ExecutionCoordinator(
+                    process_id=self.process_id,
+                    execution_orchestrator=getattr(self, 'execution_orchestrator', None)
+                )
+            
+            result = self._execution_coordinator.execute_force_close(symbol, reason)
+            
+            # Update force close symbols tracking
+            self.force_close_symbols = self._execution_coordinator.force_close_symbols
+            
+            return result
+            
         except Exception as e:
             self.logger.error(f"Error force closing {symbol}: {e}")
 
     def _maybe_adapt_parameters(self):
-        """NEW: Adapt parameters based on performance"""
-        # Adapt every 15 minutes
-        if (datetime.now() - self.performance_tracker.last_adaptation).total_seconds() < 900:
-            return
-
-        if len(self.performance_tracker.recent_decisions) < 10:
-            return  # Need enough data
-
-        # Get performance metrics
-        overall_performance = self.performance_tracker.get_recent_performance()
-        strategy_performance = self.performance_tracker.get_strategy_performance()
-
-        # Try to get system metrics if available
+        """Adapt parameters using parameter adapter"""
         try:
-            # Try dynamic import for system metrics
-            from .parameter_adapter import get_system_metrics, create_adaptation_metrics
+            # Adapt every 15 minutes
+            if (datetime.now() - self.performance_tracker.last_adaptation).total_seconds() < 900:
+                return
+
+            if len(self.performance_tracker.recent_decisions) < 10:
+                return  # Need enough data
+
+            # Initialize parameter adapter if needed
+            if not hasattr(self, '_parameter_adapter'):
+                self._parameter_adapter = ParameterAdapter()
+
+            # Get performance metrics
+            overall_performance = self.performance_tracker.get_recent_performance()
+            strategy_performance = self.performance_tracker.get_strategy_performance()
+
+            # Get system metrics
             system_metrics = get_system_metrics()
 
             # Create adaptation metrics
@@ -1145,54 +1409,133 @@ class EnhancedMarketDecisionEngineProcess(RedisBaseProcess):
                 performance_data={'overall': overall_performance, **strategy_performance},
                 market_data={
                     'regime': self.regime_state.get('current', 'sideways'),
-                    'volatility_percentile': 0.5,
-                    'trend_strength': 0.5
+                    'volatility_percentile': self._calculate_volatility_percentile(),
+                    'trend_strength': self._calculate_trend_strength()
                 },
                 system_data=system_metrics,
                 risk_data={
                     'portfolio_stress': len(self.risk_alerts_active) / 10.0,  # Normalize
-                    'drawdown': 0.05  # Placeholder
+                    'drawdown': self._calculate_current_drawdown(),
+                    'alerts_count': len(self.risk_alerts_active)
                 }
             )
-        except ImportError:
-            # Use fallback metrics if imports fail
-            adaptation_metrics = None
-            self.logger.debug("Using fallback parameter adaptation - enhanced metrics not available")
 
-        if adaptation_metrics and self.parameter_adapter:
             # Adapt parameters
-            adapted_params = self.parameter_adapter.adapt_parameters(adaptation_metrics)
+            adapted_params = self._parameter_adapter.adapt_parameters(adaptation_metrics)
 
             # Apply adapted signal weights if available
-            if hasattr(adapted_params, 'signal_weights') and adapted_params.signal_weights:
+            if adapted_params.signal_weights:
                 old_weights = self.signal_weights.copy()
                 self.signal_weights.update(adapted_params.signal_weights)
 
-                self.logger.info(f"Parameter weights adapted: {getattr(adapted_params, 'adaptation_reason', 'Unknown reason')}")
+                # Update signal processor weights too
+                if hasattr(self, '_signal_processor'):
+                    self._signal_processor.update_signal_weights(adapted_params.signal_weights)
+
+                self.logger.info(f"Parameter weights adapted: {adapted_params.adaptation_reason}")
                 self.logger.debug(f"Old: {old_weights}")
                 self.logger.debug(f"New: {self.signal_weights}")
 
             # Apply risk parameter changes to risk manager
-            if self.risk_manager and hasattr(adapted_params, 'max_position_size'):
+            if self.risk_manager and adapted_params.max_position_size:
                 if hasattr(self.risk_manager, 'limits'):
                     self.risk_manager.limits['max_position_size_pct'] = adapted_params.max_position_size
-                    if hasattr(adapted_params, 'max_daily_trades'):
+                    if adapted_params.max_daily_trades:
                         self.risk_manager.limits['max_daily_trades'] = adapted_params.max_daily_trades
 
             self.metrics.parameter_adaptations += 1
             self.performance_tracker.last_adaptation = datetime.now()
 
+        except Exception as e:
+            self.logger.error(f"Error in parameter adaptation: {e}")
+
+    def _calculate_volatility_percentile(self) -> float:
+        """Calculate current volatility percentile"""
+        try:
+            # Simple estimation based on recent market activity
+            recent_volatility = getattr(self.regime_state, 'volatility', 0.5)
+            if isinstance(recent_volatility, str):
+                volatility_map = {'LOW': 0.2, 'NORMAL': 0.5, 'HIGH': 0.8, 'EXTREME': 0.95}
+                return volatility_map.get(recent_volatility, 0.5)
+            return min(1.0, max(0.0, recent_volatility))
+        except:
+            return 0.5
+
+    def _calculate_trend_strength(self) -> float:
+        """Calculate current trend strength"""
+        try:
+            trend = self.regime_state.get('trend', 'SIDEWAYS')
+            if trend == 'TRENDING_UP':
+                return 0.8
+            elif trend == 'TRENDING_DOWN':
+                return 0.8
+            elif trend == 'SIDEWAYS':
+                return 0.2
+            else:
+                return 0.5
+        except:
+            return 0.5
+
+    def _calculate_current_drawdown(self) -> float:
+        """Calculate current portfolio drawdown"""
+        try:
+            if hasattr(self, 'performance_tracker') and self.performance_tracker:
+                recent_performance = self.performance_tracker.get_recent_performance()
+                return abs(min(0.0, recent_performance.get('current_return', 0.0)))
+            return 0.0
+        except:
+            return 0.0
+
     # NEW: Strategy Management Methods (from implementation_rules.xml)
 
     def _assign_monitoring_strategy(self, symbol: str, entry_strategy: str, execution_result: Dict[str, Any]):
-        """Assign monitoring strategy immediately after successful execution"""
+        """Assign monitoring strategy immediately after successful execution with 3-scenario integration"""
         try:
             self.logger.info(f" Assigning monitoring strategy for {symbol}: {entry_strategy}")
 
-            # Set strategy as active
+            # ZERO DISCONNECTS: Integrate with 3-scenario assignment system
+            try:
+                # Import strategy assignment engine for decision engine scenario
+                from ..tools.strategy_assignment_engine import StrategyAssignmentEngine
+                from ..tools.db_manager import TradingDBManager
+                
+                # Create strategy assignment engine if not exists
+                if not hasattr(self, '_strategy_assignment_engine'):
+                    # Initialize db_manager for database persistence
+                    db_manager = TradingDBManager()
+                    self._strategy_assignment_engine = StrategyAssignmentEngine(
+                        symbols=[symbol],  # Single symbol for this assignment
+                        risk_tolerance=getattr(self, 'risk_tolerance', 'moderate'),
+                        db_manager=db_manager
+                    )
+                
+                # Create assignment through decision engine scenario
+                decision_context = {
+                    'execution_result': execution_result,
+                    'decision_confidence': execution_result.get('decision_confidence', 0.5),
+                    'execution_time': execution_result.get('execution_time', datetime.now().isoformat()),
+                    'entry_strategy': entry_strategy
+                }
+                
+                # Use scenario-aware assignment (routes through 3-scenario coordinator if available)
+                assignment = self._strategy_assignment_engine.assign_strategy_for_decision_engine(
+                    symbol=symbol,
+                    market_analysis=None,  # Let assignment engine gather market data
+                    decision_context=decision_context
+                )
+                
+                self.logger.info(f" 3-scenario assignment completed: {symbol} -> {assignment.recommended_strategy} "
+                                f"(confidence: {assignment.confidence_score:.1f}%)")
+                
+            except Exception as scenario_error:
+                self.logger.warning(f"3-scenario assignment failed for {symbol}: {scenario_error} - using legacy method")
+                # Fall back to legacy assignment method
+                pass
+
+            # Set strategy as active (preserves existing functionality)
             self.active_monitoring_strategies[symbol] = MonitoringStrategyStatus.ACTIVE
 
-            # Send assignment message to position health monitor
+            # Send assignment message to position health monitor (preserves Redis communication)
             if hasattr(self, 'queue_manager') and self.queue_manager:
                 self.queue_manager.send_strategy_assignment(
                     sender_id=self.process_id,

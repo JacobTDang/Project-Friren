@@ -76,7 +76,11 @@ class RedisBaseProcess(ABC):
     - Comprehensive memory monitoring and leak prevention
     """
 
-    def __init__(self, process_id: str, heartbeat_interval: int = 30, memory_limit_mb: float = 250):
+    def __init__(self, process_id: str, heartbeat_interval: int = 30, memory_limit_mb: float = None):
+        # Use environment variable with AWS t3.micro optimized default
+        if memory_limit_mb is None:
+            import os
+            memory_limit_mb = float(os.getenv('FRIREN_BASE_PROCESS_MEMORY_MB', '400'))
         self.process_id = process_id
         self.heartbeat_interval = heartbeat_interval
         self.memory_limit_mb = memory_limit_mb
@@ -89,14 +93,15 @@ class RedisBaseProcess(ABC):
         self.messages_processed = 0
         self.last_activity = datetime.now()
 
-        # Threading components
-        self._stop_event = threading.Event()
+        # Threading components - LAZY INITIALIZATION to avoid pickle errors
+        self._stop_event = None
         self._heartbeat_thread = None
         self._main_thread = None
 
-        # Queue-aware execution control
-        self._cycle_active = threading.Event()
-        self._cycle_pause = threading.Event()
+        # Queue-aware execution control - LAZY INITIALIZATION
+        self._cycle_active = None
+        self._cycle_pause = None
+        self._threading_initialized = False
         self.current_cycle_time = 30.0  # Default cycle time
         self.queue_mode = False  # Whether running in queue mode
 
@@ -111,8 +116,8 @@ class RedisBaseProcess(ABC):
         self._emergency_shutdown_triggered = False
         self._memory_high = False  # Flag for queue blocking instead of shutdown
 
-        # Configure logging
-        self._setup_logging()
+        # Lazy initialization for logger to prevent pickle errors
+        self._logger = None
         
         # Setup signal handlers to prevent orphaned subprocesses
         self._setup_signal_handlers()
@@ -122,24 +127,41 @@ class RedisBaseProcess(ABC):
 
         self.logger.info(f"RedisBaseProcess {self.process_id} initialized with {memory_limit_mb}MB memory limit")
 
+    def _initialize_threading(self):
+        """Initialize threading objects after process spawn to avoid pickle errors"""
+        if not self._threading_initialized:
+            # Threading objects are now initialized via properties for lazy loading
+            # This ensures they're created only when accessed, preventing pickle errors
+            self._threading_initialized = True
+            self.logger.info(f"Threading objects ready for lazy initialization for {self.process_id}")
+
     def _setup_logging(self):
         """Setup process-specific logging"""
         # Create logs directory if it doesn't exist
         logs_dir = os.path.join(project_root, 'logs')
         os.makedirs(logs_dir, exist_ok=True)
 
-        # Setup logger for this process
-        self.logger = logging.getLogger(f"redis_process.{self.process_id}")
+        # PRODUCTION: Get logging configuration - NO HARDCODED VALUES
+        try:
+            from Friren_V1.infrastructure.configuration_manager import get_config
+            log_level_str = get_config('LOG_LEVEL', 'INFO')
+            log_level = getattr(logging, log_level_str.upper(), logging.INFO)
+        except ImportError:
+            # Fallback only if configuration manager not available
+            log_level = logging.INFO
 
-        if not self.logger.handlers:
+        # Setup logger for this process (lazy initialization)
+        self._logger = logging.getLogger(f"redis_process.{self.process_id}")
+
+        if not self._logger.handlers:
             # File handler
             log_file = os.path.join(logs_dir, f'{self.process_id}_redis.log')
             file_handler = logging.FileHandler(log_file)
-            file_handler.setLevel(logging.INFO)
+            file_handler.setLevel(log_level)
 
             # Console handler
             console_handler = logging.StreamHandler()
-            console_handler.setLevel(logging.INFO)
+            console_handler.setLevel(log_level)
 
             # Formatter
             formatter = logging.Formatter(
@@ -148,9 +170,39 @@ class RedisBaseProcess(ABC):
             file_handler.setFormatter(formatter)
             console_handler.setFormatter(formatter)
 
-            self.logger.addHandler(file_handler)
-            self.logger.addHandler(console_handler)
-            self.logger.setLevel(logging.INFO)
+            self._logger.addHandler(file_handler)
+            self._logger.addHandler(console_handler)
+            self._logger.setLevel(log_level)
+
+    # CRITICAL FIX: Property-based lazy initialization for threading objects
+    # This prevents pickle errors during subprocess creation
+    @property
+    def stop_event(self):
+        """Lazy initialization of stop event to prevent pickle errors"""
+        if self._stop_event is None:
+            self._stop_event = threading.Event()
+        return self._stop_event
+
+    @property
+    def cycle_active(self):
+        """Lazy initialization of cycle active event to prevent pickle errors"""
+        if self._cycle_active is None:
+            self._cycle_active = threading.Event()
+        return self._cycle_active
+
+    @property
+    def cycle_pause(self):
+        """Lazy initialization of cycle pause event to prevent pickle errors"""
+        if self._cycle_pause is None:
+            self._cycle_pause = threading.Event()
+        return self._cycle_pause
+
+    @property
+    def logger(self):
+        """Lazy initialization of logger to prevent pickle errors"""
+        if self._logger is None:
+            self._setup_logging()
+        return self._logger
 
     def _setup_signal_handlers(self):
         """Setup signal handlers to prevent orphaned subprocesses"""
@@ -166,7 +218,7 @@ class RedisBaseProcess(ABC):
         """Handle shutdown signals to prevent orphaned processes"""
         self.logger.critical(f"Process {self.process_id} received signal {signum} - initiating emergency shutdown")
         self._emergency_shutdown_triggered = True
-        self._stop_event.set()
+        self.stop_event.set()
         self.stop()
         
     def _emergency_cleanup(self):
@@ -183,14 +235,15 @@ class RedisBaseProcess(ABC):
             pass
 
     def _setup_memory_monitoring(self):
-        """Setup memory monitoring for this process"""
+        """Setup memory monitoring for this process - LAZY INITIALIZATION"""
         try:
-            # Initialize memory monitor
+            # Initialize memory monitoring AFTER process spawn
             self.memory_monitor = get_memory_monitor(
                 process_id=self.process_id,
                 memory_limit_mb=self.memory_limit_mb,
                 auto_start=True
             )
+            self.logger.info(f"Memory monitoring setup completed for {self.process_id}")
 
             # Add emergency callback for critical memory situations
             def emergency_callback(snapshot, stats):
@@ -242,7 +295,7 @@ class RedisBaseProcess(ABC):
             self._update_health()
 
             # Force stop
-            self._stop_event.set()
+            self.stop_event.set()
 
             # Send emergency notification
             if self.redis_manager:
@@ -404,6 +457,9 @@ class RedisBaseProcess(ABC):
         try:
             self.logger.info(f"Starting process {self.process_id}")
 
+            # Initialize threading objects AFTER process spawn
+            self._initialize_threading()
+
             # Initialize Redis connection
             self.redis_manager = get_trading_redis_manager()
 
@@ -441,7 +497,7 @@ class RedisBaseProcess(ABC):
             self._update_health()
 
             # Signal stop
-            self._stop_event.set()
+            self.stop_event.set()
 
             # Stop memory monitoring
             if self.memory_monitor:
@@ -474,7 +530,7 @@ class RedisBaseProcess(ABC):
 
     def _heartbeat_worker(self):
         """Heartbeat worker thread"""
-        while not self._stop_event.is_set():
+        while not self.stop_event.is_set():
             try:
                 self._update_health()
                 time.sleep(self.heartbeat_interval)
@@ -502,12 +558,23 @@ class RedisBaseProcess(ABC):
                 cpu_percent = 0.0
 
             # Enhanced status for smart memory management
-            if self.state in [ProcessState.RUNNING, ProcessState.PAUSED, ProcessState.IDLE]:
-                status = 'healthy'
-            elif self.state in [ProcessState.RESETTING]:
-                status = 'resetting'
+            # Special handling for event-driven processes (like decision_engine)
+            if hasattr(self, 'process_id') and self.process_id == 'decision_engine':
+                # Event-driven processes are healthy if running, regardless of activity
+                if self.state == ProcessState.RUNNING:
+                    status = 'healthy'
+                elif self.state in [ProcessState.RESETTING]:
+                    status = 'resetting'
+                else:
+                    status = 'unhealthy'
             else:
-                status = 'unhealthy'
+                # Normal health logic for other processes
+                if self.state in [ProcessState.RUNNING, ProcessState.PAUSED, ProcessState.IDLE]:
+                    status = 'healthy'
+                elif self.state in [ProcessState.RESETTING]:
+                    status = 'resetting'
+                else:
+                    status = 'unhealthy'
 
             health_data = {
                 'status': status,
@@ -534,17 +601,25 @@ class RedisBaseProcess(ABC):
         self.logger.info(f"Entering main loop for {self.process_id} (queue_mode: {self.queue_mode})")
 
         try:
-            while not self._stop_event.is_set():
+            while not self.stop_event.is_set():
                 try:
+                    # MEGA DEBUG: Main loop iteration
+                    self.logger.critical(f"MEGA DEBUG: Main loop iteration - queue_mode: {self.queue_mode}")
+                    
                     # Always process messages from Redis queue
+                    self.logger.critical("MEGA DEBUG: About to process messages")
                     self._process_messages()
+                    self.logger.critical("MEGA DEBUG: Messages processed")
 
                     if self.queue_mode:
                         # Queue-aware execution: wait for cycle activation
+                        self.logger.critical("MEGA DEBUG: Using queue-aware execution")
                         self._queue_aware_execution()
                     else:
                         # Continuous execution (legacy mode)
+                        self.logger.critical("MEGA DEBUG: Using continuous execution - about to call _execute()")
                         self._continuous_execution()
+                        self.logger.critical("MEGA DEBUG: Continuous execution completed")
 
                 except Exception as e:
                     self.logger.error(f"Error in main loop: {e}")
@@ -566,8 +641,13 @@ class RedisBaseProcess(ABC):
 
     def _continuous_execution(self):
         """Continuous execution mode (legacy)"""
+        # MEGA DEBUG: Verify continuous execution is called
+        self.logger.critical("MEGA DEBUG: _continuous_execution() entered - about to call _execute()")
+        
         # Execute main process logic
         self._execute()
+        
+        self.logger.critical("MEGA DEBUG: _execute() completed successfully")
 
         # Update activity timestamp
         self.last_activity = datetime.now()
@@ -590,14 +670,24 @@ class RedisBaseProcess(ABC):
 
         # Execute process logic during active cycle
         cycle_start = time.time()
-        self.logger.debug(f"Executing cycle for {self.process_id} (max time: {self.current_cycle_time}s)")
+        
+        # Handle infinite cycle time for continuous execution
+        if self.current_cycle_time == float('inf'):
+            self.logger.debug(f"Executing continuous cycle for {self.process_id}")
+            is_continuous = True
+        else:
+            self.logger.debug(f"Executing cycle for {self.process_id} (max time: {self.current_cycle_time}s)")
+            is_continuous = False
 
         try:
             # Execute until cycle time expires or pause signal received
-            while (time.time() - cycle_start < self.current_cycle_time and
-                   self._cycle_active.is_set() and
-                   not self._cycle_pause.is_set() and
-                   not self._stop_event.is_set()):
+            while (self.cycle_active.is_set() and
+                   not self.cycle_pause.is_set() and
+                   not self.stop_event.is_set()):
+
+                # For timed cycles, check if time is up
+                if not is_continuous and (time.time() - cycle_start >= self.current_cycle_time):
+                    break
 
                 # Execute main process logic
                 self._execute()
@@ -610,15 +700,19 @@ class RedisBaseProcess(ABC):
 
             # Log cycle completion
             actual_time = time.time() - cycle_start
-            self.logger.debug(f"Cycle completed for {self.process_id} (actual time: {actual_time:.1f}s)")
+            if is_continuous:
+                self.logger.debug(f"Continuous cycle paused for {self.process_id} (ran for: {actual_time:.1f}s)")
+            else:
+                self.logger.debug(f"Cycle completed for {self.process_id} (actual time: {actual_time:.1f}s)")
 
         except Exception as e:
             self.logger.error(f"Error during cycle execution for {self.process_id}: {e}")
             raise
 
         finally:
-            # Clear cycle active state
-            self._cycle_active.clear()
+            # For timed cycles, clear cycle active state
+            if not is_continuous:
+                self._cycle_active.clear()
 
     def enable_queue_mode(self, cycle_time: float = 30.0):
         """Enable queue-aware execution mode"""
@@ -644,8 +738,8 @@ class RedisBaseProcess(ABC):
         if cycle_time:
             self.current_cycle_time = cycle_time
 
-        self._cycle_pause.clear()
-        self._cycle_active.set()
+        self.cycle_pause.clear()
+        self.cycle_active.set()
         self.logger.debug(f"Started execution cycle for {self.process_id}")
 
     def pause_execution_cycle(self):
@@ -653,13 +747,13 @@ class RedisBaseProcess(ABC):
         if not self.queue_mode:
             return
 
-        self._cycle_pause.set()
-        self._cycle_active.clear()
+        self.cycle_pause.set()
+        self.cycle_active.clear()
         self.logger.debug(f"Paused execution cycle for {self.process_id}")
 
     def is_cycle_active(self) -> bool:
         """Check if the process is in an active execution cycle"""
-        return self._cycle_active.is_set() and not self._cycle_pause.is_set()
+        return self.cycle_active.is_set() and not self.cycle_pause.is_set()
 
     def _process_messages(self):
         """Process incoming messages from Redis"""
@@ -824,8 +918,14 @@ class RedisBaseProcess(ABC):
         elif message.message_type == 'start_cycle':
             # Queue manager signals to start execution cycle
             cycle_time = message.data.get('cycle_time', self.current_cycle_time)
-            self.logger.info(f"Received start_cycle from {message.sender} (cycle_time: {cycle_time}s)")
-            self.start_execution_cycle(cycle_time)
+            continuous_mode = message.data.get('continuous_mode', False)
+            
+            if continuous_mode:
+                self.logger.info(f"Received continuous start_cycle from {message.sender}")
+                self.start_execution_cycle(float('inf'))
+            else:
+                self.logger.info(f"Received timed start_cycle from {message.sender} (cycle_time: {cycle_time}s)")
+                self.start_execution_cycle(cycle_time)
 
         elif message.message_type == 'pause_cycle':
             # Queue manager signals to pause execution cycle

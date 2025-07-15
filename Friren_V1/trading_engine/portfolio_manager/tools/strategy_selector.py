@@ -13,7 +13,7 @@ has been moved to separate components.
 
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
 
 # Import from strategies package (pure strategies only)
@@ -393,3 +393,79 @@ class StrategySelector:
             name for name, strategy in self.strategies.items()
             if strategy.metadata.category == category.upper()
         ]
+    
+    def analyze_market_regime(self) -> Dict[str, Any]:
+        """
+        Analyze current market regime using real market data.
+        
+        This method was added to fix the missing method error in strategy assignment.
+        Uses market_metrics to determine current market regime.
+        """
+        try:
+            # Import market metrics locally to avoid circular imports
+            from ...analytics.market_metrics import get_all_metrics
+            
+            # Use broad market proxy (SPY) for regime analysis
+            broad_market_metrics = get_all_metrics("SPY")
+            
+            if broad_market_metrics:
+                # Determine regime based on real market volatility and trend
+                volatility = broad_market_metrics.volatility or 0.0
+                trend_strength = broad_market_metrics.trend_strength or 0.0
+                
+                # Classify volatility regime
+                if volatility > 0.4:
+                    vol_regime = "HIGH_VOLATILITY"
+                elif volatility < 0.15:
+                    vol_regime = "LOW_VOLATILITY"
+                else:
+                    vol_regime = "NORMAL_VOLATILITY"
+                
+                # Classify trend regime
+                if trend_strength > 0.03:
+                    trend_regime = "STRONG_TREND"
+                elif trend_strength < 0.01:
+                    trend_regime = "SIDEWAYS"
+                else:
+                    trend_regime = "MODERATE_TREND"
+                
+                # Determine primary regime
+                if vol_regime == "HIGH_VOLATILITY":
+                    primary_regime = "VOLATILE"
+                elif trend_regime == "STRONG_TREND":
+                    primary_regime = "TRENDING"
+                elif trend_regime == "SIDEWAYS":
+                    primary_regime = "RANGE_BOUND"
+                else:
+                    primary_regime = "MIXED"
+                
+                return {
+                    'primary_regime': primary_regime,
+                    'volatility_regime': vol_regime,
+                    'trend_regime': trend_regime,
+                    'volatility': volatility,
+                    'trend_strength': trend_strength,
+                    'data_quality': broad_market_metrics.data_quality
+                }
+            else:
+                # Fallback when market data unavailable
+                return {
+                    'primary_regime': 'UNKNOWN',
+                    'volatility_regime': 'NORMAL_VOLATILITY',
+                    'trend_regime': 'MODERATE_TREND',
+                    'volatility': 0.25,
+                    'trend_strength': 0.02,
+                    'data_quality': 'insufficient'
+                }
+                
+        except Exception as e:
+            # Robust fallback for any errors
+            return {
+                'primary_regime': 'MIXED',
+                'volatility_regime': 'NORMAL_VOLATILITY', 
+                'trend_regime': 'MODERATE_TREND',
+                'volatility': 0.25,
+                'trend_strength': 0.02,
+                'data_quality': 'error',
+                'error': str(e)
+            }

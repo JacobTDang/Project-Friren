@@ -6,7 +6,7 @@ This module provides access to all the core trading infrastructure components.
 
 # Core infrastructure components (always available)
 from Friren_V1.trading_engine.portfolio_manager.tools.account_manager import AccountManager
-from Friren_V1.trading_engine.portfolio_manager.tools.db_manager import TradingDBManager
+from Friren_V1.trading_engine.portfolio_manager.tools.db_manager import TradingDBManager, DatabaseManager
 from Friren_V1.trading_engine.portfolio_manager.tools.alpaca_interface import SimpleAlpacaInterface
 
 # Execution and order management
@@ -24,6 +24,7 @@ from Friren_V1.trading_engine.portfolio_manager.tools.position_sizer import Pure
 __all__ = [
     'AccountManager',
     'TradingDBManager',
+    'DatabaseManager',  # Backward compatibility alias
     'SimpleAlpacaInterface',
     'SimpleExecutionEngine',
     'SimpleOrderManager',

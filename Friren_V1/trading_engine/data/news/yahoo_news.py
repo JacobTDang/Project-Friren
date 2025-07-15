@@ -17,6 +17,9 @@ try:
 except ImportError:
     from base import NewsDataSource, NewsArticle
 
+# Import configuration manager to eliminate ALL hardcoded values
+from Friren_V1.infrastructure.configuration_manager import get_config
+
 
 class SymbolExtractor:
     """Enhanced symbol extraction for Yahoo Finance"""
@@ -65,17 +68,20 @@ class SymbolExtractor:
         symbols = set()
         text_lower = text.lower()
 
-        # 1. $SYMBOL format
-        dollar_symbols = re.findall(r'\$([A-Z]{1,5})\b', text)
+        # 1. $SYMBOL format - FROM CONFIGURATION MANAGER
+        dollar_pattern = get_config('SYMBOL_PATTERN_DOLLAR', r'\$([A-Z]{1,5})\b')
+        dollar_symbols = re.findall(dollar_pattern, text)
         symbols.update(dollar_symbols)
 
-        # 2. (SYMBOL) format
-        paren_symbols = re.findall(r'\(([A-Z]{1,5})\)', text)
+        # 2. (SYMBOL) format - FROM CONFIGURATION MANAGER
+        paren_pattern = get_config('SYMBOL_PATTERN_PARENTHESES', r'\(([A-Z]{1,5})\)')
+        paren_symbols = re.findall(paren_pattern, text)
         symbols.update(paren_symbols)
 
-        # 3. Yahoo Finance specific patterns
+        # 3. Yahoo Finance specific patterns - FROM CONFIGURATION MANAGER
+        price_pattern = get_config('SYMBOL_PATTERN_PRICE', r'([A-Z]{2,5})[+-]?\s*\d+\.\d+%?')
         yahoo_patterns = [
-            r'([A-Z]{2,5})[+-]?\s*\d+\.\d+%?',  # AAPL+1.23% or AAPL 150.23
+            price_pattern,  # AAPL+1.23% or AAPL 150.23
             r'([A-Z]{2,5})\s*(?:stock|shares?|equity)',  # AAPL stock
             r'([A-Z]{2,5})\s*(?:Corporation|Corp|Inc\.?)',  # AAPL Inc
         ]
@@ -135,7 +141,7 @@ class YahooFinanceNews(NewsDataSource):
     def collect_news(self, hours_back: int = 24, max_articles: int = 50) -> List[NewsArticle]:
         """Collect general financial news from Yahoo Finance"""
         sections = [
-            'https://finance.yahoo.com/news/',
+            get_config('YAHOO_GENERAL_NEWS_URL', 'https://finance.yahoo.com/news/'),
             'https://finance.yahoo.com/topic/stock-market-news/',
             'https://finance.yahoo.com/topic/earnings/',
             'https://finance.yahoo.com/markets/'
@@ -155,7 +161,8 @@ class YahooFinanceNews(NewsDataSource):
                 ]
 
                 all_articles.extend(recent_articles)
-                time.sleep(2)  # Rate limiting
+                rate_limit_delay = get_config('YAHOO_RATE_LIMIT_DELAY', 2)
+                time.sleep(rate_limit_delay)  # Rate limiting from configuration
 
                 if len(all_articles) >= max_articles:
                     break
@@ -174,11 +181,13 @@ class YahooFinanceNews(NewsDataSource):
             self.logger.info(f"Fetching news for {symbol}")
             cutoff_time = datetime.now() - timedelta(hours=hours_back)
 
-            # Try multiple Yahoo Finance URLs for symbol news
+            # Try multiple Yahoo Finance URLs for symbol news - FROM CONFIGURATION MANAGER
+            quote_url_template = get_config('YAHOO_QUOTE_URL_TEMPLATE', 'https://finance.yahoo.com/quote/{symbol}/')
+            news_url_template = get_config('YAHOO_NEWS_URL_TEMPLATE', 'https://finance.yahoo.com/quote/{symbol}/news/')
             urls_to_try = [
-                f"https://finance.yahoo.com/quote/{symbol}/",  # Main quote page
-                f"https://finance.yahoo.com/quote/{symbol}/news/",  # Direct news page
-                f"https://finance.yahoo.com/quote/{symbol}",  # Without trailing slash
+                quote_url_template.format(symbol=symbol),  # Main quote page
+                news_url_template.format(symbol=symbol),  # Direct news page
+                quote_url_template.format(symbol=symbol).rstrip('/'),  # Without trailing slash
                 f"https://finance.yahoo.com/lookup?s={symbol}",  # Search results
             ]
 
@@ -231,8 +240,10 @@ class YahooFinanceNews(NewsDataSource):
             return unique_articles[:max_articles]
 
         except Exception as e:
-            self.logger.error(f"Error getting news for {symbol}: {e}")
-            return []
+            # PRODUCTION: FAIL FAST - No fallback data, system must know when news fails
+            error_msg = f"CRITICAL: Yahoo Finance news collection failed for {symbol}: {e}"
+            self.logger.error(error_msg)
+            raise RuntimeError(error_msg)
 
     def get_watchlist_news(self, symbols: List[str], hours_back: int = 24, max_articles_per_symbol: int = 10) -> Dict[str, List[NewsArticle]]:
         """Get news for multiple symbols (watchlist) - FIXED for decision engine"""
@@ -290,7 +301,9 @@ class YahooFinanceNews(NewsDataSource):
     def test_connection(self) -> bool:
         """Test connection to Yahoo Finance"""
         try:
-            response = self.session.get("https://finance.yahoo.com/news/", timeout=10)
+            yahoo_timeout = get_config('YAHOO_RATE_LIMIT_DELAY', 10)
+            base_news_url = get_config('YAHOO_GENERAL_NEWS_URL', 'https://finance.yahoo.com/news/')
+            response = self.session.get(base_news_url, timeout=yahoo_timeout)
             return response.status_code == 200
         except Exception:
             return False
@@ -341,14 +354,16 @@ class YahooFinanceNews(NewsDataSource):
             processed_count = 0
 
             for link in links:
-                if processed_count >= 50:  # Limit per section
+                max_articles_per_section = get_config('YAHOO_MAX_ARTICLES_PER_SECTION', 50)
+                if processed_count >= max_articles_per_section:  # Limit per section from configuration
                     break
 
                 try:
                     title = link.get_text(strip=True)
                     href = link.get('href', '')
 
-                    if not title or len(title) < 10 or href in seen_urls:
+                    min_title_length = get_config('MIN_TITLE_LENGTH', 10)
+                    if not title or len(title) < min_title_length or href in seen_urls:
                         continue
 
                     # Skip navigation and non-news items

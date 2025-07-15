@@ -35,18 +35,11 @@ try:
     from .db_manager import TradingDBManager
     IMPORTS_SUCCESSFUL = True
 except ImportError:
-    # Fallback stubs
+    # NO FALLBACK - require proper imports for production execution
     IMPORTS_SUCCESSFUL = False
-
-    from enum import Enum
-    class OrderSide(Enum):
-        BUY = "buy"
-        SELL = "sell"
-
-    # REMOVED: Dangerous fake trading interfaces
-    # These stub classes were returning fake success responses which could mask
-    # real trading failures. Only real trading interfaces should be used.
-    # If real interfaces are not available, the system should fail safely.
+    raise ImportError("PRODUCTION: Required execution components not available. "
+                    "SimpleOrderManager, SimpleAlpacaInterface, and TradingDBManager must be properly imported. "
+                    "No mock implementations allowed for trading execution.")
 
 
 class ExecutionType(Enum):

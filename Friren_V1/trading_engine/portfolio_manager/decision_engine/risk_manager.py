@@ -113,77 +113,11 @@ except ImportError:
             IMPORTS_SUCCESSFUL = True
 
         except ImportError:
-            # Final fallback - create comprehensive stubs that match the real interface
+            # NO FALLBACK - require proper imports for production
             IMPORTS_SUCCESSFUL = False
-
-            @dataclass
-            class ResolvedDecision:
-                symbol: str = "TEST"
-                final_direction: float = 0.5
-                final_confidence: float = 0.5
-                resolution_method: str = "test"
-
-            class PurePositionSizer:
-                def __init__(self, db_manager=None, alpaca_interface=None):
-                    self.logger = logging.getLogger("position_sizer_stub")
-
-                def size_up(self, symbol: str, target_pct: float, current_price: Optional[float] = None) -> SizeCalculation:
-                    return SizeCalculation(
-                        symbol=symbol,
-                        current_size_pct=0.0,
-                        target_size_pct=target_pct,
-                        size_change_pct=target_pct,
-                        portfolio_value=50000.0,
-                        current_dollar_amount=0.0,
-                        target_dollar_amount=target_pct * 50000.0,
-                        trade_dollar_amount=target_pct * 50000.0,
-                        current_shares=0.0,
-                        shares_to_trade=(target_pct * 50000.0) / 100.0,
-                        current_price=100.0,
-                        is_buy=True,
-                        is_new_position=True,
-                        is_close=False,
-                        needs_trade=target_pct > 0.005,
-                        timestamp=datetime.now()
-                    )
-
-                def get_current_size(self, symbol: str) -> float:
-                    return 0.0
-
-                def get_portfolio_summary(self) -> Dict[str, Any]:
-                    return {
-                        'allocation_pct': 0.0,
-                        'position_count': 0,
-                        'portfolio_value': 50000.0
-                    }
-
-            class TradingDBManager:
-                def __init__(self, process_name: str = "unknown"):
-                    """Fixed constructor to accept process_name argument"""
-                    self.process_name = process_name
-                    self.logger = logging.getLogger(f"trading_db_stub.{process_name}")
-
-                def get_holdings(self, **kwargs):
-                    return []
-
-                def insert_transaction(self, **kwargs):
-                    return True
-
-                def upsert_holding(self, **kwargs):
-                    return True
-
-            class SimpleAlpacaInterface:
-                def __init__(self, config=None):
-                    self.logger = logging.getLogger("alpaca_stub")
-
-                def get_account_info(self):
-                    return type('Account', (), {
-                        'portfolio_value': 50000.0,
-                        'buying_power': 25000.0,
-                        'account_number': 'STUB_ACCOUNT',
-                        'cash': 25000.0,
-                        'equity': 50000.0
-                    })()
+            raise ImportError("PRODUCTION: Required trading components not available. "
+                            "PurePositionSizer, TradingDBManager, and SimpleAlpacaInterface must be properly imported. "
+                            "No mock implementations allowed.")
 
 
 class RiskLevel(Enum):

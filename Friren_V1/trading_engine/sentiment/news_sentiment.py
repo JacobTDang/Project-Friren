@@ -39,51 +39,57 @@ class SymbolExtractor:
     """Enhanced symbol extraction with better coverage"""
 
     def __init__(self):
-        # Expanded known symbols list
-        self.known_symbols = {
-            # Tech giants
-            'AAPL', 'MSFT', 'GOOGL', 'GOOG', 'AMZN', 'TSLA', 'META', 'NVDA', 'NFLX', 'ADBE',
-            'CRM', 'ORCL', 'IBM', 'INTC', 'AMD', 'QCOM', 'TXN', 'AVGO', 'CSCO',
+        # CRITICAL: NO HARDCODED SYMBOLS - Use dynamic symbol extraction
+        # Initialize with empty set - will be populated dynamically from actual market data
+        self.known_symbols = set()
+        
+        # Load symbols dynamically from external sources
+        self._load_dynamic_symbols()
 
-            # Finance
-            'JPM', 'BAC', 'WFC', 'GS', 'MS', 'C', 'BLK', 'SCHW', 'SPGI', 'AXP', 'V', 'MA', 'PYPL', 'COIN',
+        # CRITICAL: NO HARDCODED COMPANY MAPPINGS - Use dynamic mapping
+        # Initialize with empty dict - will be populated dynamically from actual market data
+        self.company_mappings = {}
+        
+        # Load company mappings dynamically
+        self._load_dynamic_company_mappings()
 
-            # Healthcare
-            'JNJ', 'PFE', 'UNH', 'ABBV', 'MRK', 'TMO', 'ABT', 'DHR', 'LLY', 'AMGN', 'GILD', 'VRTX', 'CVS',
-
-            # Consumer
-            'PG', 'KO', 'PEP', 'WMT', 'COST', 'HD', 'LOW', 'TGT', 'NKE', 'SBUX', 'MCD', 'DIS', 'VZ', 'T',
-
-            # Energy
-            'XOM', 'CVX', 'COP', 'EOG', 'SLB', 'OXY', 'HON',
-
-            # Industrials
-            'BA', 'CAT', 'DE', 'GE', 'MMM', 'RTX', 'UPS', 'FDX', 'LMT',
-
-            # ETFs and Indices
-            'SPY', 'QQQ', 'IWM', 'DIA', 'VTI', 'VOO', 'VEA', 'VWO', 'AGG', 'BND', 'GLD', 'SLV',
-
-            # Popular/Meme stocks
-            'GME', 'AMC', 'BB', 'NOK', 'PLTR', 'RBLX', 'HOOD', 'SOFI', 'RIVN', 'LCID', 'UBER', 'LYFT', 'SNAP',
-
-            # Additional tickers from your output
-            'OKLO', 'QUBT', 'SMR', 'RGTI', 'FLR', 'NEGG', 'LYELL', 'SMMT', 'CHWY', 'GTLB', 'VOYG',
-            'COMP', 'CLF', 'RYCEY', 'ANVS', 'HBCP', 'SIRI', 'DVA', 'SBLK', 'ESEA', 'BCS', 'SFM',
-            'CVBF', 'TFC', 'EWBC', 'NWBI', 'WTFCN', 'VSH', 'NVO', 'VRE', 'BHF', 'RZB', 'NMIH',
-            'CRS', 'BFAM', 'DAVEW', 'ARTNB', 'FTK', 'GBNXF', 'ESE', 'KIGRY'
-        }
-
-        # Company name to symbol mappings
-        self.company_mappings = {
-            'apple': 'AAPL', 'microsoft': 'MSFT', 'google': 'GOOGL', 'alphabet': 'GOOGL',
-            'amazon': 'AMZN', 'tesla': 'TSLA', 'facebook': 'META', 'meta': 'META',
-            'nvidia': 'NVDA', 'netflix': 'NFLX', 'adobe': 'ADBE', 'salesforce': 'CRM',
-            'oracle': 'ORCL', 'intel': 'INTC', 'qualcomm': 'QCOM', 'jpmorgan': 'JPM',
-            'johnson': 'JNJ', 'pfizer': 'PFE', 'walmart': 'WMT', 'costco': 'COST',
-            'boeing': 'BA', 'caterpillar': 'CAT', 'disney': 'DIS', 'nike': 'NKE',
-            'starbucks': 'SBUX', 'mcdonald': 'MCD', 'visa': 'V', 'mastercard': 'MA',
-            'honeywell': 'HON', 'chevron': 'CVX'
-        }
+    def _load_dynamic_symbols(self):
+        """Load symbols dynamically from market data sources - NO HARDCODED VALUES"""
+        try:
+            # Method 1: Load from active portfolio holdings in database
+            try:
+                import sys
+                import os
+                project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                if project_root not in sys.path:
+                    sys.path.append(project_root)
+                    
+                from Friren_V1.trading_engine.portfolio_manager.tools.db_manager import DatabaseManager
+                db_manager = DatabaseManager()
+                portfolio_symbols = db_manager.get_active_portfolio_symbols()
+                if portfolio_symbols:
+                    self.known_symbols.update(portfolio_symbols)
+                    print(f"Loaded {len(portfolio_symbols)} symbols from active portfolio")
+            except Exception as e:
+                print(f"Could not load portfolio symbols: {e}")
+            
+            # Method 2: Use basic symbol pattern matching for unknown symbols
+            # This is a fallback - we'll identify symbols from article content itself
+            if not self.known_symbols:
+                print("No portfolio symbols available - will use dynamic symbol extraction from article content")
+                
+        except Exception as e:
+            print(f"Error loading dynamic symbols: {e}")
+            # Empty set is fine - symbols will be extracted from article content
+            
+    def _load_dynamic_company_mappings(self):
+        """Load company name to symbol mappings dynamically - NO HARDCODED VALUES"""
+        try:
+            # For now, keep empty - we'll rely on symbol extraction from article content
+            # In the future, this could pull from a financial API or database
+            pass
+        except Exception as e:
+            print(f"Error loading company mappings: {e}")
 
     def extract_symbols(self, text: str) -> List[str]:
         """Extract stock symbols from text with aggressive matching"""
@@ -125,16 +131,18 @@ class SymbolExtractor:
                 symbols.add(symbol)
 
         # 6. Context-aware patterns (for Reddit/informal text)
-        trading_patterns = [
-            r'\b(' + '|'.join(self.known_symbols) + r')\s+(?:calls?|puts?|options?|stock|shares?)\b',
-            r'(?:bought?|sold?|buying|selling)\s+(' + '|'.join(self.known_symbols) + r')\b',
-            r'\b(' + '|'.join(self.known_symbols) + r')\s+(?:up|down|gained?|lost)\s+\d+',
-            r'\b(' + '|'.join(self.known_symbols) + r')\s+(?:to|at)\s+\$\d+',
-        ]
+        # Only use if we have known symbols loaded
+        if self.known_symbols:
+            trading_patterns = [
+                r'\b(' + '|'.join(self.known_symbols) + r')\s+(?:calls?|puts?|options?|stock|shares?)\b',
+                r'(?:bought?|sold?|buying|selling)\s+(' + '|'.join(self.known_symbols) + r')\b',
+                r'\b(' + '|'.join(self.known_symbols) + r')\s+(?:up|down|gained?|lost)\s+\d+',
+                r'\b(' + '|'.join(self.known_symbols) + r')\s+(?:to|at)\s+\$\d+',
+            ]
 
-        for pattern in trading_patterns:
-            matches = re.findall(pattern, text, re.IGNORECASE)
-            symbols.update([m.upper() for m in matches])
+            for pattern in trading_patterns:
+                matches = re.findall(pattern, text, re.IGNORECASE)
+                symbols.update([m.upper() for m in matches])
 
         return list(symbols)
 

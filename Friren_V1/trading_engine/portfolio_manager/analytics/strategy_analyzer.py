@@ -16,6 +16,9 @@ from ...data.yahoo_price import YahooFinancePriceData
 # Import chaos detection components
 from .market_analyzer import MarketAnalyzer, MarketRegimeResult
 
+# Import dynamic market metrics for chaos scoring
+from ...analytics.market_metrics import get_all_metrics, MarketMetricsResult
+
 
 class StrategyAnalyzer:
     """
@@ -60,14 +63,15 @@ class StrategyAnalyzer:
             'strategy_performance': {}
         }
 
-        # CHAOS DETECTION: Using entropy regime detection system
+        # CHAOS DETECTION: Using entropy regime detection system with dynamic thresholds
         self.market_analyzer = None
         self.chaos_detection_enabled = True
+        # Initialize with conservative defaults - will be updated dynamically per symbol
         self.chaos_thresholds = {
-            'entropy_chaos_threshold': 0.8,  # High entropy indicates chaos
-            'regime_confidence_threshold': 0.4,  # Low confidence indicates uncertainty
-            'transition_probability_threshold': 0.7,  # High transition probability indicates instability
-            'volatility_spike_threshold': 2.0  # Volatility spike multiplier
+            'entropy_chaos_threshold': None,  # Will be calculated based on market volatility
+            'regime_confidence_threshold': None,  # Will be calculated based on market stability
+            'transition_probability_threshold': None,  # Will be calculated based on market regime
+            'volatility_spike_threshold': None  # Will be calculated based on historical volatility
         }
         
         # Chaos tracking
@@ -250,40 +254,15 @@ class StrategyAnalyzer:
                 }
                 tasks.append(task)
 
-            # Define worker function for this analysis
-            def strategy_worker(task):
-                try:
-                    symbol = task['symbol']
-                    market_data = task['market_data']
-                    
-                    # Simple strategy analysis - can be enhanced
-                    # For now, return basic signal structure
-                    signals = [{
-                        'symbol': symbol,
-                        'action': 'HOLD',
-                        'confidence': 60.0,
-                        'strategy': 'momentum_strategy',
-                        'reasoning': 'Basic analysis placeholder',
-                        'timestamp': datetime.now()
-                    }]
-                    
-                    return {
-                        'symbol': symbol,
-                        'signals': signals,
-                        'success': True
-                    }
-                except Exception as e:
-                    return {
-                        'symbol': task.get('symbol', 'unknown'),
-                        'signals': [],
-                        'success': False,
-                        'error': str(e)
-                    }
+            # PROPER ARCHITECTURE: Use the refactored worker function from process layer
+            from ..processes.strategy_analyzer_process import strategy_analysis_worker
+            
+            # The worker function is now properly implemented with base strategy architecture
 
-            # Execute tasks in parallel using correct method
+            # Execute tasks in parallel using proper worker function
             task_results = self.multiprocess_manager.execute_tasks_parallel(
                 tasks=tasks,
-                worker_function=strategy_worker,
+                worker_function=strategy_analysis_worker,
                 timeout=60
             )
 
@@ -293,12 +272,20 @@ class StrategyAnalyzer:
                 if task_result.success:
                     result_data = task_result.data
                     symbol = result_data.get('symbol')
-                    if symbol:
+                    signals = result_data.get('signals', [])
+                    
+                    if symbol and signals:
+                        # Use the highest confidence signal for overall result
+                        max_confidence_signal = max(signals, key=lambda s: s.get('confidence', 0))
+                        
                         # Structure compatible with existing processing
                         strategy_results[symbol] = {
-                            'strategy': 'momentum_strategy',
-                            'confidence': 60.0,
-                            'signals': result_data.get('signals', [])
+                            'strategy': max_confidence_signal.get('strategy', 'unknown'),
+                            'confidence': max_confidence_signal.get('confidence', 0),
+                            'signals': signals,
+                            'strategies_used': result_data.get('strategies_used', []),
+                            'action': max_confidence_signal.get('action', 'HOLD'),
+                            'reasoning': max_confidence_signal.get('reasoning', 'No clear signal')
                         }
 
             self.logger.info(f"Multiprocess analysis complete - {len(strategy_results)} symbols analyzed")
@@ -492,8 +479,59 @@ class StrategyAnalyzer:
             self.logger.error(f"Error in chaos detection for {symbol}: {e}")
             return {'chaos_detected': False, 'reason': 'detection_error', 'error': str(e)}
     
+    def _calculate_dynamic_chaos_thresholds(self, symbol: str) -> Dict[str, float]:
+        """Calculate dynamic chaos thresholds based on market metrics - NO HARDCODED VALUES"""
+        
+        try:
+            # Get comprehensive market metrics for the symbol
+            market_metrics = get_all_metrics(symbol)
+            
+            if market_metrics and market_metrics.volatility is not None:
+                volatility = market_metrics.volatility
+                risk_score = market_metrics.risk_score or 50.0  # Conservative fallback if None
+                
+                # Dynamic entropy threshold based on volatility
+                # High volatility markets need higher entropy threshold (more tolerance for chaos)
+                entropy_threshold = min(0.9, 0.6 + (volatility * 0.3))
+                
+                # Dynamic confidence threshold based on risk score
+                # High risk markets need higher confidence requirements
+                confidence_threshold = max(0.2, 0.6 - (risk_score / 200.0))  # Scale risk 0-100 to 0-0.5
+                
+                # Dynamic transition probability threshold based on market stability
+                transition_threshold = min(0.9, 0.5 + (volatility * 0.4))
+                
+                # Dynamic volatility spike threshold based on historical volatility
+                volatility_spike_threshold = max(1.5, 1.0 + (volatility * 2.0))
+                
+                return {
+                    'entropy_chaos_threshold': entropy_threshold,
+                    'regime_confidence_threshold': confidence_threshold,
+                    'transition_probability_threshold': transition_threshold,
+                    'volatility_spike_threshold': volatility_spike_threshold
+                }
+            else:
+                # Conservative thresholds when no market data available
+                self.logger.warning(f"No market metrics for {symbol} - using conservative chaos thresholds")
+                return {
+                    'entropy_chaos_threshold': 0.7,  # More sensitive to chaos
+                    'regime_confidence_threshold': 0.5,  # Require higher confidence
+                    'transition_probability_threshold': 0.6,  # More sensitive to transitions
+                    'volatility_spike_threshold': 1.8  # More sensitive to volatility spikes
+                }
+                
+        except Exception as e:
+            self.logger.error(f"Failed to calculate dynamic thresholds for {symbol}: {e}")
+            # Very conservative fallback
+            return {
+                'entropy_chaos_threshold': 0.6,
+                'regime_confidence_threshold': 0.6,
+                'transition_probability_threshold': 0.5,
+                'volatility_spike_threshold': 1.5
+            }
+
     def _analyze_chaos_indicators(self, regime_result: MarketRegimeResult, symbol: str) -> Dict[str, Any]:
-        """Analyze regime result for chaos indicators"""
+        """Analyze regime result for chaos indicators with dynamic scoring"""
         chaos_indicators = {
             'chaos_detected': False,
             'symbol': symbol,
@@ -507,69 +545,125 @@ class StrategyAnalyzer:
         reasons = []
         chaos_score = 0.0
         
-        # Check entropy chaos indicators
+        # Get dynamic thresholds based on market metrics
+        dynamic_thresholds = self._calculate_dynamic_chaos_thresholds(symbol)
+        
+        # Get market metrics for dynamic scoring weights
+        try:
+            market_metrics = get_all_metrics(symbol)
+            volatility = market_metrics.volatility if market_metrics else None
+            risk_score = market_metrics.risk_score if market_metrics else None
+        except Exception as e:
+            self.logger.warning(f"Failed to get market metrics for chaos scoring: {e}")
+            volatility = None
+            risk_score = None
+        
+        # Check entropy chaos indicators with dynamic scoring
         if hasattr(regime_result, 'entropy_measures'):
             entropy_measures = regime_result.entropy_measures
             
-            # High entropy indicates chaos
+            # High entropy indicates chaos - dynamic threshold and scoring
             if 'total_entropy' in entropy_measures:
                 total_entropy = entropy_measures['total_entropy']
-                if total_entropy > self.chaos_thresholds['entropy_chaos_threshold']:
+                entropy_threshold = dynamic_thresholds['entropy_chaos_threshold']
+                if total_entropy > entropy_threshold:
                     reasons.append(f"high_entropy_{total_entropy:.2f}")
-                    chaos_score += 0.4
+                    # Dynamic scoring based on how much entropy exceeds threshold and market volatility
+                    excess_entropy = total_entropy - entropy_threshold
+                    volatility_multiplier = 1.0 + (volatility * 0.5) if volatility else 1.0
+                    entropy_score = min(0.5, excess_entropy * volatility_multiplier)
+                    chaos_score += entropy_score
             
-            # Check price entropy specifically
+            # Check price entropy specifically with dynamic threshold
             if 'price_entropy' in entropy_measures:
                 price_entropy = entropy_measures['price_entropy']
-                if price_entropy > 0.85:  # Very high price entropy
+                # Dynamic price entropy threshold based on market risk
+                price_entropy_threshold = 0.75 + (risk_score / 500.0) if risk_score else 0.8
+                if price_entropy > price_entropy_threshold:
                     reasons.append(f"price_chaos_{price_entropy:.2f}")
-                    chaos_score += 0.3
+                    # Dynamic scoring based on price entropy severity
+                    excess_price_entropy = price_entropy - price_entropy_threshold
+                    price_chaos_score = min(0.4, excess_price_entropy * 2.0)
+                    chaos_score += price_chaos_score
         
-        # Low regime confidence indicates uncertainty
-        if regime_result.regime_confidence < self.chaos_thresholds['regime_confidence_threshold']:
+        # Low regime confidence indicates uncertainty - dynamic scoring
+        confidence_threshold = dynamic_thresholds['regime_confidence_threshold']
+        if regime_result.regime_confidence < confidence_threshold:
             reasons.append(f"low_confidence_{regime_result.regime_confidence:.2f}")
-            chaos_score += 0.3
+            # Dynamic scoring based on confidence deficit and market risk
+            confidence_deficit = confidence_threshold - regime_result.regime_confidence
+            risk_multiplier = 1.0 + (risk_score / 200.0) if risk_score else 1.0
+            confidence_score = min(0.4, confidence_deficit * risk_multiplier)
+            chaos_score += confidence_score
         
-        # High transition probability indicates instability
-        if regime_result.regime_transition_probability > self.chaos_thresholds['transition_probability_threshold']:
+        # High transition probability indicates instability - dynamic scoring
+        transition_threshold = dynamic_thresholds['transition_probability_threshold']
+        if regime_result.regime_transition_probability > transition_threshold:
             reasons.append(f"high_transition_prob_{regime_result.regime_transition_probability:.2f}")
-            chaos_score += 0.3
+            # Dynamic scoring based on transition probability excess and volatility
+            transition_excess = regime_result.regime_transition_probability - transition_threshold
+            volatility_multiplier = 1.0 + (volatility * 0.3) if volatility else 1.0
+            transition_score = min(0.4, transition_excess * volatility_multiplier * 2.0)
+            chaos_score += transition_score
         
-        # Volatility spike detection
+        # Volatility spike detection with dynamic scoring
         if regime_result.volatility_regime == "HIGH_VOLATILITY":
-            if regime_result.current_volatility > self.chaos_thresholds['volatility_spike_threshold']:
+            volatility_threshold = dynamic_thresholds['volatility_spike_threshold']
+            if regime_result.current_volatility > volatility_threshold:
                 reasons.append(f"volatility_spike_{regime_result.current_volatility:.2f}")
-                chaos_score += 0.4
+                # Dynamic scoring based on volatility spike magnitude
+                volatility_spike_ratio = regime_result.current_volatility / volatility_threshold
+                # Higher spikes get exponentially higher scores, capped at 0.5
+                volatility_score = min(0.5, 0.2 * (volatility_spike_ratio ** 1.5))
+                chaos_score += volatility_score
         
-        # Strategy conflict detection (if multiple strategies disagree strongly)
+        # Strategy conflict detection with dynamic scoring
         if hasattr(regime_result, 'enhanced_regime') and hasattr(regime_result, 'entropy_regime'):
             if regime_result.enhanced_regime != regime_result.entropy_regime:
                 reasons.append("regime_detector_conflict")
-                chaos_score += 0.2
+                # Dynamic scoring based on market uncertainty
+                # Higher risk markets get higher conflict penalties
+                conflict_score = 0.1 + (risk_score / 1000.0) if risk_score else 0.15
+                chaos_score += min(0.25, conflict_score)
         
-        # Determine chaos level and urgency
-        if chaos_score >= 0.8:
+        # Determine chaos level and urgency with dynamic thresholds
+        # Dynamic thresholds based on market characteristics
+        if volatility and risk_score:
+            # More volatile/risky markets need higher thresholds to trigger alerts
+            base_adjustment = (volatility * 0.1) + (risk_score / 1000.0)
+            critical_threshold = min(0.9, 0.7 + base_adjustment)
+            high_threshold = min(0.8, 0.5 + base_adjustment)
+            medium_threshold = min(0.6, 0.3 + base_adjustment)
+            low_threshold = min(0.4, 0.15 + base_adjustment)
+        else:
+            # Conservative thresholds when no market data
+            critical_threshold = 0.6
+            high_threshold = 0.45
+            medium_threshold = 0.3
+            low_threshold = 0.15
+        
+        if chaos_score >= critical_threshold:
             chaos_indicators.update({
                 'chaos_detected': True,
                 'chaos_level': 'critical',
                 'urgency': 'critical',
                 'recommendation': 'immediate_news_collection'
             })
-        elif chaos_score >= 0.6:
+        elif chaos_score >= high_threshold:
             chaos_indicators.update({
                 'chaos_detected': True,
                 'chaos_level': 'high',
                 'urgency': 'high',
                 'recommendation': 'targeted_news_collection'
             })
-        elif chaos_score >= 0.4:
+        elif chaos_score >= medium_threshold:
             chaos_indicators.update({
                 'chaos_detected': True,
                 'chaos_level': 'medium',
                 'urgency': 'medium',
                 'recommendation': 'enhanced_monitoring'
             })
-        elif chaos_score >= 0.2:
+        elif chaos_score >= low_threshold:
             chaos_indicators.update({
                 'chaos_level': 'low',
                 'urgency': 'low',

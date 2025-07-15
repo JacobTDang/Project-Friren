@@ -26,6 +26,9 @@ except ImportError:
     from base import NewsDataSource, NewsArticle
     from yahoo_news import SymbolExtractor
 
+# Import configuration manager to eliminate ALL hardcoded values
+from Friren_V1.infrastructure.configuration_manager import get_config
+
 
 class FMPNews(NewsDataSource):
     """Financial Modeling Prep API news collector - FREE TIER ONLY"""
@@ -41,18 +44,30 @@ class FMPNews(NewsDataSource):
                 "FMP API key not found. Set FMP_API_KEY environment variable or pass api_key parameter."
             )
 
-        self.base_url = "https://financialmodelingprep.com/api/v3"
-        self.base_url_v4 = "https://financialmodelingprep.com/api/v4"
+        # PRODUCTION: Get FMP API configuration - NO HARDCODED VALUES
+        try:
+            from Friren_V1.infrastructure.configuration_manager import get_config
+            self.base_url = get_config('FMP_API_BASE_URL')
+            self.base_url_v4 = get_config('FMP_API_V4_URL')
+            self.max_daily_requests = get_config('FMP_MAX_DAILY_REQUESTS')
+            
+            if not self.base_url or not self.base_url_v4:
+                raise ValueError("PRODUCTION: FMP_API_BASE_URL and FMP_API_V4_URL must be configured")
+            if not self.max_daily_requests or self.max_daily_requests <= 0:
+                raise ValueError("PRODUCTION: FMP_MAX_DAILY_REQUESTS must be configured and positive")
+                
+        except ImportError:
+            raise ImportError("CRITICAL: Configuration manager required for FMP API. No hardcoded URLs allowed.")
+        
         self.session = requests.Session()
         self.daily_requests = 0
-        self.max_daily_requests = 250  # Free tier limit
         self.logger = logging.getLogger(f"{__name__}.FMPNews")
 
         # Rate limiting and error tracking
         self.rate_limited = False
         self.rate_limit_detected_at = None
         self.consecutive_failures = 0
-        self.max_consecutive_failures = 3
+        self.max_consecutive_failures = get_config('FMP_MAX_CONSECUTIVE_FAILURES', 3)
 
         self.symbol_extractor = SymbolExtractor()
 
@@ -60,7 +75,8 @@ class FMPNews(NewsDataSource):
         """Check if API is available and not rate limited"""
         if self.rate_limited:
             # Reset rate limit status after 1 hour
-            if self.rate_limit_detected_at and (datetime.now() - self.rate_limit_detected_at).total_seconds() > 3600:
+            rate_limit_reset_seconds = get_config('FMP_RATE_LIMIT_RESET_SECONDS', 3600)
+            if self.rate_limit_detected_at and (datetime.now() - self.rate_limit_detected_at).total_seconds() > rate_limit_reset_seconds:
                 self.logger.info("Resetting FMP rate limit status after 1 hour")
                 self.rate_limited = False
                 self.consecutive_failures = 0
@@ -108,7 +124,8 @@ class FMPNews(NewsDataSource):
             return None
 
         try:
-            response = self.session.get(url, params=params, timeout=30)
+            request_timeout = get_config('FMP_REQUEST_TIMEOUT', 30)
+            response = self.session.get(url, params=params, timeout=request_timeout)
 
             # Check for rate limiting or other errors
             if self._handle_api_error(response=response):
@@ -147,10 +164,11 @@ class FMPNews(NewsDataSource):
 
             # FMP general articles endpoint (ORIGINAL WORKING VERSION)
             url = f"{self.base_url}/fmp/articles"
+            free_tier_limit = get_config('FMP_FREE_TIER_LIMIT', 20)
             params = {
                 'apikey': self.api_key,
                 'page': 0,
-                'size': min(20, max_articles)  # Free tier limit
+                'size': min(free_tier_limit, max_articles)  # Free tier limit from configuration
             }
 
             data = self._make_api_request(url, params)
@@ -174,8 +192,10 @@ class FMPNews(NewsDataSource):
             return articles[:max_articles]
 
         except Exception as e:
-            self.logger.error(f"Error collecting FMP news: {e}")
-            return []
+            # PRODUCTION: FAIL FAST - No fallback data
+            error_msg = f"CRITICAL: FMP general news collection failed: {e}"
+            self.logger.error(error_msg)
+            raise RuntimeError(error_msg)
 
     def get_symbol_news(self, symbol: str, hours_back: int = 24, max_articles: int = 20) -> List[NewsArticle]:
         """Get news for a symbol - FREE TIER (limited by filtering general news)"""
@@ -185,7 +205,8 @@ class FMPNews(NewsDataSource):
             symbol_articles = []
 
             # Only get press releases to save API calls (1 request instead of 2)
-            if self.daily_requests < self.max_daily_requests - 5:  # Save some requests
+            request_buffer = get_config('FMP_REQUEST_BUFFER', 5)
+            if self.daily_requests < self.max_daily_requests - request_buffer:  # Save some requests from configuration
                 try:
                     press_releases = self.get_press_releases(symbol, max_articles=max_articles)
                     symbol_articles.extend(press_releases)
@@ -196,8 +217,10 @@ class FMPNews(NewsDataSource):
             return symbol_articles[:max_articles]
 
         except Exception as e:
-            self.logger.error(f"Error getting FMP news for {symbol}: {e}")
-            return []
+            # PRODUCTION: FAIL FAST - No fallback data
+            error_msg = f"CRITICAL: FMP symbol news collection failed for {symbol}: {e}"
+            self.logger.error(error_msg)
+            raise RuntimeError(error_msg)
 
     def get_watchlist_news(self, symbols: List[str], hours_back: int = 24,
                           max_articles_per_symbol: int = 10) -> Dict[str, List[NewsArticle]]:
@@ -295,14 +318,16 @@ class FMPNews(NewsDataSource):
                 gainers_url = f"{self.base_url}/stock_market/gainers"
                 params = {'apikey': self.api_key}
 
-                response = self.session.get(gainers_url, params=params, timeout=30)
+                request_timeout = get_config('FMP_REQUEST_TIMEOUT', 30)
+                response = self.session.get(gainers_url, params=params, timeout=request_timeout)
                 response.raise_for_status()
                 self.daily_requests += 1
 
                 gainers_data = response.json()
 
                 if isinstance(gainers_data, list):
-                    gainers = [stock.get('symbol', '') for stock in gainers_data[:10]]
+                    max_gainers = get_config('FMP_MAX_GAINERS', 10)
+                    gainers = [stock.get('symbol', '') for stock in gainers_data[:max_gainers]]
 
             except Exception as e:
                 self.logger.debug(f"Error getting gainers: {e}")
@@ -312,14 +337,16 @@ class FMPNews(NewsDataSource):
                 losers_url = f"{self.base_url}/stock_market/losers"
                 params = {'apikey': self.api_key}
 
-                response = self.session.get(losers_url, params=params, timeout=30)
+                request_timeout = get_config('FMP_REQUEST_TIMEOUT', 30)
+                response = self.session.get(losers_url, params=params, timeout=request_timeout)
                 response.raise_for_status()
                 self.daily_requests += 1
 
                 losers_data = response.json()
 
                 if isinstance(losers_data, list):
-                    losers = [stock.get('symbol', '') for stock in losers_data[:10]]
+                    max_losers = get_config('FMP_MAX_LOSERS', 10)
+                    losers = [stock.get('symbol', '') for stock in losers_data[:max_losers]]
 
             except Exception as e:
                 self.logger.debug(f"Error getting losers: {e}")
@@ -360,7 +387,8 @@ class FMPNews(NewsDataSource):
         try:
             title = article_data.get('title', '').strip()
 
-            if not title or len(title) < 10:
+            min_title_length = get_config('MIN_TITLE_LENGTH', 10)
+            if not title or len(title) < min_title_length:
                 return None
 
             # Parse publication date
@@ -407,7 +435,8 @@ class FMPNews(NewsDataSource):
         try:
             title = release_data.get('title', '').strip()
 
-            if not title or len(title) < 10:
+            min_title_length = get_config('MIN_TITLE_LENGTH', 10)
+            if not title or len(title) < min_title_length:
                 return None
 
             # Parse publication date

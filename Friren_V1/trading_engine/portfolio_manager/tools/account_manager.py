@@ -35,6 +35,10 @@ try:
     from .db_manager import TradingDBManager
     from .alpaca_interface import SimpleAlpacaInterface, AlpacaAccount
 except ImportError:
+    # Fallback for when module is run directly
+    import sys
+    import os
+    sys.path.append(os.path.dirname(__file__))
     from db_manager import TradingDBManager
     from alpaca_interface import SimpleAlpacaInterface, AlpacaAccount
 
@@ -391,41 +395,21 @@ class AccountManager:
         )
 
     def _get_alpaca_data(self) -> AlpacaAccount:
-        """Get account data from Alpaca API with simulation fallback for demo"""
+        """Get account data from Alpaca API - NO FALLBACKS"""
         try:
             account = self.alpaca_interface.get_account_info()
             if account:
                 self.logger.debug("Real Alpaca account data retrieved successfully")
                 return account
             else:
-                # Fallback to simulation mode for demo
-                self.logger.warning("Alpaca API unavailable - using SIMULATION data for demo")
-                return self._create_simulation_account()
+                # NO FALLBACK - system must fail if Alpaca API unavailable
+                self.logger.error("CRITICAL: Alpaca API unavailable - NO SIMULATION FALLBACK ALLOWED")
+                raise RuntimeError("PRODUCTION: Alpaca API required for account data. Check API credentials and connectivity.")
 
         except Exception as e:
-            self.logger.warning(f"Alpaca API error: {e} - falling back to SIMULATION mode")
-            return self._create_simulation_account()
+            self.logger.error(f"CRITICAL: Alpaca API error: {e} - NO FALLBACK TO SIMULATION")
+            raise RuntimeError(f"PRODUCTION: Alpaca API required for account operations: {e}")
 
-    def _create_simulation_account(self) -> AlpacaAccount:
-        """Create simulated account data for demo purposes"""
-        from Friren_V1.trading_engine.portfolio_manager.tools.alpaca_interface import AlpacaAccount
-
-        # Create realistic demo portfolio for testing
-        portfolio_value = 100000.0  # $100k paper trading account
-        cash = 95000.0  # $95k cash available
-        equity = portfolio_value
-
-        return AlpacaAccount(
-            account_id="DEMO_ACCOUNT_123456",
-            buying_power=cash * 4,  # 4:1 margin for day trading
-            cash=cash,
-            portfolio_value=portfolio_value,
-            day_trade_buying_power=cash * 4,
-            initial_margin=2500.0,
-            maintenance_margin=2500.0,
-            equity=equity,
-            last_equity=equity - 250.0  # Small loss today for demo
-        )
 
     def _get_database_data(self) -> Dict[str, Any]:
         """Get relevant data from local database - ONLY when account snapshot is refreshed"""
@@ -442,9 +426,9 @@ class AccountManager:
             }
 
         except Exception as e:
-            self.logger.error(f"Database error (production): {e}")
-            # In production, database errors should not cause fallbacks
-            raise RuntimeError(f"Database required for portfolio calculations: {e}")
+            self.logger.error(f"CRITICAL: Database error in production: {e}")
+            # NO FALLBACKS - database is required for portfolio calculations
+            raise RuntimeError(f"PRODUCTION: Database required for portfolio calculations: {e}")
 
     def _calculate_pnl_metrics(self, alpaca_account: AlpacaAccount, db_data: Dict) -> Dict[str, float]:
         """Calculate P&L metrics from available data"""

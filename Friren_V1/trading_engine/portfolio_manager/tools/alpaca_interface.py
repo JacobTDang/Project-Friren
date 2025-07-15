@@ -21,6 +21,17 @@ from datetime import datetime
 from enum import Enum
 import logging
 
+# Import API resilience system
+try:
+    from Friren_V1.infrastructure.api_resilience import (
+        APIResilienceManager, APIServiceType, resilient_api_call, 
+        get_resilience_manager, resilient_alpaca_call
+    )
+    HAS_RESILIENCE = True
+except ImportError:
+    HAS_RESILIENCE = False
+    print("⚠️ API Resilience system not available - using basic error handling")
+
 # Modern Alpaca imports with fallback
 try:
     from alpaca.trading.client import TradingClient
@@ -167,29 +178,45 @@ class SimpleAlpacaInterface:
         self.logger.info("Alpaca interface initialized in PRODUCTION mode")
 
     def _initialize_clients(self):
-        """Initialize Alpaca trading and data clients with production validation"""
+        """Initialize Alpaca trading and data clients with production validation and resilience"""
         if not HAS_ALPACA:
             raise RuntimeError("CRITICAL: Alpaca library not available. Cannot initialize trading interface. Install alpaca-py library.")
         
-        try:
+        # Initialize API resilience manager if available
+        self.resilience_manager = get_resilience_manager() if HAS_RESILIENCE else None
+        
+        def _create_clients():
+            """Internal function to create clients (wrapped by resilience system)"""
             # Create trading client for orders and account management
-            self.trading_client = TradingClient(
+            trading_client = TradingClient(
                 api_key=self.config.api_key,
                 secret_key=self.config.secret_key,
-                paper=True  # Always use paper trading for safety - automatically uses paper endpoint
+                paper=True  # Always use paper trading for safety
             )
 
             # Create data client for market data
-            self.data_client = StockHistoricalDataClient(
+            data_client = StockHistoricalDataClient(
                 api_key=self.config.api_key,
                 secret_key=self.config.secret_key
             )
 
             # Test connection by getting account info
-            account = self.trading_client.get_account()
+            account = trading_client.get_account()
+            
+            return trading_client, data_client, account
+        
+        try:
+            if self.resilience_manager:
+                # Use resilient initialization
+                self.trading_client, self.data_client, account = self.resilience_manager.resilient_call(
+                    _create_clients, APIServiceType.ALPACA_TRADING, "initialize_clients"
+                )
+            else:
+                # Fallback to direct initialization
+                self.trading_client, self.data_client, account = _create_clients()
+            
             self.connected = True
-
-            self.logger.info(f"Alpaca API connected successfully")
+            self.logger.info(f"Alpaca API connected successfully with resilience protection")
             self.logger.info(f"Account: {account.account_number[:8]}... | "
                            f"Buying Power: ${float(account.buying_power):,.2f}")
 
@@ -311,17 +338,18 @@ class SimpleAlpacaInterface:
 
     def get_current_price(self, symbol: str) -> Optional[float]:
         """
-        Get current market price for symbol
+        Get current market price for symbol with resilience protection
 
         **Position Sizer Integration:**
         Used by position sizer for accurate trade amount calculations.
         """
-        try:
+        def _get_price():
+            """Internal function to get price (wrapped by resilience system)"""
             self.api_call_count += 1
             self.last_api_call = datetime.now()
 
             if not self.data_client:
-                return None
+                raise Exception("Data client not available")
 
             # Get latest quote
             request_params = StockLatestQuoteRequest(symbol_or_symbols=[symbol])
@@ -340,8 +368,15 @@ class SimpleAlpacaInterface:
                 elif bid > 0:
                     return bid
 
-            return None
+            raise Exception(f"No valid price data for {symbol}")
 
+        try:
+            if self.resilience_manager:
+                return self.resilience_manager.resilient_call(
+                    _get_price, APIServiceType.ALPACA_DATA, f"get_price_{symbol}"
+                )
+            else:
+                return _get_price()
         except Exception as e:
             self.logger.error(f"Error getting price for {symbol}: {e}")
             return None
