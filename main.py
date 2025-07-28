@@ -303,22 +303,60 @@ def load_dynamic_watchlist(logger):
 
         logger.info(f"High-Priority Opportunities: {len(opportunity_symbols)} symbols {opportunity_symbols}")
 
-        # Step 3: Combine holdings + opportunities
-        dynamic_symbols = holding_symbols + opportunity_symbols
+        # Step 3: Get discovered symbols from Redis (if available)
+        discovered_symbols = []
+        try:
+            # Try to get recently discovered symbols from Redis
+            from Friren_V1.multiprocess_infrastructure.trading_redis_manager import get_trading_redis_manager
+            redis_manager = get_trading_redis_manager()
+            if redis_manager and hasattr(redis_manager, 'redis_client'):
+                redis_client = redis_manager.redis_client
+                # Get discovered symbols stored by enhanced_news_pipeline
+                discovered_data = redis_client.get("discovered_symbols")
+                if discovered_data:
+                    import json
+                    discovered_symbols = json.loads(discovered_data)
+                    # Filter out symbols we already have
+                    discovered_symbols = [s for s in discovered_symbols if s not in holding_symbols and s not in opportunity_symbols]
+                    logger.info(f"Recently Discovered Symbols: {len(discovered_symbols)} symbols {discovered_symbols}")
+        except Exception as e:
+            logger.debug(f"Could not load discovered symbols from Redis: {e}")
 
-        # Check if database is empty
+        # Step 4: Combine holdings + opportunities + discovered
+        dynamic_symbols = holding_symbols + opportunity_symbols + discovered_symbols
+
+        # Check if database is empty - FAIL FAST approach
         if not dynamic_symbols:
-            logger.error("CRITICAL: Database watchlist empty - no symbols available for trading")
-            logger.error("Please add symbols to the watchlist database or check database connection")
-            return []  # Return empty list instead of hardcoded fallback
+            logger.critical("CRITICAL: Database watchlist empty - no symbols available for trading")
+            logger.critical("FAIL FAST: System cannot operate without real portfolio symbols from database")
+            logger.critical("ACTION REQUIRED: Add symbols to the watchlist database or check database connection")
+            logger.critical("REFUSING to use hardcoded fallback symbols - system must use real portfolio data")
+            raise RuntimeError("FAIL FAST: Empty database watchlist - system requires real portfolio symbols, not hardcoded fallbacks")
 
         logger.info(f"Dynamic Watchlist Complete: {len(dynamic_symbols)} total symbols")
         return dynamic_symbols
 
     except Exception as e:
         logger.error(f"Error loading dynamic watchlist: {e}")
-        logger.error("CRITICAL: Cannot load symbols from database - system cannot operate without symbols")
-        return []  # Return empty list instead of hardcoded fallback
+        logger.warning("Database unavailable - attempting fallback to DISCOVERY_SYMBOLS configuration")
+        
+        # Fallback to DISCOVERY_SYMBOLS when database is unavailable
+        try:
+            from Friren_V1.infrastructure.configuration_manager import ConfigurationManager
+            config_manager = ConfigurationManager()
+            discovery_symbols = config_manager.get('DISCOVERY_SYMBOLS')
+            
+            if discovery_symbols:
+                logger.info(f"Using DISCOVERY_SYMBOLS fallback: {len(discovery_symbols)} symbols {discovery_symbols}")
+                return discovery_symbols
+            else:
+                logger.error("DISCOVERY_SYMBOLS fallback also empty")
+                
+        except Exception as fallback_error:
+            logger.error(f"Failed to load DISCOVERY_SYMBOLS fallback: {fallback_error}")
+        
+        logger.error("CRITICAL: Cannot load symbols from database or configuration fallback")
+        return []  # Return empty list after all fallbacks exhausted
 
 def refresh_watchlist_after_trade(orchestrator, trade_symbol, logger):
     """
@@ -764,8 +802,8 @@ def run_trading_system():
                         start_thread = threading.Thread(target=start_orchestrator, daemon=True)
                         start_thread.start()
 
-                        # Wait for start with timeout - increased for process health checks
-                        if start_complete.wait(timeout=150.0):  # 150 second timeout for process startup
+                        # Wait for start with timeout - REDUCED for faster startup
+                        if start_complete.wait(timeout=60.0):  # 60 second timeout for process startup
                             if start_error:
                                 logger.error(f"Orchestrator start failed: {start_error}")
                                 break
