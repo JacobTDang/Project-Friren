@@ -276,87 +276,95 @@ def signal_handler(signum, frame):
 
 def load_dynamic_watchlist(logger):
     """
-    Load watchlist from database - production ready
-    Combines current holdings + high-priority opportunities
+    Load watchlist using real-time data - Production ready
+    Priority: Alpaca real-time holdings + ALL database watchlist symbols
+    Fallback: Alpaca watchlist if available, otherwise fail fast
     """
     try:
-        logger.info("Loading dynamic watchlist from database...")
+        logger.info("Loading dynamic watchlist - Primary: Database + Alpaca real-time holdings")
 
-        # Import database components
+        # Import required components
         from Friren_V1.trading_engine.portfolio_manager.tools.db_manager import TradingDBManager
+        from Friren_V1.trading_engine.portfolio_manager.tools.alpaca_interface import SimpleAlpacaInterface
 
-        # Initialize database connection
+        # Initialize connections
         db_manager = TradingDBManager()
+        alpaca = SimpleAlpacaInterface()
 
-        # Step 1: Get current holdings (these are always monitored)
-        holdings = db_manager.get_current_holdings()
-        holding_symbols = [h['symbol'] for h in holdings if float(h['quantity']) > 0]
-
-        logger.info(f"Current Holdings: {len(holding_symbols)} symbols {holding_symbols}")
-
-        # Step 2: Get high-priority watchlist opportunities
-        watchlist = db_manager.get_watchlist(active_only=True)
-        opportunity_symbols = [
-            w['symbol'] for w in watchlist
-            if w['priority'] >= 7 and w['symbol'] not in holding_symbols
-        ][:10]  # Top 10 opportunities
-
-        logger.info(f"High-Priority Opportunities: {len(opportunity_symbols)} symbols {opportunity_symbols}")
-
-        # Step 3: Get discovered symbols from Redis (if available)
-        discovered_symbols = []
+        # Step 1: Get real-time holdings from Alpaca (PRIORITY SOURCE)
+        holding_symbols = []
         try:
-            # Try to get recently discovered symbols from Redis
-            from Friren_V1.multiprocess_infrastructure.trading_redis_manager import get_trading_redis_manager
-            redis_manager = get_trading_redis_manager()
-            if redis_manager and hasattr(redis_manager, 'redis_client'):
-                redis_client = redis_manager.redis_client
-                # Get discovered symbols stored by enhanced_news_pipeline
-                discovered_data = redis_client.get("discovered_symbols")
-                if discovered_data:
-                    import json
-                    discovered_symbols = json.loads(discovered_data)
-                    # Filter out symbols we already have
-                    discovered_symbols = [s for s in discovered_symbols if s not in holding_symbols and s not in opportunity_symbols]
-                    logger.info(f"Recently Discovered Symbols: {len(discovered_symbols)} symbols {discovered_symbols}")
-        except Exception as e:
-            logger.debug(f"Could not load discovered symbols from Redis: {e}")
+            alpaca_positions = alpaca.get_all_positions()
+            holding_symbols = [pos.symbol for pos in alpaca_positions if pos.quantity > 0]
+            logger.info(f"Alpaca Real-time Holdings: {len(holding_symbols)} symbols {holding_symbols}")
+        except Exception as alpaca_error:
+            logger.warning(f"Could not get Alpaca holdings: {alpaca_error}")
+            # Fallback to database holdings if Alpaca fails
+            try:
+                holdings = db_manager.get_current_holdings()
+                holding_symbols = [h['symbol'] for h in holdings if float(h['quantity']) > 0]
+                logger.info(f"Database Holdings Fallback: {len(holding_symbols)} symbols {holding_symbols}")
+            except Exception as db_holdings_error:
+                logger.error(f"Database holdings also failed: {db_holdings_error}")
 
-        # Step 4: Combine holdings + opportunities + discovered
-        dynamic_symbols = holding_symbols + opportunity_symbols + discovered_symbols
+        # Step 2: Get ALL watchlist symbols from database (not just high priority)
+        watchlist_symbols = []
+        try:
+            watchlist = db_manager.get_watchlist(active_only=True)
+            watchlist_symbols = [
+                w['symbol'] for w in watchlist
+                if w['symbol'] not in holding_symbols  # Exclude existing holdings
+            ]
+            logger.info(f"Database Watchlist: {len(watchlist_symbols)} symbols {watchlist_symbols}")
+        except Exception as watchlist_error:
+            logger.error(f"Could not load database watchlist: {watchlist_error}")
 
-        # Check if database is empty - FAIL FAST approach
-        if not dynamic_symbols:
-            logger.critical("CRITICAL: Database watchlist empty - no symbols available for trading")
-            logger.critical("FAIL FAST: System cannot operate without real portfolio symbols from database")
-            logger.critical("ACTION REQUIRED: Add symbols to the watchlist database or check database connection")
-            logger.critical("REFUSING to use hardcoded fallback symbols - system must use real portfolio data")
-            raise RuntimeError("FAIL FAST: Empty database watchlist - system requires real portfolio symbols, not hardcoded fallbacks")
+        # Step 3: Combine holdings + watchlist
+        dynamic_symbols = holding_symbols + watchlist_symbols
 
-        logger.info(f"Dynamic Watchlist Complete: {len(dynamic_symbols)} total symbols")
-        return dynamic_symbols
+        # Success case - we have symbols from primary sources
+        if dynamic_symbols:
+            logger.info(f"Dynamic Watchlist Complete: {len(dynamic_symbols)} total symbols")
+            return dynamic_symbols
 
-    except Exception as e:
-        logger.error(f"Error loading dynamic watchlist: {e}")
-        logger.warning("Database unavailable - attempting fallback to DISCOVERY_SYMBOLS configuration")
+        # If primary sources failed, this will trigger fallback logic below
+        raise RuntimeError("Primary symbol sources (Alpaca + Database) returned empty results")
+
+    except Exception as primary_error:
+        logger.error(f"Primary symbol loading failed: {primary_error}")
+        logger.warning("Attempting Alpaca watchlist fallback...")
         
-        # Fallback to DISCOVERY_SYMBOLS when database is unavailable
+        # Fallback: Try to get watchlist from Alpaca if available
         try:
-            from Friren_V1.infrastructure.configuration_manager import ConfigurationManager
-            config_manager = ConfigurationManager()
-            discovery_symbols = config_manager.get('DISCOVERY_SYMBOLS')
+            from Friren_V1.trading_engine.portfolio_manager.tools.alpaca_interface import SimpleAlpacaInterface
+            alpaca = SimpleAlpacaInterface()
             
-            if discovery_symbols:
-                logger.info(f"Using DISCOVERY_SYMBOLS fallback: {len(discovery_symbols)} symbols {discovery_symbols}")
-                return discovery_symbols
-            else:
-                logger.error("DISCOVERY_SYMBOLS fallback also empty")
+            # Check if Alpaca has any watchlist functionality
+            # Note: Alpaca doesn't have direct watchlist API, so we'll use account info
+            account_info = alpaca.get_account()
+            if account_info:
+                logger.warning("Alpaca connection successful but no direct watchlist API available")
+                logger.info("Attempting to get symbols from recent activity or positions...")
                 
-        except Exception as fallback_error:
-            logger.error(f"Failed to load DISCOVERY_SYMBOLS fallback: {fallback_error}")
+                # Try to get symbols from recent positions (even closed ones)
+                try:
+                    all_positions = alpaca.get_all_positions()  # This includes zero positions
+                    recent_symbols = [pos.symbol for pos in all_positions]
+                    if recent_symbols:
+                        logger.info(f"Using recent Alpaca activity symbols: {recent_symbols}")
+                        return recent_symbols
+                except Exception:
+                    pass
+                    
+        except Exception as alpaca_fallback_error:
+            logger.error(f"Alpaca fallback failed: {alpaca_fallback_error}")
         
-        logger.error("CRITICAL: Cannot load symbols from database or configuration fallback")
-        return []  # Return empty list after all fallbacks exhausted
+        # Final fallback failed - FAIL FAST as requested
+        logger.critical("CRITICAL: All symbol sources failed - cannot proceed")
+        logger.critical("FAIL FAST: No holdings or watchlist available from Alpaca or Database")
+        logger.critical("ACTION REQUIRED: Ensure Alpaca connection OR database connectivity")
+        logger.critical("SYSTEM HALT: Cannot operate without real portfolio symbols")
+        raise RuntimeError("FAIL FAST: No symbol sources available - system requires real holdings/watchlist data")
 
 def refresh_watchlist_after_trade(orchestrator, trade_symbol, logger):
     """
