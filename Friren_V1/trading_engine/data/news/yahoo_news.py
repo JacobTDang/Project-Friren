@@ -313,9 +313,15 @@ class YahooFinanceNews(NewsDataSource):
         articles = []
 
         try:
-            self.logger.debug(f"Scraping {url}")
-            response = self.session.get(url, timeout=15)
+            self.logger.info(f"YAHOO SCRAPING: Attempting to scrape {url}")
+            response = self.session.get(url, timeout=10)  # Reduced timeout for faster diagnosis
             response.raise_for_status()
+            self.logger.info(f"YAHOO SCRAPING: Successfully got response from {url}")
+        except Exception as scrape_error:
+            self.logger.error(f"YAHOO SCRAPING ERROR: {url} failed: {type(scrape_error).__name__}: {scrape_error}")
+            raise
+        
+        try:
 
             soup = BeautifulSoup(response.content, 'html.parser')
 

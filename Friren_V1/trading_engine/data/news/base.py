@@ -21,6 +21,18 @@ class NewsArticle:
     published_date: datetime
     symbols_mentioned: List[str] = field(default_factory=list)
     author: Optional[str] = None
+    
+    def to_dict(self) -> Dict[str, any]:
+        """Convert to dictionary with datetime serialization"""
+        return {
+            'title': self.title,
+            'content': self.content,
+            'source': self.source,
+            'url': self.url,
+            'published_date': self.published_date.isoformat(),
+            'symbols_mentioned': self.symbols_mentioned,
+            'author': self.author
+        }
 
 
 class NewsDataSource(ABC):

@@ -26,6 +26,54 @@ from Friren_V1.trading_engine.data.news.base import NewsArticle
 from Friren_V1.trading_engine.output.output_coordinator import OutputCoordinator
 
 
+def extract_primary_symbol_from_article(article_title: str, article_content: str, fallback_symbol: str = None) -> str:
+    """
+    Extract the PRIMARY symbol from article content using intelligent prioritization
+    Fixes AAPL mislabeling by considering article context and symbol relevance
+    
+    Args:
+        article_title: Article headline
+        article_content: Article body text  
+        fallback_symbol: Original watchlist symbol if extraction fails
+        
+    Returns:
+        Extracted symbol (e.g., 'NFLX', 'TSLA') or fallback_symbol
+    """
+    try:
+        from Friren_V1.trading_engine.data.news.yahoo_news import SymbolExtractor
+        
+        extractor = SymbolExtractor()
+        
+        # FIXED: Prioritize title over content for symbol extraction
+        title_symbols = extractor.extract_symbols(article_title) if article_title else []
+        
+        # If fallback_symbol exists and is in title, prioritize it (likely correct symbol)
+        if fallback_symbol and fallback_symbol.upper() in [s.upper() for s in title_symbols]:
+            return fallback_symbol.upper()
+        
+        # If title has symbols, prioritize title symbols as they're more relevant
+        if title_symbols:
+            return title_symbols[0]
+        
+        # Only check content if title doesn't have symbols
+        content_symbols = extractor.extract_symbols(article_content or "")
+        
+        # If fallback_symbol exists and is in content, prioritize it
+        if fallback_symbol and fallback_symbol.upper() in [s.upper() for s in content_symbols]:
+            return fallback_symbol.upper()
+        
+        # Return first content symbol if available
+        if content_symbols:
+            return content_symbols[0]
+        
+        return fallback_symbol or 'UNKNOWN'
+        
+    except Exception as e:
+        # Fallback to original symbol if extraction fails to preserve system stability
+        logging.getLogger(__name__).debug(f"Symbol extraction failed: {e}")
+        return fallback_symbol or 'UNKNOWN'
+
+
 class SentimentLabel(Enum):
     """FinBERT sentiment labels"""
     POSITIVE = "POSITIVE"
@@ -210,9 +258,20 @@ class FinBERTProcessor:
                 for idx, article in enumerate(batch):
                     try:
                         # Analyze single article
+                        # Extract PRIMARY symbol from article content for discovery pipeline
+                        if symbol_hint:
+                            extracted_symbol = extract_primary_symbol_from_article(
+                                article.title, 
+                                getattr(article, 'content', ''), 
+                                fallback_symbol=symbol_hint
+                            )
+                            article_id = f"{extracted_symbol}_{i}_{idx}"
+                        else:
+                            article_id = f"batch_{i}_{idx}"
+                        
                         enhanced_result = self.analyze_single_article(
                             article, 
-                            article_id=f"{symbol_hint}_{i}_{idx}" if symbol_hint else f"batch_{i}_{idx}"
+                            article_id=article_id
                         )
                         sentiment_results.append(enhanced_result)
                         

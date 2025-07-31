@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 
 @dataclass
 class ProcessedNewsData:
-    """Processed and weighted news data for decision engine"""
+    """Processed and weighted news data for decision engine - UNIFIED VERSION"""
     symbol: str
     timestamp: datetime
     overall_sentiment_score: float = 0.0
@@ -102,27 +102,28 @@ class NewsCollector:
                     self.logger.info(f"Got {len(articles)} articles from {source_name} for {symbol}")
                     
                     # BUSINESS LOGIC OUTPUT: Show collected articles in real-time
+                    # FORCE DIRECT OUTPUT TO DEBUG
+                    for article in articles:
+                        article_title = article.title[:60] + "..." if len(article.title) > 60 else article.title
+                        print(f"\033[96m[NEWS COLLECTOR] {symbol}: '{article_title}' from {source_name}\033[0m", flush=True)
+                    
                     try:
-                        # Import the guaranteed terminal output function
-                        import sys
-                        import os
-                        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
-                        sys.path.append(project_root)
-                        from Friren_V1.trading_engine.portfolio_manager.processes.enhanced_news_pipeline_process import send_colored_business_output
+                        # Direct import without dynamic path construction
+                        from ....portfolio_manager.processes.enhanced_news_pipeline_process import send_colored_business_output
                         
                         for article in articles:
                             article_title = article.title[:60] + "..." if len(article.title) > 60 else article.title
                             send_colored_business_output("news_collector", f"{symbol}: '{article_title}' from {source_name}", "news")
-                    except Exception:
-                        # Fallback to simple print if import fails
-                        for article in articles:
-                            article_title = article.title[:60] + "..." if len(article.title) > 60 else article.title
-                            print(f"[NEWS COLLECTOR] {symbol}: '{article_title}' from {source_name}", flush=True)
+                    except Exception as e:
+                        # Show the exact error
+                        print(f"[ERROR] Import/output failed: {e}", flush=True)
                 else:
                     self.logger.info(f"No articles from {source_name} for {symbol}")
 
             except Exception as e:
-                self.logger.warning(f"Error collecting from {source_name} for {symbol}: {e}")
+                self.logger.error(f"DETAILED ERROR - {source_name} for {symbol}: {type(e).__name__}: {e}")
+                import traceback
+                self.logger.error(f"TRACEBACK for {source_name}: {traceback.format_exc()}")
                 # Continue with other sources
 
         if not all_articles:

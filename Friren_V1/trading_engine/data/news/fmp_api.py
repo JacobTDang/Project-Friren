@@ -399,8 +399,9 @@ class FMPNews(NewsDataSource):
                     published_date = datetime.fromisoformat(published_str.replace('Z', ''))
                 else:
                     published_date = datetime.strptime(published_str, '%Y-%m-%d %H:%M:%S')
-            except:
-                published_date = datetime.now()
+            except (ValueError, TypeError) as e:
+                logger.error(f"Critical date parsing failure: {e}")
+                raise ValueError(f"Invalid FMP article date format")  # Fast fail
 
             # Get content
             content = (article_data.get('content', '') or
@@ -443,8 +444,9 @@ class FMPNews(NewsDataSource):
             published_str = release_data.get('date', '')
             try:
                 published_date = datetime.strptime(published_str, '%Y-%m-%d %H:%M:%S')
-            except:
-                published_date = datetime.now()
+            except (ValueError, TypeError) as e:
+                logger.error(f"Critical date parsing failure: {e}")
+                raise ValueError(f"Invalid FMP article date format")  # Fast fail
 
             # Get content
             text = release_data.get('text', '') or ''

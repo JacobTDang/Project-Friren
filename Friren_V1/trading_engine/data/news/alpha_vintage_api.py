@@ -285,8 +285,9 @@ class AlphaVantageNews(NewsDataSource):
             try:
                 # Alpha Vantage format: "20231207T143000"
                 published_date = datetime.strptime(published_str, '%Y%m%dT%H%M%S')
-            except:
-                published_date = datetime.now()
+            except (ValueError, TypeError) as e:
+                logger.error(f"Critical date parsing failure: {e}")
+                raise ValueError(f"Invalid Alpha Vintage article date format")  # Fast fail
 
             # Get content/summary
             summary = article_data.get('summary', '') or ''

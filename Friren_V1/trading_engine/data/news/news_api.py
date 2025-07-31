@@ -396,8 +396,9 @@ class NewsAPIData(NewsDataSource):
             published_date = datetime.fromisoformat(published_str.replace('Z', '+00:00'))
             if published_date.tzinfo is not None:
                 published_date = published_date.replace(tzinfo=None)
-        except:
-            published_date = datetime.now()
+        except (ValueError, TypeError) as e:
+            logger.error(f"Critical date parsing failure for {published_str}: {e}")
+            raise ValueError(f"Invalid article date format: {published_str}")  # Fast fail
 
         # Get source info
         source_info = article_data.get('source', {})

@@ -310,8 +310,9 @@ class MarketauxNews(NewsDataSource):
                 published_date = datetime.fromisoformat(published_str.replace('Z', '+00:00'))
                 if published_date.tzinfo is not None:
                     published_date = published_date.replace(tzinfo=None)
-            except:
-                published_date = datetime.now()
+            except (ValueError, TypeError) as e:
+                logger.error(f"Critical date parsing failure: {e}")
+                raise ValueError(f"Invalid MarketAux article date format")  # Fast fail
 
             # Get content/description
             description = article_data.get('description', '') or ''

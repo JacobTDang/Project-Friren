@@ -10,6 +10,8 @@ from .yahoo_news import YahooFinanceNews, SymbolExtractor
 # Import NewsAPI if available
 try:
     from .news_api import NewsAPIData
+    # Create alias for backward compatibility
+    NewsAPICollector = NewsAPIData
     NEWSAPI_AVAILABLE = True
 except ImportError:
     NEWSAPI_AVAILABLE = False
@@ -30,7 +32,7 @@ __all__ = [
 ]
 
 if NEWSAPI_AVAILABLE:
-    __all__.append('NewsAPIData')
+    __all__.extend(['NewsAPIData', 'NewsAPICollector'])
 
 if REDDIT_AVAILABLE:
     __all__.append('RedditNews')
