@@ -395,7 +395,17 @@ class MemoryAwareQueueRotation:
         """Extract age of a message from JSON"""
         try:
             import json
+            
+            # Handle both string and bytes from Redis
+            if isinstance(message_json, bytes):
+                message_json = message_json.decode('utf-8')
+                
             message_data = json.loads(message_json)
+            
+            # Ensure message_data is a dictionary
+            if not isinstance(message_data, dict):
+                return 0.0
+                
             timestamp_str = message_data.get('timestamp', '')
             
             if timestamp_str:
@@ -423,7 +433,16 @@ class MemoryAwareQueueRotation:
             
             for message_json in messages:
                 try:
+                    # Handle both string and bytes from Redis
+                    if isinstance(message_json, bytes):
+                        message_json = message_json.decode('utf-8')
+                    
                     message_data = json.loads(message_json)
+                    
+                    # Ensure message_data is a dictionary
+                    if not isinstance(message_data, dict):
+                        self.logger.debug(f"Skipping non-dict message data: {type(message_data)}")
+                        continue
                     
                     # Count priority
                     priority = message_data.get('priority', 2)  # Default to NORMAL
@@ -434,7 +453,8 @@ class MemoryAwareQueueRotation:
                     msg_type = message_data.get('message_type', 'unknown')
                     type_dist[msg_type] += 1
                     
-                except (json.JSONDecodeError, ValueError):
+                except (json.JSONDecodeError, ValueError, AttributeError) as e:
+                    self.logger.debug(f"Error parsing message: {e}")
                     continue
             
             return dict(priority_dist), dict(type_dist)
@@ -546,7 +566,16 @@ class MemoryAwareQueueRotation:
             
             for message_json in messages:
                 try:
+                    # Handle both string and bytes from Redis
+                    if isinstance(message_json, bytes):
+                        message_json = message_json.decode('utf-8')
+                    
                     message_data = json.loads(message_json)
+                    
+                    # Ensure message_data is a dictionary
+                    if not isinstance(message_data, dict):
+                        continue
+                    
                     priority = MessagePriority(message_data.get('priority', 2))
                     
                     if priority in priorities_to_remove:
@@ -554,7 +583,7 @@ class MemoryAwareQueueRotation:
                         self.redis_manager.redis_client.lrem(queue_key, 1, message_json)
                         removed_count += 1
                         
-                except (json.JSONDecodeError, ValueError):
+                except (json.JSONDecodeError, ValueError, AttributeError):
                     continue
             
             return removed_count
@@ -574,7 +603,16 @@ class MemoryAwareQueueRotation:
             
             for message_json in messages:
                 try:
+                    # Handle both string and bytes from Redis
+                    if isinstance(message_json, bytes):
+                        message_json = message_json.decode('utf-8')
+                    
                     message_data = json.loads(message_json)
+                    
+                    # Ensure message_data is a dictionary
+                    if not isinstance(message_data, dict):
+                        continue
+                    
                     priority = MessagePriority(message_data.get('priority', 2))
                     timestamp_str = message_data.get('timestamp', '')
                     
@@ -594,7 +632,7 @@ class MemoryAwareQueueRotation:
                             self.redis_manager.redis_client.lrem(queue_key, 1, message_json)
                             removed_count += 1
                             
-                except (json.JSONDecodeError, ValueError):
+                except (json.JSONDecodeError, ValueError, AttributeError):
                     continue
             
             return removed_count
@@ -615,7 +653,17 @@ class MemoryAwareQueueRotation:
             
             for message_json in messages:
                 try:
+                    # Handle both string and bytes from Redis
+                    if isinstance(message_json, bytes):
+                        message_json = message_json.decode('utf-8')
+                    
                     message_data = json.loads(message_json)
+                    
+                    # Ensure message_data is a dictionary
+                    if not isinstance(message_data, dict):
+                        removed_count += 1
+                        continue
+                    
                     priority = MessagePriority(message_data.get('priority', 2))
                     
                     if priority == MessagePriority.CRITICAL:
@@ -623,7 +671,8 @@ class MemoryAwareQueueRotation:
                     else:
                         removed_count += 1
                         
-                except (json.JSONDecodeError, ValueError):
+                except (json.JSONDecodeError, ValueError, AttributeError):
+                    removed_count += 1
                     continue
             
             # Replace queue with only critical messages
