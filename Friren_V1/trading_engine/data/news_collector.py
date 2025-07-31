@@ -66,6 +66,22 @@ class ProcessedNewsData:
     # Quality indicators
     data_quality_score: float = 0.0    # How reliable is this data
     staleness_minutes: int = 0          # How old is the newest article
+    
+    def to_dict(self) -> Dict[str, any]:
+        """Convert to dictionary with datetime serialization"""
+        return {
+            'symbol': self.symbol,
+            'timestamp': self.timestamp.isoformat(),
+            'overall_sentiment_score': self.overall_sentiment_score,
+            'sentiment_confidence': self.sentiment_confidence,
+            'news_volume': self.news_volume,
+            'key_articles': [article.to_dict() if hasattr(article, 'to_dict') else article for article in self.key_articles],
+            'sources_used': self.sources_used,
+            'source_weights': self.source_weights,
+            'last_updated': self.last_updated.isoformat(),
+            'data_quality_score': self.data_quality_score,
+            'staleness_minutes': self.staleness_minutes
+        }
 
 
 class EnhancedNewsCollector:
