@@ -1,6 +1,4 @@
 """
-trading_engine/portfolio_manager/decision_engine/execution_orchestrator.py
-
 Execution Orchestrator - Coordinates Complete Execution Flow
 
 The final component that coordinates the entire decision-to-execution pipeline:
@@ -17,7 +15,6 @@ Key Features:
 - Cost basis averaging for large positions
 - Execution performance monitoring
 - Integration with all existing tools
-- Optimized for t3.micro performance
 """
 
 from typing import Dict, List, Optional, Tuple, Any, Union
@@ -327,6 +324,14 @@ class ExecutionOrchestrator:
                 signal_strength=abs(risk_validation.original_decision.final_direction) if risk_validation.original_decision else 0.5,
                 original_decision=risk_validation.original_decision
             )
+
+            # Step 2.5: Check market hours before execution (decision processing already complete)
+            market_hours_check = self._check_market_hours()
+            if not market_hours_check[0]:
+                return self._create_failed_result(
+                    risk_validation, strategy_name, execution_id,
+                    f"EXECUTION BLOCKED: {market_hours_check[1]} - All decision processing completed successfully"
+                )
 
             # Step 3: Check execution prerequisites
             prereq_check = self._check_execution_prerequisites(execution_request)
@@ -668,6 +673,30 @@ class ExecutionOrchestrator:
             return False, f"Execution request expired ({age_minutes:.1f} minutes old)"
 
         return True, "Prerequisites met"
+
+    def _check_market_hours(self) -> Tuple[bool, str]:
+        """
+        Check if markets are open for trading execution
+
+        Returns:
+            Tuple of (is_market_open, status_message)
+        """
+        try:
+            now = datetime.now()
+            is_weekend = now.weekday() >= 5  # Saturday = 5, Sunday = 6
+            hour = now.hour
+            is_market_hours = 9 <= hour <= 16 and not is_weekend
+
+            if is_weekend:
+                return False, f"Markets closed - Weekend (day {now.weekday()}, {now.strftime('%A')})"
+            elif not is_market_hours:
+                return False, f"Markets closed - Outside trading hours (current: {hour}:00, trading: 9:00-16:00)"
+            else:
+                return True, f"Markets open - Trading hours active (current: {hour}:00)"
+
+        except Exception as e:
+            self.logger.error(f"Error checking market hours: {e}")
+            return False, f"Market hours check failed: {e}"
 
     def _create_failed_result(self, risk_validation: RiskValidationResult,
                             strategy_name: str, execution_id: str,
