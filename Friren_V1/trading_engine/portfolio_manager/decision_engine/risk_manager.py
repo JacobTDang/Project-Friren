@@ -1,6 +1,4 @@
 """
-trading_engine/portfolio_manager/decision_engine/risk_manager.py
-
 Solid Risk Manager - Core Safety Validation
 
 Fixed import structure and implementation approach.
@@ -71,6 +69,8 @@ try:
     from ..tools.db_manager import TradingDBManager
     from ..tools.alpaca_interface import SimpleAlpacaInterface
     from .conflict_resolver import ResolvedDecision
+    # Import enhanced feature engineer for sophisticated risk assessment
+    from ...news.recommendations.enhanced_feature_engineer import EnhancedFeatureEngineer
     IMPORTS_SUCCESSFUL = True
 except ImportError:
     try:
@@ -260,7 +260,42 @@ class SolidRiskManager:
             'avg_processing_time_ms': 0.0
         }
 
-        self.logger.info("SolidRiskManager initialized with core safety rules")
+        # Enhanced performance monitoring for feature analysis
+        self.enhanced_performance_stats = {
+            'enhanced_feature_calls': 0,
+            'enhanced_feature_successes': 0,
+            'enhanced_feature_failures': 0,
+            'enhanced_sentiment_calls': 0,
+            'enhanced_sentiment_successes': 0,
+            'avg_enhanced_feature_time_ms': 0.0,
+            'avg_enhanced_sentiment_time_ms': 0.0,
+            'feature_risk_breakdown': {
+                'sentiment_quality_avg': 0.0,
+                'market_context_avg': 0.0,
+                'data_quality_avg': 0.0
+            },
+            'performance_alerts': [],
+            'last_performance_check': datetime.now()
+        }
+
+        # Enhanced feature engineer for sophisticated risk assessment
+        try:
+            self.enhanced_feature_engineer = EnhancedFeatureEngineer()
+            self.logger.info("Enhanced feature engineer integrated for sophisticated risk assessment")
+        except Exception as e:
+            self.logger.warning(f"Could not initialize enhanced feature engineer: {e}")
+            self.enhanced_feature_engineer = None
+
+        # Configuration manager for dynamic parameter adjustment
+        try:
+            from .risk_config_manager import create_risk_config_manager
+            self.config_manager = create_risk_config_manager()
+            self.logger.info("Risk configuration manager initialized with dynamic parameter support")
+        except Exception as e:
+            self.logger.warning(f"Could not initialize risk configuration manager: {e}")
+            self.config_manager = None
+
+        self.logger.info("SolidRiskManager initialized with core safety rules and dynamic configuration")
 
     def validate_decision(self, resolved_decision: ResolvedDecision,
                           market_vix: Optional[float] = None) -> RiskValidationResult:
@@ -289,6 +324,13 @@ class SolidRiskManager:
         try:
             self.validation_stats['total_validations'] += 1
 
+            # Step 0: Update configuration based on market conditions (if config manager available)
+            if self.config_manager and market_vix is not None:
+                config_changed = self.config_manager.update_market_conditions(vix=market_vix)
+                if config_changed:
+                    # Update local limits from new configuration
+                    self._update_limits_from_config()
+
             # Step 1: Reset daily counter if new day
             self._reset_daily_counters()
 
@@ -315,10 +357,30 @@ class SolidRiskManager:
             # Step 5: Calculate target position size based on confidence/direction
             target_size_pct = self._calculate_target_position_size(resolved_decision)
 
-            # Step 6: Position size validation
+            # Step 6: Position size validation (with adjustment capability)
             size_check = self._validate_position_size(resolved_decision.symbol, target_size_pct)
             if not size_check[0]:
                 return self._create_denial_result(resolved_decision, size_check[1])
+
+            # Apply position size adjustment if suggested
+            if len(size_check) > 2 and size_check[2] is not None:
+                original_size = target_size_pct
+                target_size_pct = size_check[2]
+                self.logger.info(f"RISK MANAGER: Adjusted position size for {resolved_decision.symbol}: {target_size_pct:.1%} - {size_check[1]}")
+
+                # VISIBLE OUTPUT: Show position size adjustment
+                try:
+                    # Import the colored output function used in decision engine
+                    import sys, os
+                    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+                    sys.path.append(project_root)
+                    from main_terminal_bridge import send_colored_business_output
+                    send_colored_business_output("risk",
+                        f"Risk Manager: ADJUSTED {resolved_decision.symbol} position size {original_size:.1%} → {target_size_pct:.1%}",
+                        "risk")
+                except Exception:
+                    # Fallback to simple print
+                    print(f"[RISK] Risk Manager: ADJUSTED {resolved_decision.symbol} position size {original_size:.1%} → {target_size_pct:.1%}")
 
             # Step 7: Portfolio allocation validation (with modification capability)
             portfolio_check = self._validate_portfolio_allocation(resolved_decision.symbol, target_size_pct)
@@ -364,6 +426,15 @@ class SolidRiskManager:
             processing_time = (datetime.now() - start_time).total_seconds() * 1000
             self._update_processing_time(processing_time)
 
+            # Update configuration manager with performance metrics
+            if self.config_manager:
+                success_rate = self.validation_stats['approved_count'] / max(1, self.validation_stats['total_validations'])
+                self.config_manager.update_performance_metrics(
+                    success_rate=success_rate,
+                    avg_processing_time=processing_time,
+                    risk_score_accuracy=None  # Could be calculated from historical data
+                )
+
             result = RiskValidationResult(
                 validation_result=ValidationResult.APPROVED,
                 symbol=resolved_decision.symbol,
@@ -380,13 +451,20 @@ class SolidRiskManager:
             self.logger.info(f"APPROVED: {resolved_decision.symbol} at {target_size_pct:.1%} "
                              f"(risk: {risk_level.value}, score: {risk_score:.0f})")
 
-            # BUSINESS LOGIC OUTPUT: Detailed risk check approval
+            # BUSINESS LOGIC OUTPUT: Required format from CLAUDE.md
+            action = "increase" if size_calc.is_buy else "decrease"
+            try:
+                from terminal_color_system import send_colored_business_output
+                send_colored_business_output("risk_manager", f"Risk Manager: Position size {action} for {resolved_decision.symbol} - risk: {risk_level.value}", "risk_manager")
+            except ImportError:
+                print(f"[RISK MANAGER] Risk Manager: Position size {action} for {resolved_decision.symbol} - risk: {risk_level.value}")
+
+            # ADDITIONAL: Detailed risk check approval for debugging
             try:
                 from terminal_color_system import print_risk_check
-                action = "BUY" if size_calc.is_buy else "SELL"
                 shares_count = int(abs(size_calc.shares_to_trade)) if size_calc.shares_to_trade else 0
                 risk_reason = warnings[0] if warnings else f"{risk_level.value.lower().replace('_', ' ')} risk level"
-                print_risk_check(f"{resolved_decision.symbol}: PASSED | decision: {action} {shares_count} shares | risk_score: {risk_score/100:.2f} | reason: '{risk_reason}'")
+                print_risk_check(f"{resolved_decision.symbol}: PASSED | decision: {action.upper()} {shares_count} shares | risk_score: {risk_score/100:.2f} | reason: '{risk_reason}'")
             except ImportError:
                 action = "BUY" if size_calc.is_buy else "SELL"
                 shares_count = int(abs(size_calc.shares_to_trade)) if size_calc.shares_to_trade else 0
@@ -463,21 +541,27 @@ class SolidRiskManager:
             return False, f"VIX too high ({vix:.1f} > {self.limits['vix_halt_threshold']})"
         return True, "Market conditions acceptable"
 
-    def _validate_position_size(self, symbol: str, target_size_pct: float) -> Tuple[bool, str]:
+    def _validate_position_size(self, symbol: str, target_size_pct: float) -> Tuple[bool, str, Optional[float]]:
         """
-        Validate individual position size limits
+        Validate individual position size limits and suggest adjustments
 
         **Trade-offs:**
         - 15% max position size: Prevents over-concentration risk
         - 0.5% minimum: Avoids tiny positions with high transaction costs
+
+        **NEW APPROACH:** Adjust position size instead of rejecting outright
         """
         if target_size_pct > self.limits['max_position_size_pct']:
-            return False, f"Position size {target_size_pct:.1%} exceeds limit {self.limits['max_position_size_pct']:.1%}"
+            # Adjust to maximum allowed size instead of rejecting
+            adjusted_size = self.limits['max_position_size_pct']
+            return True, f"Position size adjusted from {target_size_pct:.1%} to max allowed {adjusted_size:.1%}", adjusted_size
 
         if target_size_pct < self.limits['min_position_size_pct']:
-            return False, f"Position size {target_size_pct:.1%} below minimum {self.limits['min_position_size_pct']:.1%}"
+            # Check if we can adjust to minimum viable size
+            adjusted_size = self.limits['min_position_size_pct']
+            return True, f"Position size adjusted from {target_size_pct:.1%} to minimum viable {adjusted_size:.1%}", adjusted_size
 
-        return True, "Position size within limits"
+        return True, "Position size within limits", None
 
     def _validate_portfolio_allocation(self, symbol: str, target_size_pct: float) -> Tuple[bool, str, Optional[float]]:
         """
@@ -560,12 +644,13 @@ class SolidRiskManager:
 
     def _calculate_target_position_size(self, decision: ResolvedDecision) -> float:
         """
-        Calculate target position size with enhanced position-aware logic
+        Calculate target position size with enhanced position-aware logic and feature engineering
 
         **Enhanced scaling logic:**
         - Initial positions: 3-12% based on confidence and sentiment
         - Position additions: 1-3% when sentiment >= 0.7
         - Sentiment modifiers: 0.8x to 1.2x based on sentiment score
+        - Feature-based risk adjustments using enhanced feature engineering
         - Hard cap at 15% per symbol
         """
         # Get current position
@@ -573,8 +658,14 @@ class SolidRiskManager:
         if self.position_sizer:
             current_position_pct = self.position_sizer.get_current_size(decision.symbol)
 
-        # Get sentiment score from decision or use default
+        # Get sentiment score from decision or enhanced features
         sentiment_score = getattr(decision, 'sentiment_score', 0.0) or 0.0
+
+        # Use enhanced feature engineer for more sophisticated sentiment analysis with performance monitoring
+        enhanced_sentiment = self._get_enhanced_sentiment_score_with_monitoring(decision)
+        if enhanced_sentiment is not None:
+            sentiment_score = enhanced_sentiment
+            self.logger.debug(f"Using enhanced sentiment score for {decision.symbol}: {sentiment_score:.3f}")
 
         # If we already have a position and this is a BUY decision
         if current_position_pct > 0 and decision.final_direction > 0:
@@ -627,43 +718,49 @@ class SolidRiskManager:
     def _calculate_risk_assessment(self, decision: ResolvedDecision,
                                    size_calc: SizeCalculation) -> Tuple[float, RiskLevel, List[str]]:
         """
-        Calculate overall risk score and level
+        Calculate overall risk score and level with enhanced feature-based analysis
 
-        **Risk factors (0-100 scale):**
-        - Position size risk (0-30 points)
-        - Confidence risk (0-25 points)
-        - Trade size risk (0-20 points)
-        - Portfolio concentration risk (0-25 points)
+        **Enhanced risk factors (0-100 scale):**
+        - Position size risk (0-25 points)
+        - Confidence risk (0-20 points)
+        - Trade size risk (0-15 points)
+        - Portfolio concentration risk (0-20 points)
+        - Enhanced feature risk (0-20 points) - NEW: sentiment quality, market context, etc.
 
-        **Why this approach:**
-        Simple additive model is fast, interpretable, and good enough.
-        More complex ML models would be overkill and harder to debug.
+        **Enhancement approach:**
+        Combines simple additive model with sophisticated feature analysis from
+        EnhancedFeatureEngineer for better risk detection while maintaining speed.
         """
         risk_factors = []
         warnings = []
 
-        # Position size risk (0-30 points)
-        size_risk = (size_calc.target_size_pct / self.limits['max_position_size_pct']) * 30
+        # Position size risk (0-25 points) - reduced to make room for feature analysis
+        size_risk = (size_calc.target_size_pct / self.limits['max_position_size_pct']) * 25
         risk_factors.append(size_risk)
 
         if size_calc.target_size_pct > 0.10:    # 10%+
             warnings.append(f"Large position size: {size_calc.target_size_pct:.1%}")
 
-        # Confidence risk (0-25 points) - lower confidence = higher risk
-        confidence_risk = (1.0 - decision.final_confidence) * 25
+        # Confidence risk (0-20 points) - lower confidence = higher risk
+        confidence_risk = (1.0 - decision.final_confidence) * 20
         risk_factors.append(confidence_risk)
 
         if decision.final_confidence < 0.7:
             warnings.append(f"Low confidence: {decision.final_confidence:.1%}")
 
-        # Trade size risk (0-20 points)
-        trade_size_risk = min((abs(size_calc.trade_dollar_amount) / self.limits['max_single_trade_amount']) * 20, 20)
+        # Trade size risk (0-15 points)
+        trade_size_risk = min((abs(size_calc.trade_dollar_amount) / self.limits['max_single_trade_amount']) * 15, 15)
         risk_factors.append(trade_size_risk)
 
-        # Portfolio concentration risk (0-25 points)
+        # Enhanced feature-based risk analysis (0-20 points) with performance monitoring
+        feature_risk, feature_warnings = self._calculate_enhanced_feature_risk_with_monitoring(decision)
+        risk_factors.append(feature_risk)
+        warnings.extend(feature_warnings)
+
+        # Portfolio concentration risk (0-20 points)
         portfolio_summary = self.position_sizer.get_portfolio_summary()
         allocation_pct = portfolio_summary.get('allocation_pct', 0) / 100
-        concentration_risk = (allocation_pct / self.limits['max_portfolio_allocation_pct']) * 25
+        concentration_risk = (allocation_pct / self.limits['max_portfolio_allocation_pct']) * 20
         risk_factors.append(concentration_risk)
 
         if allocation_pct > 0.60:    # 60%+
@@ -682,6 +779,12 @@ class SolidRiskManager:
         else:
             risk_level = RiskLevel.LOW
 
+        # Log enhanced risk breakdown for debugging
+        self.logger.debug(f"Risk breakdown for {decision.symbol}: "
+                         f"size={size_risk:.1f}, confidence={confidence_risk:.1f}, "
+                         f"trade_size={trade_size_risk:.1f}, features={feature_risk:.1f}, "
+                         f"concentration={concentration_risk:.1f}, total={total_risk_score:.1f}")
+
         return total_risk_score, risk_level, warnings
 
     def _create_denial_result(self, decision: ResolvedDecision, reason: str,
@@ -691,7 +794,14 @@ class SolidRiskManager:
 
         self.logger.info(f"DENIED: {decision.symbol} - {reason}")
 
-        # BUSINESS LOGIC OUTPUT: Risk check denial
+        # BUSINESS LOGIC OUTPUT: Required format from CLAUDE.md
+        try:
+            from terminal_color_system import send_colored_business_output
+            send_colored_business_output("risk_manager", f"Risk Manager: Position size denied for {decision.symbol} - risk: critical", "risk_manager")
+        except ImportError:
+            print(f"[RISK MANAGER] Risk Manager: Position size denied for {decision.symbol} - risk: critical")
+
+        # ADDITIONAL: Detailed risk check denial for debugging
         try:
             from terminal_color_system import print_risk_check
             print_risk_check(f"FAILED - {decision.symbol}: {reason}")
@@ -718,6 +828,522 @@ class SolidRiskManager:
         total = self.validation_stats['total_validations']
         old_avg = self.validation_stats['avg_processing_time_ms']
         self.validation_stats['avg_processing_time_ms'] = ((old_avg * (total-1)) + processing_time_ms) / total
+
+    def _update_limits_from_config(self):
+        """Update risk limits from current configuration manager settings"""
+        if not self.config_manager:
+            return
+
+        try:
+            config = self.config_manager.get_current_config()
+
+            # Update core risk limits
+            self.limits.update({
+                'max_position_size_pct': config.max_position_size_pct,
+                'min_position_size_pct': config.min_position_size_pct,
+                'max_portfolio_allocation_pct': config.max_portfolio_allocation_pct,
+                'max_daily_trades': config.max_daily_trades,
+                'vix_halt_threshold': config.vix_halt_threshold,
+                'volatility_warning_threshold': config.volatility_warning_threshold,
+                'high_risk_threshold': config.high_risk_threshold,
+                'critical_risk_threshold': config.critical_risk_threshold
+            })
+
+            self.logger.debug(f"Risk limits updated from configuration: "
+                            f"max_position={config.max_position_size_pct:.1%}, "
+                            f"approval_threshold={config.approval_threshold:.0%}")
+
+        except Exception as e:
+            self.logger.error(f"Error updating limits from configuration: {e}")
+
+    def _get_enhanced_sentiment_score(self, decision: ResolvedDecision) -> Optional[float]:
+        """
+        Get enhanced sentiment score using sophisticated feature analysis with comprehensive error handling
+
+        Returns refined sentiment score based on:
+        - Sentiment quality and consistency
+        - Market context and timing
+        - News quality and source diversity
+        - Financial keyword analysis
+
+        **Resilience Features:**
+        - Graceful degradation if enhanced feature engineer unavailable
+        - Fallback to basic sentiment if enhanced calculation fails
+        - Conservative defaults for missing data
+        - Exception isolation to prevent risk manager failure
+        """
+        # Early return if enhanced feature engineer not available
+        if not self.enhanced_feature_engineer:
+            self.logger.debug(f"Enhanced feature engineer not available for {decision.symbol} - using basic sentiment")
+            return None
+
+        try:
+            # Method 1: Use enhanced sentiment data if available
+            if hasattr(decision, 'enhanced_sentiment_data') and decision.enhanced_sentiment_data:
+                try:
+                    sentiment_data = decision.enhanced_sentiment_data
+
+                    # Validate required fields with safe defaults
+                    raw_sentiment = sentiment_data.get('raw_sentiment', 0.0)
+                    confidence = max(0.1, min(1.0, sentiment_data.get('confidence', 0.5)))  # Clamp confidence
+                    market_context = sentiment_data.get('market_context', {})
+                    quality_score = max(0.1, min(1.0, sentiment_data.get('quality_score', 0.5)))  # Clamp quality
+
+                    # Use enhanced feature engineer calculation with error isolation
+                    enhanced_score = self._safe_enhanced_sentiment_calculation(
+                        raw_sentiment, confidence, market_context, quality_score, decision.symbol
+                    )
+
+                    if enhanced_score is not None:
+                        self.logger.debug(f"Enhanced sentiment calculated for {decision.symbol}: {enhanced_score:.3f}")
+                        return enhanced_score
+
+                except Exception as e:
+                    self.logger.warning(f"Enhanced sentiment data processing failed for {decision.symbol}: {e}")
+                    # Continue to fallback methods
+
+            # Method 2: Construct enhanced sentiment from basic decision attributes
+            basic_sentiment = getattr(decision, 'sentiment_score', 0.0) or 0.0
+            basic_confidence = getattr(decision, 'final_confidence', 0.5) or 0.5
+
+            if basic_sentiment != 0.0 or basic_confidence > 0.6:
+                try:
+                    # Create minimal market context from available data
+                    market_context = {
+                        'volatility': getattr(decision, 'volatility_score', 0.3),
+                        'volume_factor': 1.0  # Neutral assumption
+                    }
+
+                    enhanced_score = self._safe_enhanced_sentiment_calculation(
+                        basic_sentiment, basic_confidence, market_context, 0.5, decision.symbol
+                    )
+
+                    if enhanced_score is not None:
+                        self.logger.debug(f"Fallback enhanced sentiment for {decision.symbol}: {enhanced_score:.3f}")
+                        return enhanced_score
+
+                except Exception as e:
+                    self.logger.warning(f"Fallback enhanced sentiment failed for {decision.symbol}: {e}")
+
+            # Method 3: If all enhanced methods fail, return None (use basic sentiment)
+            self.logger.debug(f"No enhanced sentiment available for {decision.symbol} - using basic sentiment")
+            return None
+
+        except Exception as e:
+            # Critical error isolation - never let enhanced sentiment failure break risk assessment
+            self.logger.error(f"Critical error in enhanced sentiment calculation for {decision.symbol}: {e}")
+            self.logger.error("Enhanced sentiment disabled for this decision - using basic sentiment")
+            return None
+
+    def _safe_enhanced_sentiment_calculation(self, raw_sentiment: float, confidence: float,
+                                           market_context: Dict[str, Any], quality_score: float,
+                                           symbol: str) -> Optional[float]:
+        """
+        Safely calculate enhanced sentiment with error isolation and validation
+
+        Args:
+            raw_sentiment: Base sentiment score
+            confidence: Confidence level
+            market_context: Market context data
+            quality_score: Quality score
+            symbol: Symbol for logging
+
+        Returns:
+            Enhanced sentiment score or None if calculation fails
+        """
+        try:
+            # Validate inputs
+            if not (-1.0 <= raw_sentiment <= 1.0):
+                self.logger.warning(f"Invalid raw sentiment {raw_sentiment} for {symbol}, clamping to range")
+                raw_sentiment = max(-1.0, min(1.0, raw_sentiment))
+
+            if not (0.0 <= confidence <= 1.0):
+                self.logger.warning(f"Invalid confidence {confidence} for {symbol}, clamping to range")
+                confidence = max(0.0, min(1.0, confidence))
+
+            # Use enhanced feature engineer with minimal article text for keyword analysis
+            article_text = f"Financial analysis for {symbol}"  # Minimal text for API compatibility
+
+            enhanced_score = self.enhanced_feature_engineer.calculate_enhanced_sentiment_score(
+                raw_sentiment=raw_sentiment,
+                confidence=confidence,
+                article_text=article_text,
+                market_context=market_context
+            )
+
+            # Validate output
+            if enhanced_score is not None and (-1.0 <= enhanced_score <= 1.0):
+                return enhanced_score
+            else:
+                self.logger.warning(f"Enhanced sentiment score {enhanced_score} out of range for {symbol}")
+                return None
+
+        except Exception as e:
+            self.logger.debug(f"Safe enhanced sentiment calculation failed for {symbol}: {e}")
+            return None
+
+    def _calculate_enhanced_feature_risk(self, decision: ResolvedDecision) -> Tuple[float, List[str]]:
+        """
+        Calculate risk based on enhanced feature analysis with comprehensive error handling
+
+        Analyzes:
+        - Sentiment quality and consistency
+        - Market timing and context
+        - News quality and reliability
+        - Financial keyword sentiment strength
+        - Data freshness and completeness
+
+        **Resilience Features:**
+        - Graceful degradation when enhanced features unavailable
+        - Individual risk component isolation to prevent total failure
+        - Conservative fallbacks for each risk component
+        - Detailed error tracking and recovery
+
+        Returns:
+            Tuple of (risk_score_0_to_20, warnings_list)
+        """
+        feature_warnings = []
+        feature_risk = 0.0
+
+        # Early fallback if enhanced feature engineer not available
+        if not self.enhanced_feature_engineer:
+            self.logger.debug(f"Enhanced feature engineer unavailable for {decision.symbol} - using moderate risk")
+            return 10.0, ["Enhanced feature analysis unavailable - using moderate risk baseline"]
+
+        try:
+            # Sentiment quality risk assessment (0-8 points) with error isolation
+            try:
+                sentiment_quality_risk = self._assess_sentiment_quality_risk(decision)
+                feature_risk += sentiment_quality_risk
+
+                if sentiment_quality_risk > 5:
+                    feature_warnings.append("Poor sentiment quality detected")
+
+                self.logger.debug(f"Sentiment quality risk for {decision.symbol}: {sentiment_quality_risk:.1f}/8")
+
+            except Exception as e:
+                self.logger.warning(f"Sentiment quality risk assessment failed for {decision.symbol}: {e}")
+                fallback_sentiment_risk = 4.0  # Moderate risk fallback
+                feature_risk += fallback_sentiment_risk
+                feature_warnings.append("Sentiment quality assessment failed - using moderate risk")
+
+            # Market context risk assessment (0-6 points) with error isolation
+            try:
+                market_context_risk = self._assess_market_context_risk(decision)
+                feature_risk += market_context_risk
+
+                if market_context_risk > 4:
+                    feature_warnings.append("Unfavorable market context")
+
+                self.logger.debug(f"Market context risk for {decision.symbol}: {market_context_risk:.1f}/6")
+
+            except Exception as e:
+                self.logger.warning(f"Market context risk assessment failed for {decision.symbol}: {e}")
+                fallback_market_risk = 3.0  # Moderate risk fallback
+                feature_risk += fallback_market_risk
+                feature_warnings.append("Market context assessment failed - using moderate risk")
+
+            # Data quality risk assessment (0-6 points) with error isolation
+            try:
+                data_quality_risk = self._assess_data_quality_risk(decision)
+                feature_risk += data_quality_risk
+
+                if data_quality_risk > 4:
+                    feature_warnings.append("Data quality concerns")
+
+                self.logger.debug(f"Data quality risk for {decision.symbol}: {data_quality_risk:.1f}/6")
+
+            except Exception as e:
+                self.logger.warning(f"Data quality risk assessment failed for {decision.symbol}: {e}")
+                fallback_data_risk = 3.0  # Moderate risk fallback
+                feature_risk += fallback_data_risk
+                feature_warnings.append("Data quality assessment failed - using moderate risk")
+
+            # Validate and cap total feature risk
+            feature_risk = max(0.0, min(20.0, feature_risk))
+
+            self.logger.debug(f"Total enhanced feature risk for {decision.symbol}: {feature_risk:.1f}/20")
+
+        except Exception as e:
+            # Critical error - use conservative fallback for entire feature risk calculation
+            self.logger.error(f"Critical error in enhanced feature risk calculation for {decision.symbol}: {e}")
+            feature_risk = 15.0  # Conservative high-risk fallback
+            feature_warnings = ["Critical feature analysis error - using conservative high-risk assessment"]
+
+            # Log the error for debugging but don't let it break the risk manager
+            import traceback
+            self.logger.debug(f"Enhanced feature risk calculation traceback: {traceback.format_exc()}")
+
+        return feature_risk, feature_warnings
+
+    def _assess_sentiment_quality_risk(self, decision: ResolvedDecision) -> float:
+        """
+        Assess risk based on sentiment analysis quality
+
+        Higher risk for:
+        - Low sentiment confidence scores
+        - Conflicting sentiment signals
+        - Weak financial keyword presence
+        """
+        sentiment_confidence = getattr(decision, 'sentiment_confidence', 0.5)
+        sentiment_volatility = getattr(decision, 'sentiment_volatility', 0.3)
+
+        # Low confidence = higher risk (0-4 points)
+        confidence_risk = (1.0 - sentiment_confidence) * 4.0
+
+        # High volatility = higher risk (0-4 points)
+        volatility_risk = min(sentiment_volatility * 4.0, 4.0)
+
+        return confidence_risk + volatility_risk
+
+    def _assess_market_context_risk(self, decision: ResolvedDecision) -> float:
+        """
+        Assess risk based on market context and timing
+
+        Higher risk for:
+        - Poor market timing (after hours, low volume periods)
+        - High market volatility periods
+        - Sector correlation issues
+        """
+        # Market hours factor risk (0-2 points)
+        market_hours_factor = getattr(decision, 'market_hours_factor', 0.7)
+        timing_risk = (1.0 - market_hours_factor) * 2.0
+
+        # Volatility risk (0-2 points)
+        volatility_score = getattr(decision, 'volatility_score', 0.3)
+        volatility_risk = min(volatility_score * 2.0, 2.0)
+
+        # Sector correlation risk (0-2 points)
+        sector_correlation = getattr(decision, 'sector_correlation', 0.5)
+        correlation_risk = (1.0 - sector_correlation) * 2.0
+
+        return timing_risk + volatility_risk + correlation_risk
+
+    def _assess_data_quality_risk(self, decision: ResolvedDecision) -> float:
+        """
+        Assess risk based on data quality and completeness
+
+        Higher risk for:
+        - Stale or incomplete data
+        - Low source diversity
+        - Poor data freshness
+        """
+        # Data freshness risk (0-3 points)
+        data_freshness = getattr(decision, 'data_freshness', 0.5)
+        freshness_risk = (1.0 - data_freshness) * 3.0
+
+        # Source diversity risk (0-3 points)
+        source_diversity = getattr(decision, 'source_diversity', 0.5)
+        diversity_risk = (1.0 - source_diversity) * 3.0
+
+        return freshness_risk + diversity_risk
+
+    # Performance monitoring wrapper methods
+
+    def _get_enhanced_sentiment_score_with_monitoring(self, decision: ResolvedDecision) -> Optional[float]:
+        """
+        Performance-monitored wrapper for enhanced sentiment score calculation
+
+        Tracks:
+        - Call frequency and success rate
+        - Processing time per call
+        - Performance alerts for slow operations
+        """
+        start_time = datetime.now()
+        self.enhanced_performance_stats['enhanced_sentiment_calls'] += 1
+
+        try:
+            result = self._get_enhanced_sentiment_score(decision)
+
+            # Calculate processing time
+            processing_time = (datetime.now() - start_time).total_seconds() * 1000
+            self._update_enhanced_sentiment_performance(processing_time, success=True)
+
+            if result is not None:
+                self.enhanced_performance_stats['enhanced_sentiment_successes'] += 1
+
+                # Performance alert if processing takes too long
+                if processing_time > 100:  # 100ms threshold
+                    alert = f"Slow enhanced sentiment calculation for {decision.symbol}: {processing_time:.1f}ms"
+                    self._add_performance_alert(alert)
+                    self.logger.warning(alert)
+
+            return result
+
+        except Exception as e:
+            processing_time = (datetime.now() - start_time).total_seconds() * 1000
+            self._update_enhanced_sentiment_performance(processing_time, success=False)
+            self.logger.error(f"Enhanced sentiment monitoring error for {decision.symbol}: {e}")
+            return None
+
+    def _calculate_enhanced_feature_risk_with_monitoring(self, decision: ResolvedDecision) -> Tuple[float, List[str]]:
+        """
+        Performance-monitored wrapper for enhanced feature risk calculation
+
+        Tracks:
+        - Feature analysis processing times
+        - Success/failure rates for each risk component
+        - Performance degradation alerts
+        """
+        start_time = datetime.now()
+        self.enhanced_performance_stats['enhanced_feature_calls'] += 1
+
+        try:
+            feature_risk, warnings = self._calculate_enhanced_feature_risk(decision)
+
+            # Calculate processing time
+            processing_time = (datetime.now() - start_time).total_seconds() * 1000
+            self._update_enhanced_feature_performance(processing_time, success=True)
+
+            self.enhanced_performance_stats['enhanced_feature_successes'] += 1
+
+            # Performance alert if processing takes too long
+            if processing_time > 200:  # 200ms threshold for feature analysis
+                alert = f"Slow enhanced feature analysis for {decision.symbol}: {processing_time:.1f}ms"
+                self._add_performance_alert(alert)
+                self.logger.warning(alert)
+
+            # Update feature risk breakdown for monitoring
+            self._update_feature_risk_breakdown(feature_risk)
+
+            return feature_risk, warnings
+
+        except Exception as e:
+            processing_time = (datetime.now() - start_time).total_seconds() * 1000
+            self._update_enhanced_feature_performance(processing_time, success=False)
+            self.enhanced_performance_stats['enhanced_feature_failures'] += 1
+
+            self.logger.error(f"Enhanced feature risk monitoring error for {decision.symbol}: {e}")
+            # Return conservative fallback
+            return 15.0, [f"Feature analysis monitoring error - using conservative risk"]
+
+    def _update_enhanced_sentiment_performance(self, processing_time_ms: float, success: bool):
+        """Update enhanced sentiment performance statistics"""
+        try:
+            # Update average processing time
+            calls = self.enhanced_performance_stats['enhanced_sentiment_calls']
+            old_avg = self.enhanced_performance_stats['avg_enhanced_sentiment_time_ms']
+
+            if calls > 0:
+                self.enhanced_performance_stats['avg_enhanced_sentiment_time_ms'] = \
+                    ((old_avg * (calls - 1)) + processing_time_ms) / calls
+            else:
+                self.enhanced_performance_stats['avg_enhanced_sentiment_time_ms'] = processing_time_ms
+
+        except Exception as e:
+            self.logger.debug(f"Error updating enhanced sentiment performance: {e}")
+
+    def _update_enhanced_feature_performance(self, processing_time_ms: float, success: bool):
+        """Update enhanced feature analysis performance statistics"""
+        try:
+            # Update average processing time
+            calls = self.enhanced_performance_stats['enhanced_feature_calls']
+            old_avg = self.enhanced_performance_stats['avg_enhanced_feature_time_ms']
+
+            if calls > 0:
+                self.enhanced_performance_stats['avg_enhanced_feature_time_ms'] = \
+                    ((old_avg * (calls - 1)) + processing_time_ms) / calls
+            else:
+                self.enhanced_performance_stats['avg_enhanced_feature_time_ms'] = processing_time_ms
+
+        except Exception as e:
+            self.logger.debug(f"Error updating enhanced feature performance: {e}")
+
+    def _update_feature_risk_breakdown(self, total_feature_risk: float):
+        """Update feature risk breakdown averages for monitoring trends"""
+        try:
+            # Estimate breakdown (this is approximate since we don't track individual components in production)
+            breakdown = self.enhanced_performance_stats['feature_risk_breakdown']
+
+            # Update rolling averages
+            calls = self.enhanced_performance_stats['enhanced_feature_calls']
+            if calls > 1:
+                decay_factor = 0.9  # Give more weight to recent values
+
+                # Rough estimates based on total feature risk
+                estimated_sentiment = min(8.0, total_feature_risk * 0.4)  # ~40% of total
+                estimated_market = min(6.0, total_feature_risk * 0.3)     # ~30% of total
+                estimated_data = min(6.0, total_feature_risk * 0.3)       # ~30% of total
+
+                breakdown['sentiment_quality_avg'] = \
+                    breakdown['sentiment_quality_avg'] * decay_factor + estimated_sentiment * (1 - decay_factor)
+                breakdown['market_context_avg'] = \
+                    breakdown['market_context_avg'] * decay_factor + estimated_market * (1 - decay_factor)
+                breakdown['data_quality_avg'] = \
+                    breakdown['data_quality_avg'] * decay_factor + estimated_data * (1 - decay_factor)
+
+        except Exception as e:
+            self.logger.debug(f"Error updating feature risk breakdown: {e}")
+
+    def _add_performance_alert(self, alert_message: str):
+        """Add performance alert with timestamp and cleanup old alerts"""
+        try:
+            alert = {
+                'timestamp': datetime.now(),
+                'message': alert_message
+            }
+
+            self.enhanced_performance_stats['performance_alerts'].append(alert)
+
+            # Keep only last 10 alerts to prevent memory growth
+            if len(self.enhanced_performance_stats['performance_alerts']) > 10:
+                self.enhanced_performance_stats['performance_alerts'] = \
+                    self.enhanced_performance_stats['performance_alerts'][-10:]
+
+        except Exception as e:
+            self.logger.debug(f"Error adding performance alert: {e}")
+
+    def get_enhanced_performance_summary(self) -> Dict[str, Any]:
+        """
+        Get comprehensive performance summary for enhanced risk assessment
+
+        Returns:
+            Dictionary with performance metrics, success rates, and alerts
+        """
+        try:
+            stats = self.enhanced_performance_stats
+
+            # Calculate success rates
+            sentiment_success_rate = 0.0
+            if stats['enhanced_sentiment_calls'] > 0:
+                sentiment_success_rate = stats['enhanced_sentiment_successes'] / stats['enhanced_sentiment_calls']
+
+            feature_success_rate = 0.0
+            if stats['enhanced_feature_calls'] > 0:
+                feature_success_rate = stats['enhanced_feature_successes'] / stats['enhanced_feature_calls']
+
+            # Recent alerts (last 5)
+            recent_alerts = stats['performance_alerts'][-5:] if stats['performance_alerts'] else []
+
+            return {
+                'call_statistics': {
+                    'enhanced_sentiment_calls': stats['enhanced_sentiment_calls'],
+                    'enhanced_sentiment_success_rate': sentiment_success_rate,
+                    'enhanced_feature_calls': stats['enhanced_feature_calls'],
+                    'enhanced_feature_success_rate': feature_success_rate
+                },
+                'performance_metrics': {
+                    'avg_enhanced_sentiment_time_ms': stats['avg_enhanced_sentiment_time_ms'],
+                    'avg_enhanced_feature_time_ms': stats['avg_enhanced_feature_time_ms'],
+                    'sentiment_time_ok': stats['avg_enhanced_sentiment_time_ms'] < 100,
+                    'feature_time_ok': stats['avg_enhanced_feature_time_ms'] < 200
+                },
+                'feature_risk_trends': stats['feature_risk_breakdown'].copy(),
+                'recent_alerts': [
+                    {
+                        'timestamp': alert['timestamp'].isoformat(),
+                        'message': alert['message']
+                    } for alert in recent_alerts
+                ],
+                'performance_health': {
+                    'overall_health': 'good' if sentiment_success_rate > 0.8 and feature_success_rate > 0.8 else 'degraded',
+                    'last_check': stats['last_performance_check'].isoformat()
+                }
+            }
+
+        except Exception as e:
+            self.logger.error(f"Error generating enhanced performance summary: {e}")
+            return {'error': str(e)}
 
 
 # Utility functions for integration with decision engine
@@ -785,6 +1411,17 @@ class EnhancedRiskManager(SolidRiskManager):
 
         # Enhanced logging with ASCII-only characters
         self.logger = logging.getLogger("enhanced_risk_manager")
+
+        # Inherit enhanced feature engineer from parent
+        if hasattr(super(), 'enhanced_feature_engineer'):
+            self.enhanced_feature_engineer = super().enhanced_feature_engineer
+        else:
+            try:
+                self.enhanced_feature_engineer = EnhancedFeatureEngineer()
+                self.logger.info("Enhanced feature engineer integrated in EnhancedRiskManager")
+            except Exception as e:
+                self.logger.warning(f"Could not initialize enhanced feature engineer in EnhancedRiskManager: {e}")
+                self.enhanced_feature_engineer = None
 
         # Dynamic risk profiles based on market conditions
         self.risk_profiles = {
