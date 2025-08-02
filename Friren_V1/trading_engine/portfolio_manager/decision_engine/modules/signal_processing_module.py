@@ -136,8 +136,8 @@ class SignalProcessingModule:
         self.last_processing_time: Optional[datetime] = None
         self.metrics = SignalProcessingMetrics()
         
-        # Configuration
-        self.signal_timeout_minutes = 15
+        # Configuration - EXTENDED for XGBoost integration: XGBoost runs every 15 minutes, need 20-minute window
+        self.signal_timeout_minutes = 20
         self.max_signals_per_symbol = 10
         self.confidence_threshold = 60.0
         
@@ -349,10 +349,30 @@ class SignalProcessingModule:
             
             if severity == 'CRITICAL':
                 decision_type = DecisionType.SELL
-                confidence = 90.0
+                # Calculate confidence based on actual risk metrics instead of hardcoded value
+                risk_metrics = data.get('risk_metrics', {})
+                base_confidence = 65.0  # Base confidence for critical risk signals
+                
+                # Adjust confidence based on risk severity indicators
+                drawdown_severity = risk_metrics.get('max_drawdown', 0.0)
+                volatility_spike = risk_metrics.get('volatility_ratio', 1.0)
+                
+                # Higher drawdown and volatility indicate higher confidence in risk signal
+                confidence_adjustment = min(25.0, (drawdown_severity * 100) + (volatility_spike - 1.0) * 15)
+                confidence = min(95.0, base_confidence + confidence_adjustment)
             elif severity == 'HIGH':
                 decision_type = DecisionType.SELL
-                confidence = 75.0
+                # Calculate confidence based on risk metrics for HIGH severity
+                risk_metrics = data.get('risk_metrics', {})
+                base_confidence = 55.0  # Base confidence for high risk signals
+                
+                # Adjust confidence based on risk indicators
+                volatility_factor = risk_metrics.get('volatility_ratio', 1.0)
+                trend_reversal = risk_metrics.get('trend_reversal_strength', 0.0)
+                
+                # Higher risk indicators increase confidence in SELL signal
+                confidence_adjustment = min(20.0, (volatility_factor - 1.0) * 20 + trend_reversal * 10)
+                confidence = min(85.0, base_confidence + confidence_adjustment)
             
             return AggregatedSignal(
                 symbol=symbol,
