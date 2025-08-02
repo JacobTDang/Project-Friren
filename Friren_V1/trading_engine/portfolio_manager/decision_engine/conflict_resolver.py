@@ -9,10 +9,6 @@ Resolves conflicts when aggregated signals disagree using:
 3. Rule-based fallback when ML confidence is low
 4. Confidence scoring and conflict detection
 
-- ML first, rules as backup (hybrid intelligence)
-- Explainable decisions (SHAP values stored in database)
-- Fail-safe design (always returns a decision)
-- Memory-efficient for t3.micro constraints
 """
 
 import numpy as np
@@ -325,7 +321,7 @@ class ConflictResolver:
                     first_article = aggregated_signal.news_articles[0]
                     article_title = first_article.title[:50] + "..." if len(first_article.title) > 50 else first_article.title
                     article_context = f" | Article: '{article_title}'"
-                
+
                 print_recommendation(f"{aggregated_signal.symbol}: {resolved.get_recommendation()} "
                                    f"(confidence: {resolved.get_confidence_level()})"
                                    f"{article_context}")
@@ -335,7 +331,7 @@ class ConflictResolver:
                     first_article = aggregated_signal.news_articles[0]
                     article_title = first_article.title[:50] + "..." if len(first_article.title) > 50 else first_article.title
                     article_context = f" | Article: '{article_title}'"
-                
+
                 print(f"[RECOMMENDATION] {aggregated_signal.symbol}: {resolved.get_recommendation()} "
                       f"(confidence: {resolved.get_confidence_level()})"
                       f"{article_context}")
@@ -634,7 +630,7 @@ class ConflictResolver:
                 feature_importance={},
                 model_version="none"
             )
-        
+
         # VALIDATION: Check XGBoost library availability
         if not HAS_XGBOOST:
             self.logger.error(f"XGBOOST LIBRARY MISSING: Cannot make prediction for {symbol}")
@@ -644,7 +640,7 @@ class ConflictResolver:
                 feature_importance={},
                 model_version="xgboost_library_missing"
             )
-            
+
         # VALIDATION: Validate input features
         if not features or len(features) == 0:
             self.logger.warning(f"NO FEATURES: Cannot make XGBoost prediction for {symbol} without features")
@@ -710,17 +706,18 @@ class ConflictResolver:
                 action = "SELL"
             else:
                 action = "HOLD"
-            
+
             # Log XGBoost decision (required business logic output)
             self.logger.info(f"XGBoost decision: {action} {symbol} (confidence: {ml_confidence:.2f})")
-            
+
             # BUSINESS LOGIC OUTPUT: XGBoost colored terminal output
             try:
                 from terminal_color_system import print_xgboost_decision
                 print_xgboost_decision(f"{action} {symbol} (confidence: {ml_confidence:.2f})")
-            except:
+            except ImportError as e:
+                self.logger.warning(f"Terminal color system unavailable: {e}")
                 print(f"[XGBOOST] {action} {symbol} (confidence: {ml_confidence:.2f})")
-            
+
             return MLDecision(
                 predicted_direction=predicted_direction,
                 ml_confidence=ml_confidence,
@@ -786,20 +783,20 @@ class ConflictResolver:
                 self.logger.error("XGBOOST NOT AVAILABLE: Cannot load trading model - install xgboost library")
                 self.xgb_model = None
                 return
-            
+
             # VALIDATION: Check model file exists and is readable
             if not os.path.exists(model_path):
                 self.logger.error(f"MODEL FILE NOT FOUND: {model_path} - XGBoost decisions unavailable")
                 self.xgb_model = None
                 return
-            
+
             # Check file size and modification time for basic validation
             file_stat = os.stat(model_path)
             if file_stat.st_size == 0:
                 self.logger.error(f"MODEL FILE EMPTY: {model_path} - corrupted model file")
                 self.xgb_model = None
                 return
-            
+
             # Try loading as sklearn XGBoost model first (for demo model)
             try:
                 import joblib
@@ -867,11 +864,11 @@ class ConflictResolver:
         """Perform comprehensive model health checks"""
         if not self.xgb_model:
             return False
-        
+
         try:
             # Test prediction with dummy data
             test_features = np.array([[0.5, 0.3, -0.2, 0.1, 0.0]]).reshape(1, -1)
-            
+
             # Try prediction based on model type
             if hasattr(self.xgb_model, 'predict_proba'):
                 # Sklearn interface
@@ -888,16 +885,16 @@ class ConflictResolver:
             else:
                 self.logger.error("Model health check failed: no prediction method available")
                 return False
-            
+
             # Check feature importance availability
             if hasattr(self.xgb_model, 'feature_importances_'):
                 importance = self.xgb_model.feature_importances_
                 if importance is None or len(importance) == 0:
                     self.logger.warning("Model health check warning: no feature importances available")
-            
+
             self.logger.info("XGBoost model passed health checks")
             return True
-            
+
         except Exception as e:
             self.logger.error(f"Model health check failed with exception: {e}")
             return False
