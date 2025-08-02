@@ -181,8 +181,24 @@ class EnhancedNewsCollectorProcess(RedisBaseProcess):
         # Validate symbol list - try to load from database if empty
         if not self.watchlist_symbols:
             try:
-                from Friren_V1.trading_engine.portfolio_manager.tools.db_utils import load_dynamic_watchlist
-                dynamic_symbols = load_dynamic_watchlist()
+                # Import from main module where load_dynamic_watchlist is actually defined
+                import sys
+                import os
+                
+                # Add project root to path to import from main
+                project_root = os.path.join(os.path.dirname(__file__), '..', '..', '..', '..')
+                project_root = os.path.abspath(project_root)
+                if project_root not in sys.path:
+                    sys.path.insert(0, project_root)
+                
+                # Import load_dynamic_watchlist from main.py
+                import main
+                
+                # Create a minimal logger for the function call
+                import logging
+                temp_logger = logging.getLogger(__name__)
+                dynamic_symbols = main.load_dynamic_watchlist(temp_logger)
+                
                 if dynamic_symbols:
                     self.watchlist_symbols = dynamic_symbols
                     print(f"News Collector: Loaded {len(self.watchlist_symbols)} symbols from database")
@@ -298,8 +314,9 @@ class EnhancedNewsCollectorProcess(RedisBaseProcess):
                     # Could trigger news collection for symbols with sentiment changes
                     return None
                 else:
-                    # Put back other message types for other processes
-                    self.priority_queue.put(message)
+                    # Put back other message types for other processes via Redis
+                    if self.redis_manager:
+                        self.redis_manager.send_message(message)
                     return None
 
             return None
@@ -633,9 +650,9 @@ class EnhancedNewsCollectorProcess(RedisBaseProcess):
                 priority=MessagePriority.HIGH if priority else MessagePriority.MEDIUM
             )
 
-            # Send to FinBERT queue
-            if self.priority_queue:
-                self.priority_queue.put(finbert_message)
+            # Send to FinBERT queue via Redis for cross-process communication
+            if self.redis_manager:
+                self.redis_manager.send_message(finbert_message)
                 self.stats['articles_sent_to_finbert'] += len(articles_for_sentiment)
 
                 self.logger.debug(f"Sent {len(articles_for_sentiment)} articles to FinBERT for {symbol}")
