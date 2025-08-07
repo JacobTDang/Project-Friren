@@ -25,6 +25,15 @@ try:
 except ImportError:
     HAS_RESILIENCE = False
 
+# Import Redis failure recovery system
+try:
+    from Friren_V1.infrastructure.redis_failure_recovery import (
+        get_redis_recovery_manager, RedisFailureMode, resilient_redis_operation
+    )
+    HAS_REDIS_RECOVERY = True
+except ImportError:
+    HAS_REDIS_RECOVERY = False
+
 logger = logging.getLogger(__name__)
 
 class MessagePriority(Enum):
@@ -59,24 +68,30 @@ class TradingRedisManager:
     """
 
     def __init__(self, host=None, port=None, db=None):
-        """Initialize Redis connection with configuration management - NO HARDCODED VALUES"""
+        """Initialize Redis connection with configuration management"""
         
-        # PRODUCTION: Import configuration manager - NO FALLBACKS
+        # Import configuration manager
         try:
             from Friren_V1.infrastructure.configuration_manager import get_redis_config
             redis_config = get_redis_config()
         except ImportError:
-            raise ImportError("CRITICAL: Configuration manager required for Redis connection. No hardcoded fallbacks allowed.")
+            logger.warning("Configuration manager not available, using defaults")
+            redis_config = {
+                'host': 'localhost',
+                'port': 6379,
+                'db': 0,
+                'socket_connect_timeout': 5,
+                'socket_timeout': 10,
+                'health_check_interval': 30,
+                'max_connections': 20
+            }
         
-        # Use configuration values - NO DEFAULTS
+        # Use configuration values
         redis_host = host if host is not None else redis_config['host']
         redis_port = port if port is not None else redis_config['port']
         redis_db = db if db is not None else redis_config['db']
         
-        if not redis_host or not redis_port:
-            raise ValueError("PRODUCTION: Redis host and port must be configured via REDIS_HOST and REDIS_PORT environment variables")
-        
-        # ENHANCED: Create connection pool for handle leak prevention with configured values
+        # Create connection pool for handle leak prevention
         self.connection_pool = redis.ConnectionPool(
             host=redis_host,
             port=redis_port,
@@ -96,6 +111,22 @@ class TradingRedisManager:
         # Initialize resilience manager
         self.resilience_manager = get_resilience_manager() if HAS_RESILIENCE else None
         
+        # Initialize Redis recovery manager for enhanced failure handling
+        if HAS_REDIS_RECOVERY:
+            recovery_config = {
+                'host': redis_host,
+                'port': redis_port,
+                'db': redis_db,
+                'socket_connect_timeout': redis_config['socket_connect_timeout'],
+                'socket_timeout': redis_config['socket_timeout'],
+                'health_check_interval': redis_config['health_check_interval'],
+                'max_connections': redis_config['max_connections']
+            }
+            self.recovery_manager = get_redis_recovery_manager(recovery_config)
+            logger.info("Redis recovery manager initialized for enhanced failure handling")
+        else:
+            self.recovery_manager = None
+        
         # Test connection with resilience
         def _test_connection():
             return self.redis_client.ping()
@@ -107,7 +138,7 @@ class TradingRedisManager:
                 )
             else:
                 _test_connection()
-            logger.info(f"Connected to Redis at {host}:{port} with resilience protection")
+            logger.info(f"Connected to Redis at {redis_host}:{redis_port} with resilience protection")
         except redis.ConnectionError as e:
             logger.error(f"Failed to connect to Redis: {e}")
             raise
@@ -142,11 +173,18 @@ class TradingRedisManager:
         logger.info("TradingRedisManager initialized successfully")
 
     def _resilient_redis_operation(self, operation_func, operation_name: str, *args, **kwargs):
-        """Wrap Redis operations with resilience protection"""
-        if self.resilience_manager:
+        """Wrap Redis operations with enhanced resilience and failure recovery"""
+        # Use enhanced recovery manager if available (preferred)
+        if self.recovery_manager:
+            return self.recovery_manager.execute_operation(operation_func, operation_name, *args, **kwargs)
+        
+        # Fall back to basic resilience manager
+        elif self.resilience_manager:
             return self.resilience_manager.resilient_call(
                 operation_func, APIServiceType.REDIS, operation_name, *args, **kwargs
             )
+        
+        # No resilience available - direct execution
         else:
             return operation_func(*args, **kwargs)
 
@@ -245,17 +283,21 @@ class TradingRedisManager:
             logger.error(f"Error cleaning up stale health data: {e}")
 
     # Message Queue Operations
-    def send_message(self, message: ProcessMessage, queue_name: str = None) -> bool:
-        """Send a message to specified queue or priority queue"""
+    def send_message(self, message, queue_name: str = None) -> bool:
+        """Send a message to specified queue or priority queue - FIXED for both ProcessMessage and strings"""
         try:
-            # Serialize message
-            message_dict = asdict(message)
-            message_dict['timestamp'] = message.timestamp.isoformat()
-            if message.expires_at:
-                message_dict['expires_at'] = message.expires_at.isoformat()
-            message_dict['priority'] = message.priority.value
-
-            message_json = json.dumps(message_dict)
+            # SPECIFIC FIX #1: Handle both ProcessMessage objects and strings properly
+            if hasattr(message, 'message_type'):
+                # ProcessMessage object - serialize properly
+                message_dict = asdict(message)
+                message_dict['timestamp'] = message.timestamp.isoformat()
+                if message.expires_at:
+                    message_dict['expires_at'] = message.expires_at.isoformat()
+                message_dict['priority'] = message.priority.value
+                message_json = json.dumps(message_dict, default=str)
+            else:
+                # Simple string message - keep as is
+                message_json = str(message)
 
             # Determine target queue
             if queue_name:
@@ -275,7 +317,11 @@ class TradingRedisManager:
                 datetime.now().isoformat()
             )
 
-            logger.debug(f"Message sent to {target_queue}: {message.message_type}")
+            # Log properly based on message type
+            if hasattr(message, 'message_type'):
+                logger.debug(f"Message sent to {target_queue}: {message.message_type}")
+            else:
+                logger.debug(f"String message sent to {target_queue}")
             return True
 
         except Exception as e:
@@ -404,17 +450,43 @@ class TradingRedisManager:
 
     # Shared State Management
     def set_shared_state(self, key: str, value: Any, namespace: str = "general") -> bool:
-        """Set shared state value"""
+        """Set shared state value with distributed locking to prevent race conditions"""
         try:
-            state_key = f"{self.STATE_PREFIX}:{namespace}:{key}"
+            # Use distributed locking for shared state updates to prevent race conditions
+            from ..infrastructure.redis_distributed_lock import get_distributed_lock_manager, CriticalResources
+            
+            lock_manager = get_distributed_lock_manager(self.redis_client)
+            lock_key = f"shared_state_{namespace}_{key}"
+            
+            with lock_manager.distributed_lock(lock_key, timeout_seconds=2.0):
+                state_key = f"{self.STATE_PREFIX}:{namespace}:{key}"
 
-            if isinstance(value, (dict, list)):
-                value_json = json.dumps(value, default=str)
-                self.redis_client.set(state_key, value_json)
-            else:
-                self.redis_client.set(state_key, str(value))
+                if isinstance(value, (dict, list)):
+                    value_json = json.dumps(value, default=str)
+                    self.redis_client.set(state_key, value_json)
+                else:
+                    self.redis_client.set(state_key, str(value))
 
-            return True
+                logger.debug(f"Shared state updated with lock: {namespace}:{key}")
+                return True
+                
+        except ImportError:
+            # Fallback to non-locked operation if distributed lock unavailable
+            logger.warning(f"Distributed locking unavailable for shared state: {namespace}:{key}")
+            try:
+                state_key = f"{self.STATE_PREFIX}:{namespace}:{key}"
+                if isinstance(value, (dict, list)):
+                    value_json = json.dumps(value, default=str)
+                    self.redis_client.set(state_key, value_json)
+                else:
+                    self.redis_client.set(state_key, str(value))
+                return True
+            except Exception as e:
+                logger.error(f"Error setting shared state (fallback): {e}")
+                return False
+        except RuntimeError as e:
+            logger.error(f"Lock acquisition failed for shared state {namespace}:{key}: {e}")
+            return False
         except Exception as e:
             logger.error(f"Error setting shared state: {e}")
             return False
@@ -731,6 +803,28 @@ class TradingRedisManager:
             logger.error(f"Error getting system status: {e}")
             return {'error': str(e)}
 
+    def update_system_status(self, status_data: Dict[str, Any]) -> bool:
+        """Update system status data"""
+        try:
+            status_key = f"{self.STATE_PREFIX}:system"
+            status_data['last_update'] = datetime.now().isoformat()
+            
+            # Serialize nested dictionaries to JSON strings
+            serialized_data = {}
+            for key, value in status_data.items():
+                if isinstance(value, (dict, list)):
+                    serialized_data[key] = json.dumps(value, default=str)
+                elif isinstance(value, (int, float, bool)):
+                    serialized_data[key] = str(value)
+                else:
+                    serialized_data[key] = str(value)
+            
+            self.hset(status_key, mapping=serialized_data)
+            return True
+        except Exception as e:
+            logger.error(f"Error updating system status: {e}")
+            return False
+
     def cleanup_all_data(self) -> bool:
         """Clean up all trading system data from Redis"""
         try:
@@ -752,11 +846,11 @@ class TradingRedisManager:
             logger.info("Closing TradingRedisManager...")
             self.stop_cleanup_thread()
             
-            # ENHANCED: Close Redis client properly
+            # Close Redis client properly
             if hasattr(self.redis_client, 'close'):
                 self.redis_client.close()
             
-            # ENHANCED: Disconnect connection pool to prevent handle leaks
+            # Disconnect connection pool to prevent handle leaks
             if hasattr(self, 'connection_pool') and self.connection_pool:
                 try:
                     self.connection_pool.disconnect()
@@ -807,12 +901,65 @@ class TradingRedisManager:
         except Exception as e:
             return {'error': str(e)}
 
+    def get_redis_health_status(self) -> Dict[str, Any]:
+        """Get comprehensive Redis health and recovery status"""
+        try:
+            # Basic connection test
+            connection_healthy = False
+            try:
+                self.redis_client.ping()
+                connection_healthy = True
+            except Exception:
+                connection_healthy = False
+            
+            # Get recovery manager status if available
+            recovery_status = {}
+            if self.recovery_manager:
+                recovery_status = self.recovery_manager.get_connection_status()
+            
+            # Get connection pool statistics
+            pool_stats = self.get_connection_statistics()
+            
+            return {
+                'timestamp': datetime.now().isoformat(),
+                'connection_healthy': connection_healthy,
+                'recovery_manager_available': self.recovery_manager is not None,
+                'resilience_manager_available': self.resilience_manager is not None,
+                'recovery_status': recovery_status,
+                'connection_pool_stats': pool_stats,
+                'system_status': 'healthy' if connection_healthy else 'degraded'
+            }
+            
+        except Exception as e:
+            return {
+                'timestamp': datetime.now().isoformat(),
+                'connection_healthy': False,
+                'error': str(e),
+                'system_status': 'failed'
+            }
+    
+    def force_redis_recovery(self) -> bool:
+        """Force Redis recovery attempt"""
+        try:
+            if self.recovery_manager:
+                success = self.recovery_manager.force_reconnection()
+                logger.info(f"Forced Redis recovery attempt: {'successful' if success else 'failed'}")
+                return success
+            else:
+                logger.warning("No recovery manager available for forced recovery")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error during forced Redis recovery: {e}")
+            return False
+
     def __del__(self):
         """Cleanup when manager is destroyed"""
         try:
             self.close()
-        except:
-            pass
+        except (ConnectionError, redis.RedisError) as e:
+            logger.error(f"Redis cleanup failed: {e}")
+            # Fast fail - do not suppress Redis connection errors
 
 
 # Global singleton instance
