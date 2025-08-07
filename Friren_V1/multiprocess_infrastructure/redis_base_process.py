@@ -80,7 +80,7 @@ class RedisBaseProcess(ABC):
         # Use environment variable with AWS t3.micro optimized default
         if memory_limit_mb is None:
             import os
-            memory_limit_mb = float(os.getenv('FRIREN_BASE_PROCESS_MEMORY_MB', '400'))
+            memory_limit_mb = float(os.getenv('FRIREN_BASE_PROCESS_MEMORY_MB', '800'))  # UPDATED: Realistic default for ML processes
         self.process_id = process_id
         self.heartbeat_interval = heartbeat_interval
         self.memory_limit_mb = memory_limit_mb
@@ -455,34 +455,53 @@ class RedisBaseProcess(ABC):
     def start(self):
         """Start the process"""
         try:
-            self.logger.info(f"Starting process {self.process_id}")
+            self.logger.critical(f"MEGA DEBUG: START() - Starting process {self.process_id}")
+            print(f"MEGA DEBUG: START() - Starting process {self.process_id}")
 
             # Initialize threading objects AFTER process spawn
+            self.logger.critical("MEGA DEBUG: START() - About to initialize threading")
             self._initialize_threading()
+            self.logger.critical("MEGA DEBUG: START() - Threading initialized")
 
             # Initialize Redis connection
+            self.logger.critical("MEGA DEBUG: START() - About to get Redis manager")
             self.redis_manager = get_trading_redis_manager()
+            self.logger.critical("MEGA DEBUG: START() - Redis manager obtained")
 
             # Setup memory monitoring
+            self.logger.critical("MEGA DEBUG: START() - About to setup memory monitoring")
             self._setup_memory_monitoring()
+            self.logger.critical("MEGA DEBUG: START() - Memory monitoring setup")
 
             # Initialize the process
+            self.logger.critical("MEGA DEBUG: START() - About to call _initialize()")
             self._initialize()
+            self.logger.critical("MEGA DEBUG: START() - _initialize() completed")
 
             # Start heartbeat thread
+            self.logger.critical("MEGA DEBUG: START() - About to start heartbeat")
             self._start_heartbeat()
+            self.logger.critical("MEGA DEBUG: START() - Heartbeat started")
 
             # Transition to running state
+            self.logger.critical("MEGA DEBUG: START() - Setting state to RUNNING")
             self.state = ProcessState.RUNNING
             self._update_health()
+            self.logger.critical("MEGA DEBUG: START() - State set to RUNNING, health updated")
 
             # Start main thread
+            self.logger.critical("MEGA DEBUG: START() - About to create main thread")
             self._main_thread = threading.Thread(target=self._main_loop, daemon=False)
+            self.logger.critical("MEGA DEBUG: START() - Main thread created, about to start")
             self._main_thread.start()
+            self.logger.critical("MEGA DEBUG: START() - Main thread started successfully")
 
-            self.logger.info(f"Process {self.process_id} started successfully")
+            self.logger.critical(f"MEGA DEBUG: START() - Process {self.process_id} started successfully")
+            print(f"MEGA DEBUG: START() - Process {self.process_id} started successfully")
 
         except Exception as e:
+            self.logger.critical(f"MEGA DEBUG: START() - ERROR starting process {self.process_id}: {e}")
+            print(f"MEGA DEBUG: START() - ERROR starting process {self.process_id}: {e}")
             self.logger.error(f"Error starting process {self.process_id}: {e}")
             self.state = ProcessState.ERROR
             self.error_count += 1
@@ -553,9 +572,9 @@ class RedisBaseProcess(ABC):
                 process = psutil.Process()
                 memory_mb = process.memory_info().rss / 1024 / 1024
                 cpu_percent = process.cpu_percent()
-            except:
-                memory_mb = 0.0
-                cpu_percent = 0.0
+            except (ImportError, psutil.NoSuchProcess, psutil.AccessDenied) as e:
+                self.logger.warning(f"Failed to get process metrics: {e}")
+                raise RuntimeError(f"Critical monitoring failure: {e}")  # Fast fail
 
             # Enhanced status for smart memory management
             # Special handling for event-driven processes (like decision_engine)
@@ -598,6 +617,8 @@ class RedisBaseProcess(ABC):
 
     def _main_loop(self):
         """Main process loop - supports both continuous and queue-aware execution"""
+        self.logger.critical(f"MEGA DEBUG: MAIN_LOOP() - Entering main loop for {self.process_id} (queue_mode: {self.queue_mode})")
+        print(f"MEGA DEBUG: MAIN_LOOP() - Entering main loop for {self.process_id} (queue_mode: {self.queue_mode})")
         self.logger.info(f"Entering main loop for {self.process_id} (queue_mode: {self.queue_mode})")
 
         try:
@@ -652,8 +673,8 @@ class RedisBaseProcess(ABC):
         # Update activity timestamp
         self.last_activity = datetime.now()
 
-        # Brief pause to prevent CPU spinning
-        time.sleep(0.1)
+        # CRITICAL FIX: Minimal pause for parallel execution
+        time.sleep(0.01)  # 10ms instead of 100ms for true parallel execution
 
     def _queue_aware_execution(self):
         """Queue-aware execution mode"""
@@ -695,8 +716,8 @@ class RedisBaseProcess(ABC):
                 # Update activity timestamp
                 self.last_activity = datetime.now()
 
-                # Brief pause between executions
-                time.sleep(0.5)
+                # CRITICAL FIX: Minimal pause for parallel execution
+                time.sleep(0.01)  # 10ms instead of 500ms for true parallel execution
 
             # Log cycle completion
             actual_time = time.time() - cycle_start
