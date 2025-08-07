@@ -95,7 +95,7 @@ class MemoryMonitor:
 
     def __init__(self,
                  process_id: str,
-                 memory_limit_mb: float = 200,   # 200MB per process (1GB total / 5 processes)
+                 memory_limit_mb: float = 800,   # UPDATED: 800MB per process (realistic for ML models)
                  check_interval: int = 30,       # Check every 30 seconds
                  history_size: int = 100,        # Keep 100 snapshots
                  cleanup_threshold: float = 0.85): # Cleanup at 85% of limit
@@ -113,9 +113,11 @@ class MemoryMonitor:
         self.last_cleanup = None
         self.cleanup_count = 0
 
-        # Leak detection
+        # Leak detection - UPDATED: ML-aware thresholds
         self.leak_detection_window = 10  # Look at last 10 snapshots
-        self.leak_threshold = 50.0  # 50MB growth = potential leak
+        self.leak_threshold = 200.0  # UPDATED: 200MB growth threshold (was 50MB) - allows for ML model loading
+        self.startup_grace_period = 300  # 5 minutes grace period for initial model loading
+        self.ml_model_load_threshold = 1000.0  # 1GB rapid growth = likely model loading, not leak
 
         # Monitoring thread
         self._stop_event = threading.Event()
@@ -134,11 +136,12 @@ class MemoryMonitor:
         self.alert_callbacks = []
         self.emergency_callbacks = []
 
-        # Process handle for detailed monitoring
+        # Process handle for detailed monitoring  
         try:
             self.process = psutil.Process()
-        except:
-            self.process = None
+        except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+            self.logger.error(f"Critical: Cannot monitor process {process_id}: {e}")
+            raise RuntimeError(f"Memory monitoring initialization failed: {e}")  # Fast fail
 
         # Enable tracemalloc for Python memory tracking
         if not tracemalloc.is_tracing():
@@ -261,7 +264,9 @@ class MemoryMonitor:
                     shared_mb = getattr(memory_full, 'shared', 0) / 1024 / 1024
                     text_mb = getattr(memory_full, 'text', 0) / 1024 / 1024
                     data_mb = getattr(memory_full, 'data', 0) / 1024 / 1024
-                except:
+                except (AttributeError, OSError) as e:
+                    # Fall back to basic memory info if extended metrics fail
+                    self.logger.debug(f"Extended memory metrics unavailable: {e}")
                     rss_mb = memory_info.rss / 1024 / 1024
                     
                     # CRITICAL FIX: Fallback also needs child process memory for main process
@@ -438,7 +443,7 @@ class MemoryMonitor:
         )
 
     def _detect_memory_leak(self) -> tuple[bool, float]:
-        """Detect if there's a memory leak based on recent snapshots"""
+        """Detect if there's a memory leak based on recent snapshots - ML-aware detection"""
         if len(self.snapshots) < self.leak_detection_window:
             return False, 0.0
 
@@ -449,6 +454,11 @@ class MemoryMonitor:
         memory_values = [s.memory_mb for s in recent_snapshots]
         time_values = [(s.timestamp - recent_snapshots[0].timestamp).total_seconds() / 60
                       for s in recent_snapshots]
+
+        # STARTUP GRACE PERIOD: Skip leak detection during initial startup
+        uptime_seconds = (datetime.now() - self.start_time).total_seconds()
+        if uptime_seconds < self.startup_grace_period:
+            return False, 0.0  # No leak detection during startup/model loading
 
         # Simple linear regression to detect trend
         n = len(memory_values)
@@ -463,8 +473,31 @@ class MemoryMonitor:
         # Calculate slope (memory growth rate per minute)
         slope = (n * sum_xy - sum_x * sum_y) / (n * sum_x2 - sum_x * sum_x)
 
-        # Leak detected if consistent growth above threshold
-        leak_detected = slope > (self.leak_threshold / self.leak_detection_window)
+        # ML-AWARE LEAK DETECTION: Distinguish between model loading and real leaks
+        total_growth = memory_values[-1] - memory_values[0]
+        time_span = time_values[-1] - time_values[0] if len(time_values) > 1 else 1
+
+        # If rapid large growth (>1GB in short time), likely model loading - not a leak
+        if total_growth > self.ml_model_load_threshold and time_span < 5:  # 1GB+ in <5 minutes
+            self.logger.info(f"Large memory growth detected ({total_growth:.1f}MB in {time_span:.1f}min) - likely ML model loading")
+            return False, 0.0
+
+        # ENHANCED THRESHOLD: Use higher threshold for consistent leak detection
+        leak_threshold_per_window = self.leak_threshold / self.leak_detection_window
+        leak_detected = slope > leak_threshold_per_window
+
+        # ADDITIONAL VALIDATION: Require sustained growth pattern, not just linear trend
+        if leak_detected:
+            # Check if growth is consistent across the window (not just a spike)
+            growth_points = 0
+            for i in range(1, len(memory_values)):
+                if memory_values[i] > memory_values[i-1]:
+                    growth_points += 1
+            
+            # Require at least 70% of measurements show growth for leak confirmation
+            consistency_threshold = 0.7
+            if growth_points / (len(memory_values) - 1) < consistency_threshold:
+                return False, 0.0  # Not consistent enough to be a real leak
 
         return leak_detected, slope if leak_detected else 0.0
 
@@ -501,16 +534,25 @@ class MemoryMonitor:
                                f"Growing at {stats.leak_rate:.2f}MB/min")
 
     def _should_auto_cleanup(self, snapshot: MemorySnapshot) -> bool:
-        """Determine if automatic cleanup should be triggered"""
+        """Determine if automatic cleanup should be triggered - ML-aware logic"""
         usage_percent = snapshot.memory_mb / self.memory_limit_mb
 
-        # Cleanup if over threshold
+        # STARTUP GRACE PERIOD: No aggressive cleanup during model loading
+        uptime_seconds = (datetime.now() - self.start_time).total_seconds()
+        if uptime_seconds < self.startup_grace_period:
+            # Only cleanup if severely over limit during startup (95% instead of 85%)
+            if usage_percent >= 0.95:
+                self.logger.info("Emergency cleanup during startup - memory usage critical")
+                return True
+            return False
+
+        # Cleanup if over threshold (normal operation)
         if usage_percent >= self.cleanup_threshold:
             return True
 
-        # Cleanup if leak detected and growing fast
+        # Cleanup if leak detected and growing fast - but with higher threshold for ML processes
         stats = self.get_memory_stats()
-        if stats.leak_detected and stats.leak_rate > 10.0:  # 10MB/min
+        if stats.leak_detected and stats.leak_rate > 50.0:  # UPDATED: 50MB/min (was 10MB/min) for ML processes
             return True
 
         return False
@@ -746,7 +788,7 @@ def memory_tracked(monitor: MemoryMonitor,
 _global_monitors: Dict[str, MemoryMonitor] = {}
 
 def get_memory_monitor(process_id: str,
-                      memory_limit_mb: float = 250,
+                      memory_limit_mb: float = 800,  # UPDATED: Realistic default for ML processes
                       auto_start: bool = True) -> MemoryMonitor:
     """Get or create a memory monitor for a process"""
     if process_id not in _global_monitors:
