@@ -156,6 +156,14 @@ class NewsCollector:
         """
         self.logger.info(f"Collecting news for {len(symbols)} watchlist symbols")
 
+        # CRITICAL FIX: Ensure news sources are initialized before collection
+        self.source_manager.ensure_sources_initialized()
+        
+        # Log available sources for debugging
+        available_sources = self.source_manager.get_available_sources()
+        self.logger.info(f"Available news sources: {available_sources}")
+        print(f"[NEWS SOURCES] Available: {available_sources}")
+
         watchlist_news = {}
 
         # Strategy: Use watchlist endpoints where available, then individual collection
