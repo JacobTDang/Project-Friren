@@ -105,7 +105,7 @@ ipcMain.handle('window-close', () => {
   mainWindow?.close();
 });
 
-// IPC handlers for trading system communication (simplified to avoid cloning issues)
+// IPC handlers for trading system communication
 ipcMain.handle('connect-trading-system', async () => {
   return 'connected';
 });
@@ -114,17 +114,30 @@ ipcMain.handle('get-system-status', async () => {
   return 'operational';
 });
 
-// Memory management - simplified to avoid cloning errors
-app.on('before-quit', () => {
-  // Simple cleanup without complex object manipulation
+// Improved shutdown handling to prevent IPC cloning errors
+app.on('before-quit', (event) => {
   try {
+    // Prevent multiple quit attempts
     if (mainWindow && !mainWindow.isDestroyed()) {
+      // Simple cleanup - avoid complex object operations
       mainWindow.webContents.removeAllListeners();
+      mainWindow = null;
     }
   } catch (error) {
-    // Ignore cleanup errors to prevent IPC cloning issues
-    console.log('Cleanup error (ignored):', error.message);
+    // Ignore all cleanup errors to prevent IPC cloning issues during forced shutdown
+    console.log('Cleanup error during shutdown (ignored):', error.message);
   }
+});
+
+// Handle forced termination more gracefully
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received, shutting down gracefully');
+  app.quit();
+});
+
+process.on('SIGINT', () => {
+  console.log('SIGINT received, shutting down gracefully');  
+  app.quit();
 });
 
 // Prevent navigation to external URLs
